@@ -1,0 +1,76 @@
+{
+  "name": "@lad/frontend-features",
+  "version": "1.0.0",
+  "description": "Frontend Feature SDK for LAD SaaS Platform",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./campaigns": {
+      "types": "./features/campaigns/index.ts",
+      "default": "./features/campaigns/index.ts"
+    },
+    "./deals-pipeline": {
+      "types": "./features/deals-pipeline/features/deals-pipeline/index.ts",
+      "default": "./features/deals-pipeline/features/deals-pipeline/index.ts"
+    },
+    "./apollo-leads": {
+      "types": "./features/apollo-leads/index.ts",
+      "default": "./features/apollo-leads/index.ts"
+    },
+    "./voice-agent": {
+      "types": "./features/voice-agent/index.ts",
+      "default": "./features/voice-agent/index.ts"
+    },
+    "./social-integration": {
+      "types": "./features/social-integration/features/social-integration/index.ts",
+      "default": "./features/social-integration/features/social-integration/index.ts"
+    },
+    "./dashboard": {
+      "types": "./features/dashboard/index.ts",
+      "default": "./features/dashboard/index.ts"
+    },
+    "./overview": {
+      "types": "./features/overview/index.ts",
+      "default": "./features/overview/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:sdk": "vitest run features/",
+    "test:sdk:campaigns": "vitest run features/campaigns/__tests__"
+  },
+  "devDependencies": {
+    "@tanstack/react-query": "^5.90.16",
+    "@testing-library/react": "^14.0.0",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "jsdom": "^27.3.0",
+    "react": "^18.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.16"
+  },
+  "peerDependencies": {
+    "@tanstack/react-query": "^5.90.16",
+    "react": "^18.0.0"
+  },
+  "keywords": [
+    "frontend",
+    "features",
+    "sdk",
+    "maya",
+    "campaigns",
+    "pipeline",
+    "voice-agent"
+  ],
+  "author": "LAD Team",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "chart.js": "^4.5.1",
+    "react-chartjs-2": "^5.3.1"
+  }
+}

@@ -1,0 +1,35 @@
+﻿# Dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# Native build output
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+.gradle/
+build/
+
+# Environment files with secrets
+.env
+.env.*
+!.env.example
+!.env.production.template
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+.codex-logs/
+.codex-web*.log
+.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
