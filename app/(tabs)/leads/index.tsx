@@ -86,16 +86,16 @@ export default function LeadsScreen() {
             </TouchableOpacity>
           ) : null}
           {lead.email ? (
-            <View style={[styles.actionButton, { backgroundColor: appTheme.softSurface }]}>
-              <Mail color={appTheme.muted} size={16} />
-              <Typography variant="caption" color={appTheme.muted} style={styles.actionText} numberOfLines={1}>Email</Typography>
-            </View>
+            <TouchableOpacity style={[styles.actionButton, { backgroundColor: appTheme.softSurface }]} onPress={() => openUrl(`mailto:${lead.email}`)}>
+              <Mail color={appTheme.primaryAccent} size={16} />
+              <Typography variant="caption" color={appTheme.primaryAccent} style={styles.actionText} numberOfLines={1}>Email</Typography>
+            </TouchableOpacity>
           ) : null}
           {lead.phone ? (
-            <View style={[styles.actionButton, { backgroundColor: appTheme.softSurface }]}>
-              <Phone color={appTheme.muted} size={16} />
-              <Typography variant="caption" color={appTheme.muted} style={styles.actionText} numberOfLines={1}>Call</Typography>
-            </View>
+            <TouchableOpacity style={[styles.actionButton, { backgroundColor: appTheme.softSurface }]} onPress={() => openUrl(`tel:${lead.phone}`)}>
+              <Phone color={appTheme.primaryAccent} size={16} />
+              <Typography variant="caption" color={appTheme.primaryAccent} style={styles.actionText} numberOfLines={1}>Call</Typography>
+            </TouchableOpacity>
           ) : null}
         </View>
       </GlassCard>

@@ -1,13 +1,14 @@
-﻿const http = require('node:http');
+const http = require('node:http');
 
 const DEFAULT_BACKEND_URL = 'https://lad-backend-develop-160078175457.us-central1.run.app';
 const DEFAULT_AUTH_BACKEND_URL = 'https://lad-backend-develop-160078175457.us-central1.run.app';
 const DEFAULT_BNI_SERVICE_URL = 'https://lad-waba-comms-develop-asia-160078175457.asia-south1.run.app';
+const DEFAULT_WAPA_SERVICE_URL = 'https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app';
 const DEFAULT_MASTER_AGENT_URL = 'https://lad-master-agent-develop-asia-160078175457.asia-south1.run.app';
 const PORT = Number(process.env.AUTH_PROXY_PORT || 8091);
 const REQUEST_TIMEOUT_MS = Number(process.env.AUTH_PROXY_TIMEOUT_MS || 300000);
 const REQUEST_RETRIES = Number(process.env.AUTH_PROXY_RETRIES || 2);
-const PROXY_VERSION = 'master-agent-prospects-v3';
+const PROXY_VERSION = 'master-agent-prospects-v4';
 
 function readEnvFile() {
   try {
@@ -184,6 +185,14 @@ const bniServiceUrl = (
   DEFAULT_BNI_SERVICE_URL
 ).replace(/\/+$/, '');
 
+const wapaServiceUrl = (
+  process.env.EXPO_PUBLIC_WAPA_SERVICE_URL ||
+  process.env.NEXT_PUBLIC_WAPA_SERVICE_URL ||
+  process.env.WAPA_SERVICE_URL ||
+  process.env.WAPA_SERVICE_INTERNAL_URL ||
+  DEFAULT_WAPA_SERVICE_URL
+).replace(/\/+$/, '');
+
 const masterAgentUrl = (
   process.env.MASTER_AGENT_URL ||
   process.env.NEXT_PUBLIC_MASTER_AGENT_URL ||
@@ -206,6 +215,7 @@ const server = http.createServer(async (req, res) => {
       authBackendUrl,
       bniServiceUrl,
       masterAgentUrl,
+      wapaServiceUrl,
       masterAgentConfigured: Boolean(masterAgentServiceToken),
       proxyVersion: PROXY_VERSION,
     });
@@ -258,8 +268,18 @@ const server = http.createServer(async (req, res) => {
       req.url === '/api/conversations' ||
       req.url.startsWith('/api/conversations?') ||
       /^\/api\/conversations\/[^/]+\/messages(?:\?|$)/.test(req.url);
+    const isThreadRoute =
+      req.url === '/api/team/workload' ||
+      req.url.startsWith('/api/team/workload?') ||
+      req.url === '/api/threads/team/workload' ||
+      req.url.startsWith('/api/threads/team/workload?') ||
+      /^\/api\/threads\/[^/]+\/(?:assignment|assign|unassign)(?:\?|$)/.test(req.url);
     const targetBackendUrl = isBniRoute
       ? bniServiceUrl
+      : isThreadRoute
+        ? channel === 'personal'
+          ? wapaServiceUrl
+          : bniServiceUrl
       : isConversationRoute
         ? channel === 'waba'
           ? bniServiceUrl
@@ -268,6 +288,18 @@ const server = http.createServer(async (req, res) => {
         ? authBackendUrl
         : backendUrl;
     let targetPath = isBniRoute ? `/api/${req.url.slice('/api/bni/'.length)}` : req.url;
+    if (isThreadRoute) {
+      const threadUrl = new URL(req.url, 'http://localhost');
+      threadUrl.searchParams.delete('channel');
+      const query = threadUrl.searchParams.toString();
+      const pathWithoutApi = threadUrl.pathname === '/api/team/workload'
+        ? '/threads/team/workload'
+        : threadUrl.pathname.replace(/^\/api/, '');
+      const resolvedThreadPath = channel === 'personal'
+        ? `/api/whatsapp-conversations${pathWithoutApi}`
+        : pathWithoutApi;
+      targetPath = `${resolvedThreadPath}${query ? `?${query}` : ''}`;
+    }
     if (isConversationRoute && channel !== 'waba') {
       const conversationPath = req.url.replace(/^\/api/, '');
       targetPath = channel === 'linkedin'
@@ -411,6 +443,8 @@ server.listen(PORT, () => {
   console.log(`Forwarding /api/* to ${backendUrl}`);
   console.log(`Forwarding /api/auth/* to ${authBackendUrl}`);
   console.log(`Forwarding /api/bni/* to ${bniServiceUrl}/api/*`);
+  console.log(`Forwarding /api/threads* to ${bniServiceUrl}/threads*`);
+  console.log(`Forwarding personal /api/threads* to ${wapaServiceUrl}/api/whatsapp-conversations/threads*`);
   console.log(`Forwarding /api/prospects* to ${masterAgentUrl}`);
 });
 

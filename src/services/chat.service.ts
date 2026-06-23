@@ -22,6 +22,7 @@ import {
   ConversationActivityPayload,
   ConversationDetail,
   ConversationPageParams,
+  CurrentUser,
   MessagePageParams,
   MessageStatus,
   NotificationPayload,
@@ -59,14 +60,68 @@ export type RawRecord = Record<string, any>;
 export type ConversationListener = (data: ApiConversation) => void;
 export type MessageListener = (message: ApiMessage) => void;
 
+export type ConversationNote = {
+  id: string;
+  content: string;
+  displayContent: string;
+  authorName?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  isInternal?: boolean;
+  raw?: RawRecord;
+};
+
+export type ConversationTeamMember = {
+  id: string;
+  name: string;
+  email?: string;
+  role?: string;
+  avatar?: string;
+  workload?: number;
+  isOnline?: boolean;
+};
+
+export type ConversationAssignmentRecord = {
+  id: string;
+  assignedToUserId?: string | null;
+  assignedByUserId?: string | null;
+  assignedAt: string;
+  raw?: RawRecord;
+};
+
+export type ConversationAssignmentHistory = {
+  current: ConversationAssignmentRecord | null;
+  history: ConversationAssignmentRecord[];
+};
+
+export type MindBodyPaymentOption = {
+  id: string;
+  name: string;
+  price?: string | null;
+  description?: string | null;
+};
+
+export type MindBodyPaymentLink = {
+  portalUrl: string;
+  options: MindBodyPaymentOption[];
+};
+
+export type MindBodyPaymentVerification = {
+  paid: boolean;
+  purchases: unknown[];
+  services: unknown[];
+};
+
 const leadSourceMessagesByConversation = new Map<string, ChatMessage[]>();
 const bniMessagesByConversation = new Map<string, ChatMessage[]>();
 const bniConversationIds = new Set<string>();
+const bniChannelByConversation = new Map<string, WhatsAppBackendChannel>();
 const linkedinConversationIds = new Set<string>();
 const emailConversationIds = new Set<string>();
 const instagramConversationIds = new Set<string>();
 const emailContactIdsByConversation = new Map<string, string>();
 const emailProvidersByConversation = new Map<string, string>();
+type WhatsAppBackendChannel = 'waba' | 'personal';
 
 const isRecord = (value: unknown): value is RawRecord =>
   Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -84,6 +139,10 @@ const getWhatsAppBackendChannel = async () => {
   const channel = storedChannel || configuredChannel || 'personal';
 
   return channel === 'waba' ? 'waba' : 'personal';
+};
+const getWhatsAppBackendChannels = async (): Promise<WhatsAppBackendChannel[]> => {
+  const preferred = await getWhatsAppBackendChannel();
+  return preferred === 'waba' ? ['waba', 'personal'] : ['personal', 'waba'];
 };
 const canUseDirectBackendFallback = () => Platform.OS !== 'web' && trimUrl(API_URL) !== trimUrl(RESOLVED_API_URL);
 
@@ -281,11 +340,19 @@ const buildExternalUrl = (baseUrl: string, path: string, options?: { params?: Re
   return url.toString();
 };
 
+const getBniWebProxyPath = (path: string) => {
+  if (path.startsWith('/api/')) {
+    return path;
+  }
+
+  return `/api${path.startsWith('/') ? path : `/${path}`}`;
+};
+
 const bniRequest = async (
   method: string,
   path: string,
   body?: unknown,
-  options?: { params?: Record<string, unknown>; backendChannel?: 'waba' | 'personal' | 'linkedin' },
+  options?: { params?: Record<string, unknown>; backendChannel?: WhatsAppBackendChannel | 'linkedin' },
 ) => {
   const token = await getAuthToken();
   const tenantId = await getEffectiveTenantId(token);
@@ -305,7 +372,7 @@ const bniRequest = async (
 
   const requestUrl =
     Platform.OS === 'web' && WEB_API_URL
-      ? buildExternalUrl(WEB_API_URL, path, { params: { ...options?.params, channel: backendChannel } })
+      ? buildExternalUrl(WEB_API_URL, getBniWebProxyPath(path), { params: { ...options?.params, channel: backendChannel } })
       : backendChannel === 'waba'
         ? buildExternalUrl(BNI_SERVICE_URL, path, options)
         : buildExternalUrl(API_URL, `/api/${backendChannel === 'linkedin' ? 'linkedin-conversations' : 'whatsapp-conversations'}${path.replace(/^\/api/, '')}`, options);
@@ -339,6 +406,18 @@ const bniRequest = async (
   }
 
   return payload;
+};
+
+const uniqueConversationsById = (items: ChatConversation[]) => {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) {
+      return false;
+    }
+
+    seen.add(item.id);
+    return true;
+  });
 };
 
 const getWithDirectFallback = async (
@@ -542,6 +621,187 @@ const getRecordPayload = (payload: unknown, keys: string[]) => {
   return undefined;
 };
 
+const getConversationBackendChannel = async (conversationId?: string): Promise<WhatsAppBackendChannel> => {
+  if (conversationId && bniChannelByConversation.has(conversationId)) {
+    return bniChannelByConversation.get(conversationId) ?? await getWhatsAppBackendChannel();
+  }
+
+  return getWhatsAppBackendChannel();
+};
+
+const stripInternalPrefix = (value: string) => value.replace(/^\s*\[internal\]\s*/i, '').trim();
+
+const normalizeConversationNote = (value: unknown, index = 0): ConversationNote | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const content = String(value.content ?? value.note ?? value.body ?? value.text ?? '').trim();
+  if (!content) {
+    return null;
+  }
+
+  const isInternal = Boolean(
+    value.is_internal ||
+      value.isInternal ||
+      value.internal ||
+      value.private ||
+      value.metadata?.is_internal ||
+      value.metadata?.visibility === 'internal' ||
+      value.visibility === 'internal' ||
+      value.note_type === 'internal' ||
+      value.type === 'internal' ||
+      /^\s*\[internal\]/i.test(content),
+  );
+
+  const authorName =
+    value.author_name ??
+    value.authorName ??
+    value.author?.name ??
+    value.created_by_name ??
+    value.createdByName;
+
+  return {
+    id: String(value.id ?? value._id ?? value.note_id ?? `note-${index}`),
+    content,
+    displayContent: isInternal ? stripInternalPrefix(content) : content,
+    authorName: authorName ? String(authorName) : undefined,
+    createdAt: value.created_at || value.createdAt || value.timestamp ? asDateString(value.created_at ?? value.createdAt ?? value.timestamp) : undefined,
+    updatedAt: value.updated_at || value.updatedAt ? asDateString(value.updated_at ?? value.updatedAt) : undefined,
+    isInternal,
+    raw: value,
+  };
+};
+
+const getNoteFromPayload = (payload: unknown): ConversationNote | null => {
+  const source = isRecord(payload)
+    ? payload.data ?? payload.note ?? payload.result ?? payload
+    : payload;
+  return normalizeConversationNote(source);
+};
+
+const normalizeTeamMember = (value: unknown, index = 0): ConversationTeamMember | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = value.user_id ?? value.userId ?? value.id ?? value._id;
+  if (!id) {
+    return null;
+  }
+
+  const name =
+    value.name ??
+    value.full_name ??
+    value.fullName ??
+    value.display_name ??
+    value.email ??
+    `Team member ${index + 1}`;
+
+  const workload = value.workload ?? value.active_count ?? value.activeCount ?? value.open_count ?? value.total_count;
+
+  return {
+    id: String(id),
+    name: String(name),
+    email: value.email ? String(value.email) : undefined,
+    role: value.role ? String(value.role) : undefined,
+    avatar: value.avatar || value.avatar_url ? String(value.avatar ?? value.avatar_url) : undefined,
+    workload: workload !== undefined && workload !== null && Number.isFinite(Number(workload)) ? Number(workload) : undefined,
+    isOnline: value.isOnline !== undefined ? Boolean(value.isOnline) : value.online !== undefined ? Boolean(value.online) : undefined,
+  };
+};
+
+const normalizeAssignmentRecord = (value: unknown, index = 0): ConversationAssignmentRecord | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const assignedToUserId =
+    value.assigned_to_user_id ??
+    value.assignedToUserId ??
+    value.assigned_to ??
+    value.assignedTo ??
+    value.user_id ??
+    value.userId;
+  const assignedByUserId =
+    value.assigned_by_user_id ??
+    value.assignedByUserId ??
+    value.assigned_by ??
+    value.assignedBy;
+
+  return {
+    id: String(value.id ?? value.assignment_id ?? `assignment-${index}`),
+    assignedToUserId: assignedToUserId ? String(assignedToUserId) : null,
+    assignedByUserId: assignedByUserId ? String(assignedByUserId) : null,
+    assignedAt: asDateString(value.assigned_at ?? value.assignedAt ?? value.created_at ?? value.createdAt),
+    raw: value,
+  };
+};
+
+const normalizeAssignmentHistory = (payload: unknown): ConversationAssignmentHistory => {
+  const record = getRecordPayload(payload, ['data', 'result', 'assignment']) ?? (isRecord(payload) ? payload : {});
+  const currentSource = record.current ?? record.current_assignment ?? record.assignment ?? null;
+  const historyItems = getArrayPayload(record, ['history', 'assignments', 'items', 'results']);
+  const history = historyItems
+    .map((item, index) => normalizeAssignmentRecord(item, index))
+    .filter((item): item is ConversationAssignmentRecord => Boolean(item));
+  const current = normalizeAssignmentRecord(currentSource) ?? history[0] ?? normalizeAssignmentRecord(record) ?? null;
+
+  return { current, history };
+};
+
+const normalizeMindBodyPaymentLink = (payload: unknown): MindBodyPaymentLink => {
+  if (isRecord(payload) && payload.success === false) {
+    throw new Error(String(payload.error ?? payload.message ?? 'Failed to load MindBody payment link'));
+  }
+
+  const record = getRecordPayload(payload, ['data', 'result', 'paymentLink']) ?? (isRecord(payload) ? payload : {});
+  const portalUrl = String(record.portal_url ?? record.portalUrl ?? record.url ?? record.payment_link ?? '').trim();
+
+  if (!portalUrl) {
+    throw new Error('MindBody payment link is not configured.');
+  }
+
+  return {
+    portalUrl,
+    options: getArrayPayload(record.options ?? record.plans ?? record.pricing ?? [], ['options', 'plans', 'items', 'results'])
+      .map((option, index) => {
+        const item = isRecord(option) ? option : {};
+        return {
+          id: String(item.id ?? item.option_id ?? item.name ?? `mindbody-option-${index}`),
+          name: String(item.name ?? item.title ?? `Plan ${index + 1}`),
+          price: item.price !== undefined && item.price !== null ? String(item.price) : null,
+          description: item.description !== undefined && item.description !== null ? String(item.description) : null,
+        };
+      }),
+  };
+};
+
+const normalizeMindBodyVerification = (payload: unknown): MindBodyPaymentVerification => {
+  if (isRecord(payload) && payload.success === false) {
+    throw new Error(String(payload.error ?? payload.message ?? 'MindBody payment verification failed'));
+  }
+
+  const record = getRecordPayload(payload, ['data', 'result']) ?? (isRecord(payload) ? payload : {});
+  const purchases = Array.isArray(record.purchases) ? record.purchases : [];
+  const services = Array.isArray(record.services) ? record.services : [];
+
+  return {
+    paid: Boolean(record.paid ?? record.payment_found ?? record.hasPayment ?? (purchases.length || services.length)),
+    purchases,
+    services,
+  };
+};
+
+const buildMindBodyPaymentMessage = (portalUrl: string) =>
+  [
+    'Here is your booking and payment link for PAD Pilates & Dance Studio.',
+    '',
+    portalUrl,
+    '',
+    "Please complete your booking through the link and let me know once you're done.",
+  ].join('\n');
+
 const getLeadConversationCandidates = (lead: RawRecord) => {
   const conversations = getArrayPayload(lead.conversations, ['conversations', 'data', 'items']);
   if (conversations.length) {
@@ -679,7 +939,7 @@ const normalizeBniMessage = (item: ApiMessage | RawRecord, fallbackConversationI
   };
 };
 
-const normalizeBniConversation = (item: RawRecord): ChatConversation | null => {
+const normalizeBniConversation = (item: RawRecord, backendChannel?: WhatsAppBackendChannel): ChatConversation | null => {
   const id = getId(item);
 
   if (!id) {
@@ -733,6 +993,7 @@ const normalizeBniConversation = (item: RawRecord): ChatConversation | null => {
       ? String(item.context_status ?? item.conversation_status ?? item.status)
       : undefined,
     messageCount: Number(item.message_count ?? item.messages_count ?? item.total_messages ?? inlineMessages.length),
+    waBackendChannel: backendChannel,
   };
 };
 
@@ -887,13 +1148,37 @@ const getConversationsFromBniSource = async (params: ConversationPageParams = {}
     requestParams.search = params.search;
   }
 
-  const payload = await bniRequest('GET', '/api/conversations', undefined, { params: requestParams });
-  const conversations = getArrayPayload(payload, ['data', 'conversations', 'items', 'results'])
-    .filter(isRecord)
-    .map((item) => normalizeBniConversation(item))
-    .filter(Boolean) as ChatConversation[];
+  const channels = await getWhatsAppBackendChannels();
+  const results = await Promise.allSettled(
+    channels.map(async (backendChannel) => {
+      const payload = await bniRequest('GET', '/api/conversations', undefined, {
+        backendChannel,
+        params: requestParams,
+      });
+      const conversations = getArrayPayload(payload, ['data', 'conversations', 'items', 'results'])
+        .filter(isRecord)
+        .map((item) => normalizeBniConversation(item, backendChannel))
+        .filter(Boolean) as ChatConversation[];
 
-  conversations.forEach((conversation) => bniConversationIds.add(conversation.id));
+      conversations.forEach((conversation) => {
+        bniConversationIds.add(conversation.id);
+        bniChannelByConversation.set(conversation.id, backendChannel);
+      });
+
+      return conversations;
+    }),
+  );
+
+  const conversations = uniqueConversationsById(
+    results.flatMap((result) => result.status === 'fulfilled' ? result.value : []),
+  );
+
+  if (!conversations.length) {
+    const firstError = results.find((result) => result.status === 'rejected');
+    if (firstError?.status === 'rejected') {
+      throw firstError.reason;
+    }
+  }
 
   return filterConversations(conversations, params);
 };
@@ -997,7 +1282,9 @@ const getConversationsFromInstagramSource = async (params: ConversationPageParam
 };
 
 const getMessagesFromBniSource = async (conversationId: string, page = 1, limit = 20) => {
+  const backendChannel = bniChannelByConversation.get(conversationId) ?? await getWhatsAppBackendChannel();
   const payload = await bniRequest('GET', `/api/conversations/${conversationId}/messages`, undefined, {
+    backendChannel,
     params: {
       limit,
       offset: Math.max(0, page - 1) * limit,
@@ -1153,7 +1440,11 @@ export const normalizeConversation = (item: ApiConversation | RawRecord): ChatCo
         lastMessageRecord.timestamp,
     ),
     unreadCount: Number(item.unreadCount ?? item.unread_count ?? item.unread ?? 0),
-    avatar: String(item.avatar ?? lead.avatar ?? lead.profileImage ?? ''),
+    avatar: (() => {
+      const url = String(item.avatar ?? lead.avatar ?? lead.profileImage ?? '');
+      if (!url) return '';
+      return url.startsWith('http') ? url : buildApiUrl(url, RESOLVED_API_URL);
+    })(),
     online: Boolean(item.online ?? item.isOnline),
     status: normalizeStatus(item.status ?? item.delivery_status ?? lastMessageRecord.delivery_status),
     tags: Array.isArray(item.tags) ? item.tags : undefined,
@@ -1175,10 +1466,11 @@ export const normalizeConversation = (item: ApiConversation | RawRecord): ChatCo
 
 export const normalizeMessage = (item: ApiMessage | RawRecord, fallbackConversationId: string): ChatMessage => {
   const senderValue = item.sender ?? item.role ?? item.direction ?? item.from;
-  const metadata = isRecord(item.metadata) ? item.metadata : {};
+  const metadataRaw = isRecord(item.metadata) ? item.metadata : (typeof item.metadata === 'string' ? (() => { try { return JSON.parse(item.metadata); } catch { return {}; } })() : {});
+  const metadata = isRecord(metadataRaw) ? metadataRaw : {};
   const senderRecord = isRecord(item.sender) ? item.sender : {};
-  const humanAgentId = item.humanAgentId ?? item.human_agent_id;
-  const senderName = item.senderName ?? item.sender_name ?? senderRecord.name;
+  const humanAgentId = item.humanAgentId ?? item.human_agent_id ?? metadata.human_agent_id;
+  const senderName = item.senderName ?? item.sender_name ?? metadata.sender_name ?? senderRecord.name;
   const sender =
     item.isOutgoing === true ||
     senderValue === 'agent' ||
@@ -1190,12 +1482,29 @@ export const normalizeMessage = (item: ApiMessage | RawRecord, fallbackConversat
         ? 'system'
         : 'lead';
 
+  const rawType = String(item.type ?? item.message_type ?? metadata.message_type ?? metadata.media_type ?? item.mediaType ?? item.media_type ?? '').toLowerCase();
+  const inferredMediaType = rawType === 'image' || rawType === 'video' || rawType === 'audio' || rawType === 'document' ? rawType : undefined;
+
+  let mediaId = metadata.media_id ?? item.media_id ?? item.mediaId ?? item.file_url ?? item.url ?? metadata.url;
+  const contentStr = String(item.content ?? item.text ?? item.body ?? item.message ?? '');
+
+  if (!mediaId && inferredMediaType && contentStr.startsWith('http')) {
+    mediaId = contentStr;
+  }
+
+  const latitude = metadata.latitude !== undefined ? Number(metadata.latitude) : (item.latitude !== undefined ? Number(item.latitude) : undefined);
+  const longitude = metadata.longitude !== undefined ? Number(metadata.longitude) : (item.longitude !== undefined ? Number(item.longitude) : undefined);
+  const locationName = metadata.location_name || item.location_name || metadata.locationAddress || item.locationAddress || undefined;
+  const locationAddress = metadata.location_address || item.location_address || undefined;
+
   return {
     id: String(item.id ?? item._id ?? item.clientId ?? `${Date.now()}-${Math.random()}`),
     conversationId: String(
       item.conversationId ?? item.conversation_id ?? item.threadId ?? item.thread_id ?? fallbackConversationId,
     ),
-    content: String(item.content ?? item.text ?? item.body ?? item.message ?? ''),
+    content: (latitude != null && longitude != null) 
+      ? `Location shared\n${locationName || 'Location'}\nhttps://maps.google.com/maps?q=${latitude},${longitude}`
+      : String(item.content ?? item.text ?? item.body ?? item.message ?? ''),
     sender,
     channel: normalizeChannel(item.channel ?? item.source ?? item.platform),
     status: normalizeStatus(
@@ -1209,7 +1518,29 @@ export const normalizeMessage = (item: ApiMessage | RawRecord, fallbackConversat
     createdAt: asDateString(item.createdAt ?? item.created_at ?? item.timestamp),
     humanAgentId: humanAgentId ? String(humanAgentId) : senderRecord.id ? String(senderRecord.id) : undefined,
     senderName: senderName ? String(senderName) : undefined,
-    attachments: Array.isArray(item.attachments) ? item.attachments : undefined,
+    mediaId: mediaId ? String(mediaId) : undefined,
+    mediaType: inferredMediaType,
+    mediaMimeType: metadata.mime_type ?? item.mime_type ?? item.content_type ?? item.media_mime_type ? String(metadata.mime_type ?? item.mime_type ?? item.content_type ?? item.media_mime_type) : undefined,
+    mediaFilename: metadata.filename ?? item.filename ?? item.media_filename ?? item.mediaFilename ? String(metadata.filename ?? item.filename ?? item.media_filename ?? item.mediaFilename) : undefined,
+    mediaCaption: metadata.caption ?? item.caption ?? item.media_caption ?? item.mediaCaption ? String(metadata.caption ?? item.caption ?? item.media_caption ?? item.mediaCaption) : undefined,
+    latitude,
+    longitude,
+    locationName,
+    locationAddress,
+    attachments: (() => {
+      const atts = Array.isArray(item.attachments) ? [...item.attachments] : [];
+      if (mediaId) {
+        const url = String(mediaId);
+        const typeStr = inferredMediaType ?? 'document';
+        atts.push({
+          id: url,
+          url: url.startsWith('http') ? url : buildApiUrl(`/api/whatsapp-conversations/conversations/media/${url}`, RESOLVED_API_URL),
+          type: typeStr === 'image' ? 'image' : typeStr === 'video' ? 'video' : 'document',
+          name: String(item.mediaFilename ?? item.media_filename ?? metadata.filename ?? metadata.media_filename ?? 'Attachment'),
+        });
+      }
+      return atts.length ? atts : undefined;
+    })(),
   };
 };
 
@@ -1472,15 +1803,19 @@ class ChatService {
     currentUser,
     humanAgentId,
     role = 'user',
+    type = 'text',
+    mediaId,
+    mediaType,
+    mediaFilename,
   }: SendMessageParams) {
     const sender = currentUser ?? { id: humanAgentId, name: 'Agent' };
     const messageText = content ?? message;
-    const payload = {
+    const payload: any = {
       conversationId,
       human_agent_id: sender.id,
       role,
       content: messageText,
-      type: 'text',
+      type,
       metadata: {
         tags: [],
         read_receipt: false,
@@ -1489,15 +1824,34 @@ class ChatService {
       message_status: 'sent',
     };
 
+    if (mediaId) {
+      payload.mediaId = mediaId;
+      payload.media_id = mediaId;
+      payload.mediaType = mediaType;
+      payload.media_type = mediaType;
+      payload.mediaFilename = mediaFilename;
+      payload.media_filename = mediaFilename;
+    }
+
     if (bniConversationIds.has(conversationId)) {
+      const bniPayload: any = {
+        type: type,
+        content: messageText,
+        human_agent_id: sender.id,
+      };
+
+      if (mediaId) {
+        bniPayload.media_id = mediaId;
+        bniPayload.media_type = mediaType;
+        bniPayload.media_filename = mediaFilename;
+        bniPayload.url = mediaId;
+      }
+
       const response = await bniRequest(
         'POST',
         `/api/conversations/${conversationId}/messages`,
-        {
-          type: 'text',
-          content: messageText,
-          human_agent_id: sender.id,
-        },
+        bniPayload,
+        { backendChannel: bniChannelByConversation.get(conversationId) },
       );
       const newMessage = (isRecord(response) ? response.data ?? response.message ?? response : response) as ApiMessage;
       const normalizedMessage = normalizeBniMessage(newMessage, conversationId);
@@ -1507,12 +1861,23 @@ class ChatService {
     }
 
     if (linkedinConversationIds.has(conversationId)) {
+      const linkedinPayload: any = {
+        type: type,
+        content: messageText,
+        human_agent_id: sender.id,
+      };
+
+      if (mediaId) {
+        linkedinPayload.media_id = mediaId;
+        linkedinPayload.media_type = mediaType;
+        linkedinPayload.media_filename = mediaFilename;
+        linkedinPayload.url = mediaId;
+      }
+
       const response = await bniRequest(
         'POST',
         `/api/conversations/${conversationId}/messages`,
-        {
-          content: messageText,
-        },
+        linkedinPayload,
         { backendChannel: 'linkedin' },
       );
       const newMessage = (isRecord(response) ? response.data ?? response.message ?? response : response) as ApiMessage;
@@ -1546,7 +1911,15 @@ class ChatService {
     }
 
     const response = await apiPost('/api/chat', payload);
-    const newMessage = (response.data as RawRecord)?.message ?? response.data as ApiMessage;
+    const rawNewMessage = (response.data as RawRecord)?.message ?? response.data as ApiMessage;
+    const newMessage = { ...rawNewMessage } as any;
+
+    if (payload.mediaId && !newMessage.media_id && !newMessage.mediaId && !(newMessage.metadata?.media_id)) {
+      newMessage.media_id = payload.mediaId;
+      newMessage.media_type = payload.mediaType;
+      newMessage.media_filename = payload.mediaFilename;
+      newMessage.media_caption = payload.mediaCaption;
+    }
 
     this.notifyMessageListeners(conversationId, newMessage);
     getSocket().emit('message:new', {
@@ -1561,13 +1934,42 @@ class ChatService {
   }
 
   async sendMessageWithAttachment(formData: FormData) {
-    const response = await apiPost('/api/messages/upload-attachment', formData);
-    return response.data;
+    const channel = formData.get('channel') || 'personal';
+    // Remove it from formData so it's not sent to the python backend if it uses a proxy that doesn't expect it inside the body
+    formData.delete('channel');
+
+    const response = await apiPost(`/api/whatsapp-conversations/conversations/upload-media?channel=${channel}`, formData);
+    
+    const data = response.data as any;
+    const mediaId = data?.media_id || data?.url;
+    const mediaType = data?.media_type || formData.get('type') || 'document';
+    const filename = data?.filename || (formData.get('file') as any)?.name || 'Attachment';
+    const conversationId = formData.get('conversationId') as string;
+
+    if (!mediaId || !conversationId) {
+      return response.data;
+    }
+
+    const payload: SendMessageParams = {
+      conversationId,
+      message: formData.get('caption') ? String(formData.get('caption')) : filename,
+      content: mediaId,
+      role: 'user',
+      type: ['image', 'video', 'audio'].includes(mediaType) ? mediaType : 'document',
+      mediaId,
+      mediaType,
+      mediaFilename: filename,
+      mediaCaption: formData.get('caption') ? String(formData.get('caption')) : undefined,
+    };
+
+    return this.sendMessage(payload);
   }
 
   async markAsRead(conversationId: string) {
     if (bniConversationIds.has(conversationId)) {
-      return bniRequest('GET', `/api/conversations/${conversationId}`);
+      return bniRequest('GET', `/api/conversations/${conversationId}`, undefined, {
+        backendChannel: bniChannelByConversation.get(conversationId),
+      });
     }
 
     const response = await apiPost(`/api/conversations/${conversationId}/read`, {});
@@ -1593,6 +1995,148 @@ class ChatService {
 
       return response.data;
     }
+  }
+
+  async getMindBodyPaymentLink() {
+    const response = await apiGet('/api/social-integration/mindbody/payment-link');
+    return normalizeMindBodyPaymentLink(response.data);
+  }
+
+  async verifyMindBodyPayment(phone: string) {
+    const response = await apiGet('/api/social-integration/mindbody/verify-payment', {
+      params: { phone },
+    });
+    return normalizeMindBodyVerification(response.data);
+  }
+
+  async sendMindBodyPaymentLinkMessage(conversationId: string, portalUrl: string, currentUser?: CurrentUser) {
+    const content = buildMindBodyPaymentMessage(portalUrl);
+    return this.sendMessage({
+      conversationId,
+      message: content,
+      content,
+      currentUser,
+      role: 'user',
+      type: 'text',
+    });
+  }
+
+  async getConversationNotes(conversationId: string) {
+    const backendChannel = await getConversationBackendChannel(conversationId);
+    const paths = backendChannel === 'waba'
+      ? [`/api/notes/conversations/${conversationId}`, `/api/conversations/${conversationId}/notes`]
+      : [`/api/conversations/${conversationId}/notes`, `/api/notes/conversations/${conversationId}`];
+    let lastError: unknown;
+
+    for (const path of paths) {
+      try {
+        const payload = await bniRequest('GET', path, undefined, { backendChannel });
+        return getArrayPayload(payload, ['data', 'notes', 'items', 'results'])
+          .map((item, index) => normalizeConversationNote(item, index))
+          .filter((item): item is ConversationNote => Boolean(item));
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('Unable to load notes.');
+  }
+
+  async createConversationNote(
+    conversationId: string,
+    content: string,
+    options: { authorName?: string; internal?: boolean } = {},
+  ) {
+    const backendChannel = await getConversationBackendChannel(conversationId);
+    const noteContent = options.internal ? `[Internal] ${content}` : content;
+    const payload = await bniRequest(
+      'POST',
+      `/api/conversations/${conversationId}/notes`,
+      {
+        content: noteContent,
+        author_name: options.authorName || 'Agent',
+        ...(options.internal ? { is_internal: true, visibility: 'internal', note_type: 'internal' } : {}),
+      },
+      { backendChannel },
+    );
+    const note = getNoteFromPayload(payload);
+
+    if (!note) {
+      throw new Error('Backend did not return the created note.');
+    }
+
+    return note;
+  }
+
+  async updateConversationNote(noteId: string, content: string, options: { internal?: boolean } = {}) {
+    const backendChannel = await getConversationBackendChannel();
+    const noteContent = options.internal ? `[Internal] ${content}` : content;
+    const payload = await bniRequest(
+      'PUT',
+      `/api/notes/${noteId}`,
+      {
+        content: noteContent,
+        ...(options.internal ? { is_internal: true, visibility: 'internal', note_type: 'internal' } : {}),
+      },
+      { backendChannel },
+    );
+    const note = getNoteFromPayload(payload);
+
+    if (!note) {
+      throw new Error('Backend did not return the updated note.');
+    }
+
+    return note;
+  }
+
+  async deleteConversationNote(noteId: string) {
+    const backendChannel = await getConversationBackendChannel();
+    return bniRequest('DELETE', `/api/notes/${noteId}`, undefined, { backendChannel });
+  }
+
+  async getConversationTeamWorkload(conversationId?: string) {
+    const backendChannel = await getConversationBackendChannel(conversationId);
+    const payload = await bniRequest('GET', '/threads/team/workload', undefined, { backendChannel });
+    return getArrayPayload(payload, ['data', 'members', 'users', 'items', 'results', 'workload'])
+      .map((item, index) => normalizeTeamMember(item, index))
+      .filter((item): item is ConversationTeamMember => Boolean(item));
+  }
+
+  async getConversationAssignment(conversationId: string) {
+    const backendChannel = await getConversationBackendChannel(conversationId);
+
+    try {
+      const payload = await bniRequest('GET', `/threads/${conversationId}/assignment`, undefined, { backendChannel });
+      return normalizeAssignmentHistory(payload);
+    } catch (error) {
+      if (error instanceof Error && /404|not found/i.test(error.message)) {
+        return { current: null, history: [] };
+      }
+
+      throw error;
+    }
+  }
+
+  async assignConversationToTeamMember(conversationId: string, userId: string) {
+    const backendChannel = await getConversationBackendChannel(conversationId);
+    const payload = await bniRequest(
+      'POST',
+      `/threads/${conversationId}/assign`,
+      { user_id: userId },
+      { backendChannel },
+    );
+    return normalizeAssignmentHistory(payload);
+  }
+
+  async unassignConversationFromTeamMember(conversationId: string) {
+    const backendChannel = await getConversationBackendChannel(conversationId);
+    const payload = await bniRequest(
+      'POST',
+      `/threads/${conversationId}/unassign`,
+      {},
+      { backendChannel },
+    );
+    return normalizeAssignmentHistory(payload);
   }
 
   getSocketStatus(): SocketStatus {
@@ -1656,6 +2200,27 @@ export const sendMessageWithAttachment = (formData: FormData) => chatService.sen
 export const markConversationReadRequest = (conversationId: string) => chatService.markAsRead(conversationId);
 export const assignConversationHandler = (conversationId: string, payload: AssignHandlerParams) =>
   chatService.assignConversationHandler(conversationId, payload);
+export const getMindBodyPaymentLink = () => chatService.getMindBodyPaymentLink();
+export const verifyMindBodyPayment = (phone: string) => chatService.verifyMindBodyPayment(phone);
+export const sendMindBodyPaymentLinkMessage = (conversationId: string, portalUrl: string, currentUser?: CurrentUser) =>
+  chatService.sendMindBodyPaymentLinkMessage(conversationId, portalUrl, currentUser);
+export const getConversationNotes = (conversationId: string) => chatService.getConversationNotes(conversationId);
+export const createConversationNote = (
+  conversationId: string,
+  content: string,
+  options?: { authorName?: string; internal?: boolean },
+) => chatService.createConversationNote(conversationId, content, options);
+export const updateConversationNote = (noteId: string, content: string, options?: { internal?: boolean }) =>
+  chatService.updateConversationNote(noteId, content, options);
+export const deleteConversationNote = (noteId: string) => chatService.deleteConversationNote(noteId);
+export const getConversationTeamWorkload = (conversationId?: string) =>
+  chatService.getConversationTeamWorkload(conversationId);
+export const getConversationAssignment = (conversationId: string) =>
+  chatService.getConversationAssignment(conversationId);
+export const assignConversationToTeamMember = (conversationId: string, userId: string) =>
+  chatService.assignConversationToTeamMember(conversationId, userId);
+export const unassignConversationFromTeamMember = (conversationId: string) =>
+  chatService.unassignConversationFromTeamMember(conversationId);
 export const uploadMessageAttachment = (formData: FormData) => chatService.sendMessageWithAttachment(formData);
 export const syncConversations = (params?: ConversationPageParams) => chatService.getConversations(params);
 

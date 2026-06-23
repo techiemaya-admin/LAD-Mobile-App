@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Settings, Shield, CreditCard, HelpCircle, LogOut, ChevronRight } from 'lucide-react-native';
+import { Settings, Shield, Link, Target, LogOut, ChevronRight, CreditCard, HelpCircle } from 'lucide-react-native';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -10,6 +10,7 @@ import { useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { useRouter } from 'expo-router';
 import useAuthStore from '@/src/store/authStore';
 import { useAppTheme } from '@/src/theme/appTheme';
+import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -32,8 +33,8 @@ export default function ProfileScreen() {
   ];
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top, backgroundColor: appTheme.background }]}>
-      <View style={styles.header}>
+    <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
+      <View style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 16 }]}>
         <Typography variant="h1" color={appTheme.text}>Profile</Typography>
       </View>
 
@@ -48,7 +49,7 @@ export default function ProfileScreen() {
           <Typography variant="h3" color={appTheme.text}>{user?.name || 'LAD User'}</Typography>
           <Typography variant="body" color={appTheme.muted}>{user?.email || 'Signed in'}</Typography>
           <View style={[styles.planBadge, { backgroundColor: appTheme.darkMode ? 'rgba(175, 194, 255, 0.16)' : Theme.colors.infoLight }]}>
-            <Typography variant="caption" color={appTheme.primaryAccent} style={{ fontWeight: '700' }}>ENTERPRISE PLAN</Typography>
+            <Typography variant="caption" color={appTheme.primaryAccent} style={{ fontWeight: '500' }}>ENTERPRISE PLAN</Typography>
           </View>
         </GlassCard>
 
@@ -79,7 +80,7 @@ export default function ProfileScreen() {
           </Typography>
         </TouchableOpacity>
       </ScrollView>
-    </View>
+    </AnimatedScreen>
   );
 }
 

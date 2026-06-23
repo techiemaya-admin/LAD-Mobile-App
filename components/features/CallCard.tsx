@@ -6,6 +6,7 @@ import { Avatar } from '@/components/ui/Avatar';
 import { Badge } from '@/components/ui/Badge';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { CallRecord } from '@/types/calls';
+import { getCallStatusDisplayMeta } from '@/src/utils/callStatus';
 import {
   Bot,
   ChevronDown,
@@ -37,20 +38,6 @@ const formatDuration = (duration: number) => {
   const minutes = Math.floor(duration / 60);
   const seconds = duration % 60;
   return `${minutes}m ${seconds}s`;
-};
-
-/** Returns a label + colour for "live" call statuses that deserve extra prominence. */
-const getActiveStatusMeta = (status: string): { label: string; color: string } | null => {
-  switch (status) {
-    case 'queued':
-      return { label: 'Queued', color: '#F59E0B' };
-    case 'ringing':
-      return { label: 'Ringing', color: '#3B82F6' };
-    case 'in_progress':
-      return { label: 'In progress', color: '#10B981' };
-    default:
-      return null;
-  }
 };
 
 /** Pulsing animated dot to indicate a live status. */
@@ -86,14 +73,11 @@ function PulsingDot({ color }: { color: string }) {
 export const CallCard: React.FC<CallCardProps> = memo(({ call, onPress }) => {
   const appTheme = useAppTheme();
   const [isSummaryOpen, setIsSummaryOpen] = useState(false);
-  const activeStatus = getActiveStatusMeta(call.callStatus);
+  const statusMeta = getCallStatusDisplayMeta(call.callStatus);
   const isManualDial = call.type === 'manual-dial';
-  const isMissedManualDial = isManualDial && (
-    call.callStatus === 'failed' ||
-    call.callStatus === 'no-answer' ||
-    call.callStatus === 'dropped'
-  );
-  const displayName = isManualDial ? 'Manual dial' : call.name;
+  const PHONE_RE = /^\+?[\d\s\-\.\(\)]{7,15}$/;
+  const nameIsPhone = PHONE_RE.test((call.name ?? '').trim());
+  const displayName = (!call.name || nameIsPhone) ? 'Manual Dial' : call.name;
 
   const renderIcon = () => {
     switch (call.type) {
@@ -102,9 +86,6 @@ export const CallCard: React.FC<CallCardProps> = memo(({ call, onPress }) => {
       case 'outgoing':
         return PhoneOutgoing ? <PhoneOutgoing size={14} color="#6366F1" /> : <Phone size={14} color="#6366F1" />;
       case 'manual-dial':
-        if (isMissedManualDial) {
-          return PhoneMissed ? <PhoneMissed size={14} color="#EF4444" /> : <Phone size={14} color="#EF4444" />;
-        }
         return PhoneOutgoing ? <PhoneOutgoing size={14} color="#0F766E" /> : <Phone size={14} color="#0F766E" />;
       case 'missed':
         return PhoneMissed ? <PhoneMissed size={14} color="#EF4444" /> : <Phone size={14} color="#EF4444" />;
@@ -119,7 +100,7 @@ export const CallCard: React.FC<CallCardProps> = memo(({ call, onPress }) => {
     switch (call.type) {
       case 'incoming': return 'Voice Call';
       case 'outgoing': return 'Voice Call';
-      case 'manual-dial': return isMissedManualDial ? 'Missed Call' : 'Voice Call';
+      case 'manual-dial': return 'Manual dial';
       case 'missed': return 'Missed Call';
       case 'video': return 'Video Call';
       default: return 'Voice Call';
@@ -130,7 +111,7 @@ export const CallCard: React.FC<CallCardProps> = memo(({ call, onPress }) => {
     <GlassCard style={styles.container}>
       <TouchableOpacity onPress={onPress} activeOpacity={0.7} style={styles.touchTarget}>
         <View style={styles.avatarContainer}>
-          <Avatar src={call.avatar} fallback={displayName[0]} size="md" />
+          <Avatar src={call.avatar} fallback={(displayName || 'C')[0]} size="md" />
           {call.statusColor && (
             <View style={[styles.statusDot, { backgroundColor: call.statusColor }]} />
           )}
@@ -165,24 +146,29 @@ export const CallCard: React.FC<CallCardProps> = memo(({ call, onPress }) => {
             </View>
           </View>
 
-          {/* Live status banner — only shown for queued / ringing / in_progress */}
-          {activeStatus ? (
-            <View style={[styles.activeStatusRow, { backgroundColor: `${activeStatus.color}14`, borderColor: `${activeStatus.color}30` }]}>
-              <PulsingDot color={activeStatus.color} />
-              <Typography variant="caption" style={[styles.activeStatusText, { color: activeStatus.color }]}>
-                {activeStatus.label}
+          <View style={styles.callMeta}>
+            <View
+              style={[
+                styles.statusBadge,
+                {
+                  backgroundColor: statusMeta.isLive ? `${statusMeta.color}14` : statusMeta.backgroundColor,
+                  borderColor: statusMeta.isLive ? `${statusMeta.color}30` : statusMeta.borderColor,
+                },
+              ]}
+            >
+              {statusMeta.isLive ? (
+                <PulsingDot color={statusMeta.color} />
+              ) : (
+                <View style={[styles.staticStatusDot, { backgroundColor: statusMeta.color }]} />
+              )}
+              <Typography variant="caption" style={[styles.activeStatusText, { color: statusMeta.color }]}>
+                {statusMeta.label}
               </Typography>
             </View>
-          ) : (
-            <View style={styles.callMeta}>
-              <Typography variant="caption" color={appTheme.muted}>
-                {call.callStatus.replace('-', ' ')}
-              </Typography>
-              <Typography variant="caption" color={appTheme.muted}>
-                Score {call.engagement_score}
-              </Typography>
-            </View>
-          )}
+            <Typography variant="caption" color={appTheme.muted}>
+              Score {call.engagement_score}
+            </Typography>
+          </View>
         </View>
       </TouchableOpacity>
 
@@ -293,14 +279,14 @@ const styles = StyleSheet.create({
   callMeta: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     marginTop: Theme.spacing.sm,
+    gap: Theme.spacing.sm,
   },
-  // Live status indicator
-  activeStatusRow: {
+  statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: Theme.spacing.sm,
     borderRadius: Theme.radius.sm,
     borderWidth: 1,
     paddingVertical: 5,
@@ -324,6 +310,11 @@ const styles = StyleSheet.create({
     borderRadius: 5,
   },
   pulsingDotInner: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  staticStatusDot: {
     width: 6,
     height: 6,
     borderRadius: 3,

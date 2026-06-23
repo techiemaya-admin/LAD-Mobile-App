@@ -1,4 +1,4 @@
-import { expireAuthSession, getAuthToken, safeStorage } from './storage';
+import { expireAuthSession, getActiveTenantId, getAuthToken } from './storage';
 import { Platform } from 'react-native';
 
 export type ApiResponse<T = unknown> = {
@@ -89,40 +89,6 @@ export const buildApiUrl = (path: string, baseURL = API_URL) => {
   return `${base}${normalizedPath}`;
 };
 
-const getTenantIdFromStoredUser = async () => {
-  const selectedTenantId = await safeStorage.getItem('selectedTenantId');
-  if (selectedTenantId && selectedTenantId !== 'default') {
-    return selectedTenantId;
-  }
-
-  for (const key of ['user', 'userData']) {
-    const rawUser = await safeStorage.getItem(key);
-    if (!rawUser) {
-      continue;
-    }
-
-    try {
-      const user = JSON.parse(rawUser) as Record<string, unknown>;
-      const tenantId =
-        user.activeTenantId ??
-        user.active_tenant_id ??
-        user.tenantId ??
-        user.tenant_id ??
-        user.organizationId ??
-        user.organization_id ??
-        user.orgId;
-
-      if (tenantId) {
-        return String(tenantId);
-      }
-    } catch {
-      // Ignore malformed cached profile data.
-    }
-  }
-
-  return null;
-};
-
 class ApiClient {
   private baseURL: string;
 
@@ -130,7 +96,23 @@ class ApiClient {
     this.baseURL = baseURL;
   }
 
-  private getBaseUrls(path: string) {
+  private getBaseUrls(path: string, options?: RequestOptions) {
+    // On mobile, route personal-whatsapp directly to WAPA service.
+    // Web app runs behind the Next.js universal feature proxy which handles this in route.ts.
+    if (Platform.OS !== 'web') {
+      if (path.startsWith('/api/personal-whatsapp/')) {
+        const wapaUrl = process.env.EXPO_PUBLIC_WAPA_SERVICE_URL || 'https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app';
+        return [wapaUrl];
+      }
+      if (path.startsWith('/api/whatsapp-conversations/')) {
+        const channel = options?.params?.channel || (options?.headers && (options.headers['x-whatsapp-channel'] || options.headers['X-WhatsApp-Channel']));
+        if (channel === 'personal') {
+          const wapaUrl = process.env.EXPO_PUBLIC_WAPA_SERVICE_URL || 'https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app';
+          return [wapaUrl];
+        }
+      }
+    }
+
     if (Platform.OS !== 'web') {
       return [path.startsWith('/api/auth/') ? RESOLVED_AUTH_API_URL : this.baseURL];
     }
@@ -169,13 +151,16 @@ class ApiClient {
       headers.Authorization = `Bearer ${token}`;
     }
 
-    const tenantId = await getTenantIdFromStoredUser();
+    // Resolve tenant from the JWT (authoritative), matching LAD-Frontend-2 which
+    // relies entirely on the token for tenant scoping. Sending a stale value from
+    // cached profile data here scoped calls/logs to the wrong tenant.
+    const tenantId = await getActiveTenantId();
     if (tenantId && !headers['X-Tenant-ID']) {
       headers['X-Tenant-ID'] = tenantId;
     }
 
     const requestBody = body ? (isFormData ? body as BodyInit : JSON.stringify(body)) : undefined;
-    const baseUrls = this.getBaseUrls(path);
+    const baseUrls = this.getBaseUrls(path, options);
     let response: Response | undefined;
     let lastNetworkError: unknown;
 

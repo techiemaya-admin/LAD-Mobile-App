@@ -14,7 +14,17 @@ import { FloatingAssistantButton } from '@/components/features/FloatingAssistant
 void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 export default function RootLayout() {
-  const queryClient = useMemo(() => new QueryClient(), []);
+  const queryClient = useMemo(() => new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: Infinity,
+        gcTime: 30 * 60 * 1000,
+        refetchOnMount: false,
+        refetchOnReconnect: false,
+        refetchOnWindowFocus: false,
+      },
+    },
+  }), []);
   const router = useRouter();
   const segments = useSegments();
   const { token, isLoading, restoreToken } = useAuthStore();

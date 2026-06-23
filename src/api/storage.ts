@@ -237,3 +237,67 @@ export async function getAuthToken() {
 
   return null;
 }
+
+// Tenant claim names the backend may embed in the JWT, in priority order.
+const TENANT_CLAIM_KEYS = [
+  'activeTenantId',
+  'active_tenant_id',
+  'tenantId',
+  'tenant_id',
+  'organizationId',
+  'organization_id',
+  'orgId',
+  'tenant',
+];
+
+const readTenantClaim = (record: Record<string, unknown>): string | null => {
+  for (const key of TENANT_CLAIM_KEYS) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return null;
+};
+
+/**
+ * Resolve the tenant id from the JWT itself.
+ *
+ * The backend (shared with LAD-Frontend-2) resolves the active tenant from the
+ * JWT — the web app sends NO X-Tenant-ID header and relies entirely on the
+ * token. Deriving the header from the JWT here guarantees the mobile app scopes
+ * every request to the SAME tenant the backend would resolve for the web app,
+ * so calls dispatch against the correct from-number pool and call logs land in
+ * the same tenant partition the web call-logs view reads. Returns null when the
+ * token carries no tenant claim, in which case we send no header (web parity).
+ */
+export const getTenantIdFromToken = (token: string | null | undefined): string | null => {
+  if (!token || token.split('.').length < 3) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(decodeBase64Url(token.split('.')[1])) as Record<string, unknown>;
+    const direct = readTenantClaim(payload);
+    if (direct) {
+      return direct;
+    }
+
+    const nested = payload.user ?? payload.profile ?? payload.account;
+    if (nested && typeof nested === 'object') {
+      return readTenantClaim(nested as Record<string, unknown>);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+export async function getActiveTenantId() {
+  const token = await getAuthToken();
+  return getTenantIdFromToken(token);
+}

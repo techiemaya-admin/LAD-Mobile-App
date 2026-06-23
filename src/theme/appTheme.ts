@@ -19,6 +19,8 @@ export const getAppTheme = (darkMode: boolean) => ({
   tabBorder: darkMode ? '#334155' : Theme.colors.border,
   tabActive: darkMode ? '#FFFFFF' : Theme.colors.primary,
   tabInactive: darkMode ? '#A7B3C7' : Theme.colors.textDisabled,
+  primarySoft: darkMode ? 'rgba(184, 199, 255, 0.18)' : 'rgba(11, 25, 87, 0.08)',
+  success: darkMode ? '#10B981' : Theme.colors.success,
   successSoft: darkMode ? 'rgba(16, 185, 129, 0.18)' : Theme.colors.successLight,
   infoSoft: darkMode ? 'rgba(59, 130, 246, 0.18)' : Theme.colors.infoLight,
   warningSoft: darkMode ? 'rgba(245, 158, 11, 0.18)' : Theme.colors.warningLight,

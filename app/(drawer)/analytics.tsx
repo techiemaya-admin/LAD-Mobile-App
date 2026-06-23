@@ -6,14 +6,18 @@ import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { AnalyticsOverview, getAnalyticsOverview, getCampaigns } from '@/src/services/settingsHub';
 import { useAppTheme } from '@/src/theme/appTheme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 
 const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
 const formatPercent = (value: number) => `${Math.round((value || 0) * 10) / 10}%`;
+const ANALYTICS_CACHE_KEY = 'drawer.analytics';
 
 export default function AnalyticsScreen() {
   const appTheme = useAppTheme();
-  const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(null);
-  const [loading, setLoading] = useState(true);
+  const insets = useSafeAreaInsets();
+  const [analytics, setAnalytics] = useState<AnalyticsOverview | null>(() => readScreenCache<AnalyticsOverview>(ANALYTICS_CACHE_KEY)?.value ?? null);
+  const [loading, setLoading] = useState(() => !readScreenCache<AnalyticsOverview>(ANALYTICS_CACHE_KEY));
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
 
@@ -29,6 +33,7 @@ export default function AnalyticsScreen() {
       const campaigns = await getCampaigns();
       const data = await getAnalyticsOverview(campaigns);
       setAnalytics(data);
+      writeScreenCache(ANALYTICS_CACHE_KEY, data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load analytics.');
     } finally {
@@ -38,8 +43,10 @@ export default function AnalyticsScreen() {
   }, []);
 
   useEffect(() => {
-    loadAnalytics();
-  }, [loadAnalytics]);
+    if (loading) {
+      loadAnalytics();
+    }
+  }, [loadAnalytics, loading]);
 
   const channelPerformance = useMemo(() => {
     const stats = analytics?.campaignStats;
@@ -71,13 +78,13 @@ export default function AnalyticsScreen() {
   return (
     <ScrollView
       style={[styles.container, { backgroundColor: appTheme.background }]}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[styles.content, { paddingTop: Theme.spacing.lg, paddingBottom: insets.bottom + 40 }]}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadAnalytics(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
     >
       <View style={styles.header}>
-        <View>
-          <Typography variant="h1">Analytics</Typography>
-          <Typography variant="body" color={appTheme.muted}>Performance metrics from LAD backend</Typography>
+        <View style={styles.headerText}>
+          <Typography variant="h1" numberOfLines={2}>Analytics</Typography>
+          <Typography variant="body" color={appTheme.muted} numberOfLines={2}>Analyze performance and engagement metrics across your workspace.</Typography>
         </View>
         <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadAnalytics(true)} disabled={refreshing || loading}>
           {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={18} />}
@@ -165,8 +172,13 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: Theme.spacing.xl,
+    alignItems: 'flex-start',
+    marginBottom: Theme.spacing.lg,
+    gap: Theme.spacing.md,
+  },
+  headerText: {
+    flex: 1,
+    minWidth: 0,
   },
   refreshButton: {
     width: 42,

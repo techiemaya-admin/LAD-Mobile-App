@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 import { Bot, CheckCircle2, ChevronDown, Phone, RefreshCw, Save } from 'lucide-react-native';
 import Theme from '@/constants/theme';
@@ -63,6 +63,8 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
   const [isNumberMenuOpen, setIsNumberMenuOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [savedSuccess, setSavedSuccess] = useState(false);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [status, setStatus] = useState('Save an agent and number here, then use Call with Agent from the dial pad.');
   const [error, setError] = useState<string | null>(null);
 
@@ -76,49 +78,49 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
     [numbers, selectedNumberId],
   );
 
-  const refreshOptions = useCallback(async () => {
+  const refreshOptions = useCallback(async (options: { force?: boolean } = {}) => {
     setIsLoading(true);
     setError(null);
 
     try {
       const saved = await loadVoiceCallConfig();
-      const options = await fetchVoiceCallOptions();
+      const voiceOptions = await fetchVoiceCallOptions({ force: options.force });
 
-      setAgents(options.agents);
-      setNumbers(options.numbers);
+      setAgents(voiceOptions.agents);
+      setNumbers(voiceOptions.numbers);
 
-      const savedIsValid = isSavedVoiceConfigAvailable(saved, options.agents, options.numbers);
-      const savedAgent = savedIsValid ? options.agents.find((agent) => agent.id === saved?.agentId) : undefined;
-      const savedNumber = savedIsValid ? options.numbers.find((number) => phoneNumbersMatch(number.phoneNumber, saved?.fromNumber)) : undefined;
+      const savedIsValid = isSavedVoiceConfigAvailable(saved, voiceOptions.agents, voiceOptions.numbers);
+      const savedAgent = savedIsValid ? voiceOptions.agents.find((agent) => agent.id === saved?.agentId) : undefined;
+      const savedNumber = savedIsValid ? voiceOptions.numbers.find((number) => phoneNumbersMatch(number.phoneNumber, saved?.fromNumber)) : undefined;
       const assignedSavedAgent = savedNumber?.assignedAgentId
-        ? options.agents.find((agent) => agent.id === savedNumber.assignedAgentId)
+        ? voiceOptions.agents.find((agent) => agent.id === savedNumber.assignedAgentId)
         : undefined;
-      const firstAgent = options.agents[0];
-      const firstNumber = options.numbers.find((number) => number.assignedAgentId === (assignedSavedAgent?.id || savedAgent?.id || firstAgent?.id)) || options.numbers[0];
+      const firstAgent = voiceOptions.agents[0];
+      const firstNumber = voiceOptions.numbers.find((number) => number.assignedAgentId === (assignedSavedAgent?.id || savedAgent?.id || firstAgent?.id)) || voiceOptions.numbers[0];
       const initialAgentId = assignedSavedAgent?.id || savedAgent?.id || firstNumber?.assignedAgentId || firstAgent?.id;
 
       const initialContext = saved?.context || DEFAULT_CONTEXT;
-      const initialAgent = initialAgentId ? options.agents.find((agent) => agent.id === initialAgentId) : undefined;
+      const initialAgent = initialAgentId ? voiceOptions.agents.find((agent) => agent.id === initialAgentId) : undefined;
 
       setSelectedAgentId(initialAgentId);
       setSelectedNumberId(savedNumber?.id || firstNumber?.id);
       setContext(initialContext);
 
       if (savedIsValid && initialAgent) {
-        setStatus('Saved setup loaded. Syncing backend starter prompt...');
-        try {
-          const syncedAgentPrompt = await syncVoiceAgentCallPrompt(initialAgent, initialContext);
-          setAgents((currentAgents) => currentAgents.map((agent) => (
-            agent.id === initialAgent.id
-              ? { ...agent, ...syncedAgentPrompt }
-              : agent
-          )));
-          setStatus('Saved and synced. The agent will speak first when the call connects.');
-        } catch (syncError) {
-          const syncMessage = syncError instanceof Error ? syncError.message : 'Could not sync backend starter prompt.';
-          setError(syncMessage);
-          setStatus('Saved setup loaded, but backend starter prompt sync failed. Tap Save Voice Call Setup to retry.');
-        }
+        setStatus('Saved!');
+        void syncVoiceAgentCallPrompt(initialAgent, initialContext)
+          .then((syncedAgentPrompt) => {
+            setAgents((currentAgents) => currentAgents.map((agent) => (
+              agent.id === initialAgent.id
+                ? { ...agent, ...syncedAgentPrompt }
+                : agent
+            )));
+            setError(null);
+          })
+          .catch((syncError) => {
+            const syncMessage = syncError instanceof Error ? syncError.message : 'Could not sync backend starter prompt.';
+            setError(syncMessage);
+          });
         return;
       }
 
@@ -151,7 +153,8 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
 
   const handleSave = useCallback(async () => {
     if (!selectedNumber) {
-      Alert.alert('Select calling number', 'Choose the verified agent number before saving.');
+      setStatus('Please select a calling number');
+      setSavedSuccess(false);
       return;
     }
 
@@ -161,7 +164,8 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
     const effectiveAgent = assignedAgent || selectedAgent;
 
     if (!effectiveAgent) {
-      Alert.alert('Select voice agent', 'Choose the AI voice agent before saving.');
+      setStatus('Please select a voice agent');
+      setSavedSuccess(false);
       return;
     }
 
@@ -169,8 +173,6 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
 
     setIsSaving(true);
     try {
-      const syncedAgentPrompt = await syncVoiceAgentCallPrompt(effectiveAgent, savedContext);
-
       await saveVoiceCallConfig({
         agentId: effectiveAgent.id,
         agentName: effectiveAgent.name,
@@ -180,20 +182,37 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
         savedAt: new Date().toISOString(),
       });
 
-      setAgents((currentAgents) => currentAgents.map((agent) => (
-        agent.id === effectiveAgent.id
-          ? { ...agent, ...syncedAgentPrompt }
-          : agent
-      )));
       setSelectedAgentId(effectiveAgent.id);
-      setStatus('Saved and synced. The agent will speak first when the call connects.');
-      Alert.alert('Voice call setup saved', 'The backend agent starter prompt was updated, so the agent should speak as soon as the call connects.');
+      setStatus('Saved!');
+      // Show inline success indicator inside the card (no blocking Alert dialog)
+      setSavedSuccess(true);
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = setTimeout(() => setSavedSuccess(false), 3000);
+
+      void syncVoiceAgentCallPrompt(effectiveAgent, savedContext)
+        .then((syncedAgentPrompt) => {
+          setAgents((currentAgents) => currentAgents.map((agent) => (
+            agent.id === effectiveAgent.id
+              ? { ...agent, ...syncedAgentPrompt }
+              : agent
+          )));
+          setError(null);
+        })
+        .catch((syncError) => {
+          const syncMessage = syncError instanceof Error ? syncError.message : 'Backend prompt sync is still pending.';
+          setError(syncMessage);
+          setStatus('Saved locally. Backend sync will retry on refresh.');
+        });
     } catch (saveError) {
-      Alert.alert('Save failed', saveError instanceof Error ? saveError.message : 'Could not save voice call setup.');
+      setStatus(saveError instanceof Error ? saveError.message : 'Save failed');
+      setSavedSuccess(false);
     } finally {
       setIsSaving(false);
     }
   }, [agents, context, selectedAgent, selectedNumber]);
+
+  // Clean up auto-hide timer on unmount
+  useEffect(() => () => { if (savedTimerRef.current) clearTimeout(savedTimerRef.current); }, []);
 
   return (
     <View style={[styles.aiPanel, { backgroundColor: palette.surface, borderColor: palette.border }]}>
@@ -209,13 +228,24 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
       </View>
 
       <View style={styles.actionRow}>
-        <TouchableOpacity style={[styles.refreshButton, { backgroundColor: palette.input, borderColor: palette.border }]} onPress={refreshOptions} activeOpacity={0.75} disabled={isLoading}>
+        <TouchableOpacity style={[styles.refreshButton, { backgroundColor: palette.input, borderColor: palette.border }]} onPress={() => void refreshOptions({ force: true })} activeOpacity={0.75} disabled={isLoading}>
           {isLoading ? <ActivityIndicator color={palette.primary} size="small" /> : <RefreshCw color={palette.primary} size={16} />}
           <Typography variant="caption" color={palette.primary} style={styles.refreshText}>Refresh</Typography>
         </TouchableOpacity>
-        <View style={[styles.savedHint, { backgroundColor: palette.input }]}>
+        <View style={[
+          styles.savedHint,
+          { backgroundColor: savedSuccess ? (darkMode ? 'rgba(16,185,129,0.15)' : '#ECFDF5') : palette.input },
+          savedSuccess && { borderWidth: 1, borderColor: '#10B981' },
+        ]}>
           <CheckCircle2 color="#10B981" size={15} />
-          <Typography variant="caption" color={palette.muted} numberOfLines={1}>{status}</Typography>
+          <Typography
+            variant="caption"
+            color={savedSuccess ? '#10B981' : palette.muted}
+            numberOfLines={1}
+            style={savedSuccess ? { fontWeight: '700' } : undefined}
+          >
+            {savedSuccess ? '✓ Saved!' : status}
+          </Typography>
         </View>
       </View>
 

@@ -97,15 +97,15 @@ export const FONTS = {
 };
 
 export const TYPOGRAPHY = {
-  h1: { fontSize: 32, fontWeight: '700' as const, lineHeight: 40, color: COLORS.text, fontFamily: FONTS.main },
-  h2: { fontSize: 24, fontWeight: '700' as const, lineHeight: 32, color: COLORS.text, fontFamily: FONTS.main },
-  h3: { fontSize: 20, fontWeight: '600' as const, lineHeight: 28, color: COLORS.text, fontFamily: FONTS.main },
-  h4: { fontSize: 18, fontWeight: '600' as const, lineHeight: 26, color: COLORS.text, fontFamily: FONTS.main },
+  h1: { fontSize: 32, fontWeight: '600' as const, lineHeight: 40, color: COLORS.text, fontFamily: FONTS.main },
+  h2: { fontSize: 24, fontWeight: '600' as const, lineHeight: 32, color: COLORS.text, fontFamily: FONTS.main },
+  h3: { fontSize: 20, fontWeight: '500' as const, lineHeight: 28, color: COLORS.text, fontFamily: FONTS.main },
+  h4: { fontSize: 18, fontWeight: '500' as const, lineHeight: 26, color: COLORS.text, fontFamily: FONTS.main },
   bodyLarge: { fontSize: 16, fontWeight: '400' as const, lineHeight: 24, color: COLORS.text, fontFamily: FONTS.main },
   body: { fontSize: 14, fontWeight: '400' as const, lineHeight: 20, color: COLORS.text, fontFamily: FONTS.main },
   bodySmall: { fontSize: 13, fontWeight: '400' as const, lineHeight: 18, color: COLORS.textSecondary, fontFamily: FONTS.main },
-  caption: { fontSize: 12, fontWeight: '500' as const, lineHeight: 16, color: COLORS.textSecondary, fontFamily: FONTS.main },
-  overline: { fontSize: 10, fontWeight: '700' as const, lineHeight: 14, textTransform: 'uppercase' as const, letterSpacing: 1, color: COLORS.textDisabled, fontFamily: FONTS.main },
+  caption: { fontSize: 12, fontWeight: '400' as const, lineHeight: 16, color: COLORS.textSecondary, fontFamily: FONTS.main },
+  overline: { fontSize: 10, fontWeight: '600' as const, lineHeight: 14, textTransform: 'uppercase' as const, letterSpacing: 0.8, color: COLORS.textDisabled, fontFamily: FONTS.main },
 };
 
 export const Theme = {

@@ -55,6 +55,7 @@ interface MobileAIAssistantState {
   searchCursor: string | null;
   seenProspectIds: string[];
   totalResults: number;
+  useSalesNav: boolean;
   isBusy: boolean;
   isSearching: boolean;
   isLoadingMore: boolean;
@@ -62,6 +63,7 @@ interface MobileAIAssistantState {
 
   hydrate: () => Promise<void>;
   setInput: (value: string) => void;
+  toggleSalesNav: () => void;
   submitMessage: (message?: string) => Promise<void>;
   chooseOption: (value: string) => Promise<void>;
   refineTargeting: () => void;
@@ -77,7 +79,7 @@ const createId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().to
 const initialMessage = (): AssistantChatMessage => ({
   id: createId('assistant'),
   role: 'assistant',
-  text: 'Tell me who you want to find. I can search LAD backend data, LinkedIn, company signals, web research, and prospect workflows from the same assistant pipeline used in LAD Frontend 2.',
+  text: 'Tell me who you want to find. I can search LAD data, LinkedIn, company signals, web research, and prospect workflows from one assistant pipeline.',
   timestamp: Date.now(),
   options: [
     { label: 'Find clinic owners in Bangalore', value: 'Find clinic owners in Bangalore' },
@@ -229,7 +231,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
         count: DEFAULT_LEAD_COUNT,
         targeting: activeIntent || undefined,
         icp_description: icpDescription,
-        useSalesNav: false,
+        useSalesNav: get().useSalesNav,
       }),
       ASSISTANT_SEARCH_TIMEOUT_MS,
       'Lead search',
@@ -259,7 +261,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
       role: 'assistant',
       text: leads.length
         ? `Found ${leads.length} lead${leads.length === 1 ? '' : 's'} from LAD Frontend 2 assistant search. ${leads.filter((lead) => (lead.score ?? 0) >= 70).length} look like strong matches.`
-        : 'I searched the LAD backend but did not find matching mobile-ready leads. Try broadening the role, industry, or location.',
+        : 'I searched LAD but did not find matching mobile-ready leads. Try broadening the role, industry, or location.',
       leads,
     });
   };
@@ -328,6 +330,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
     searchCursor: null,
     seenProspectIds: [],
     totalResults: 0,
+    useSalesNav: false,
     isBusy: false,
     isSearching: false,
     isLoadingMore: false,
@@ -357,6 +360,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
     },
 
     setInput: (value) => set({ input: value }),
+    toggleSalesNav: () => set((state) => ({ useSalesNav: !state.useSalesNav })),
 
     submitMessage: async (message) => {
       const text = (message ?? get().input).trim();
@@ -551,7 +555,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
       });
       addMessage({
         role: 'assistant',
-        text: `${summary ? `${summary}\n\n` : ''}Tell me what to change: role, industry, location, keywords, or company size. I will update the targeting and search again through the LAD backend.`,
+        text: `${summary ? `${summary}\n\n` : ''}Tell me what to change: role, industry, location, keywords, or company size. I will update the targeting and search again.`,
         options: [
           { label: 'Broaden search', value: `Find more leads like ${state.lastSearchQuery || 'this search'} with broader filters` },
           { label: 'Change location', value: `${state.lastSearchQuery || 'Find similar leads'} in Dubai` },
@@ -613,7 +617,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
         });
         const result = await createMobileAssistantCampaign(payload);
         if (result?.success === false) {
-          throw new Error(getCampaignError(result) || 'LAD backend did not create the outreach journey.');
+          throw new Error(getCampaignError(result) || 'LAD could not create the outreach journey.');
         }
         const campaignId = getCampaignId(result);
         set({
@@ -627,7 +631,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
           role: 'assistant',
           text: campaignId
             ? `Outreach journey created. Campaign ID: ${campaignId}. You can monitor it from Campaigns.`
-            : 'Outreach journey created and accepted by the LAD backend. You can monitor it from Campaigns.',
+            : 'Outreach journey created. You can monitor it from Campaigns.',
           options: [
             { label: 'Refine leads', value: 'I want to change what I am looking for' },
             { label: 'Find more leads', value: state.lastSearchQuery || 'Find more leads' },
@@ -681,6 +685,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
             targeting: state.lastTargeting || undefined,
             icp_description: state.lastIcpDescription || state.lastSearchQuery,
             filters: { cursor: state.searchCursor },
+            useSalesNav: state.useSalesNav,
           }),
           ASSISTANT_SEARCH_TIMEOUT_MS,
           'Lead search',
@@ -694,7 +699,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
       } catch (error) {
         set({
           isLoadingMore: false,
-          error: isBackendTimeout(error) ? 'The backend took too long to load more leads. Try again in a moment.' : error instanceof Error ? error.message : 'Unable to load more leads.',
+          error: isBackendTimeout(error) ? 'The search took too long to load more leads. Try again in a moment.' : error instanceof Error ? error.message : 'Unable to load more leads.',
         });
       }
     },
@@ -723,6 +728,7 @@ export const useAdvancedSearchStore = create<MobileAIAssistantState>((set, get) 
         searchCursor: null,
         seenProspectIds: [],
         totalResults: 0,
+        useSalesNav: false,
         isBusy: false,
         isSearching: false,
         isLoadingMore: false,

@@ -32,6 +32,7 @@ interface ChatState {
   conversations: Conversation[];
   activeConversationId: string | null;
   activeMessages: ChatMessage[];
+  messagesByConversationId: Record<string, ChatMessage[]>;
   isLoadingConversations: boolean;
   isLoadingMoreConversations: boolean;
   isLoadingMessages: boolean;
@@ -51,17 +52,18 @@ interface ChatState {
 
   initializeRealtime: () => void;
   fetchConnectedIntegrations: () => Promise<void>;
-  fetchConversations: () => Promise<void>;
+  fetchConversations: (options?: { force?: boolean }) => Promise<void>;
   fetchMoreConversations: () => Promise<void>;
-  syncConversations: (options?: { silent?: boolean }) => Promise<void>;
+  syncConversations: (options?: { silent?: boolean; force?: boolean }) => Promise<void>;
   startConversationAutoSync: () => void;
   stopConversationAutoSync: () => void;
-  setActiveConversation: (conversationId: string) => Promise<void>;
+  setActiveConversation: (conversationId: string, options?: { force?: boolean }) => Promise<void>;
   getOlderMessages: () => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
-  sendAttachment: (asset: AttachmentAsset) => Promise<void>;
+  sendAttachment: (asset: AttachmentAsset, caption?: string) => Promise<void>;
   sendChannelMessage: (payload: Record<string, unknown>) => Promise<void>;
   emitTypingState: (isTyping: boolean) => void;
+  clearConversationMessages: (conversationId: string) => void;
   clearActiveConversation: () => void;
   markConversationRead: (conversationId: string) => void;
   disposeRealtime: () => void;
@@ -199,6 +201,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
   activeConversationId: null,
   activeMessages: [],
+  messagesByConversationId: {},
   isLoadingConversations: false,
   isLoadingMoreConversations: false,
   isLoadingMessages: false,
@@ -281,6 +284,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           (message: ChatMessage) => message.sender === 'lead' && !isMessageFromCurrentAgent(message),
         ).length;
 
+        const nextActiveMessages = shouldAppend ? sortMessages([...state.activeMessages, ...appendedMessages]) : state.activeMessages;
+        const nextCachedMessages = shouldAppend
+          ? sortMessages([...(state.messagesByConversationId[conversationId] ?? state.activeMessages), ...appendedMessages])
+          : state.messagesByConversationId[conversationId];
+
         return {
           conversations: state.conversations.map((conversation) =>
             conversation.id === conversationId
@@ -298,7 +306,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
               : conversation
           ),
-          activeMessages: shouldAppend ? sortMessages([...state.activeMessages, ...appendedMessages]) : state.activeMessages,
+          activeMessages: nextActiveMessages,
+          messagesByConversationId: shouldAppend
+            ? { ...state.messagesByConversationId, [conversationId]: nextCachedMessages }
+            : state.messagesByConversationId,
         };
       });
     });
@@ -326,6 +337,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const hasMessage = state.activeMessages.some((item) => item.id === message.id);
         const shouldIncrementUnread = state.activeConversationId !== conversationId && !isOwnMessage;
 
+        const shouldAppendToActive = state.activeConversationId === conversationId && message.content && !hasMessage;
+        const cachedMessages = state.messagesByConversationId[conversationId] ?? [];
+        const cachedHasMessage = cachedMessages.some((item) => item.id === message.id);
+
         return {
           conversations: state.conversations.map((conversation) =>
             conversation.id === conversationId
@@ -340,10 +355,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
               : conversation
           ),
-          activeMessages:
-            state.activeConversationId === conversationId && message.content && !hasMessage
-              ? [...state.activeMessages, message]
-              : state.activeMessages,
+          activeMessages: shouldAppendToActive ? [...state.activeMessages, message] : state.activeMessages,
+          messagesByConversationId:
+            message.content && !cachedHasMessage
+              ? { ...state.messagesByConversationId, [conversationId]: [...cachedMessages, message] }
+              : state.messagesByConversationId,
         };
       });
 
@@ -376,21 +392,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
             : conversation
         );
 
+        const shouldAppendToActive = state.activeConversationId === message.conversationId && !hasMessage;
+        const cachedMessages = state.messagesByConversationId[message.conversationId] ?? [];
+        const cachedHasMessage = cachedMessages.some((item) => item.id === message.id);
+
         return {
           conversations,
-          activeMessages:
-            state.activeConversationId === message.conversationId && !hasMessage
-              ? [...state.activeMessages, message]
-              : state.activeMessages,
+          activeMessages: shouldAppendToActive ? [...state.activeMessages, message] : state.activeMessages,
+          messagesByConversationId:
+            !cachedHasMessage
+              ? { ...state.messagesByConversationId, [message.conversationId]: [...cachedMessages, message] }
+              : state.messagesByConversationId,
         };
       });
     });
 
     socket.on('message:status', (payload) => {
+      const conversationId = String(payload.conversationId ?? payload.conversation_id ?? '');
       set((state) => ({
         activeMessages: updateMessageStatus(state.activeMessages, payload),
+        messagesByConversationId: conversationId && state.messagesByConversationId[conversationId]
+          ? {
+              ...state.messagesByConversationId,
+              [conversationId]: updateMessageStatus(state.messagesByConversationId[conversationId], payload),
+            }
+          : state.messagesByConversationId,
         conversations: state.conversations.map((conversation) =>
-          conversation.id === String(payload.conversationId ?? payload.conversation_id ?? '')
+          conversation.id === conversationId
             ? { ...conversation, status: normalizeStatus(payload.status ?? payload.delivery_status) }
             : conversation
         ),
@@ -443,7 +471,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  fetchConversations: async () => {
+  fetchConversations: async (options = {}) => {
+    if (!options.force && get().conversations.length) {
+      set({ isLoadingConversations: false, error: null });
+      return;
+    }
+
     set({ isLoadingConversations: true, error: null });
     try {
       const conversations = await loadAllConversationPages();
@@ -477,6 +510,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   syncConversations: async (options = {}) => {
+    if (!options.force && get().conversations.length) {
+      if (!options.silent) {
+        set({ isSyncing: false, isLoadingConversations: false, error: null, syncError: null });
+      }
+      return;
+    }
+
     if (!options.silent) {
       set({ isSyncing: true, syncError: null, error: null });
     }
@@ -530,7 +570,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     void get().syncConversations({ silent: true });
     conversationSyncTimer = setInterval(() => {
       void get().syncConversations({ silent: true });
-    }, 30000);
+    }, 20_000); // 20 s — silent background sync, no visible spinner
   },
 
   stopConversationAutoSync: () => {
@@ -574,7 +614,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  setActiveConversation: async (conversationId) => {
+  setActiveConversation: async (conversationId, options = {}) => {
     const requestId = activeMessageRequest + 1;
     activeMessageRequest = requestId;
     const socket = getSocket();
@@ -584,19 +624,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     socket.emit('join', conversationId);
+    const cachedMessages = get().messagesByConversationId[conversationId];
+    const hasCachedMessages = Object.prototype.hasOwnProperty.call(get().messagesByConversationId, conversationId);
     set({
       activeConversationId: conversationId,
-      activeMessages: [],
-      isLoadingMessages: true,
-      hasOlderMessages: true,
+      activeMessages: hasCachedMessages && !options.force ? cachedMessages : [],
+      isLoadingMessages: options.force || !hasCachedMessages,
+      hasOlderMessages: options.force || !hasCachedMessages,
       error: null,
     });
 
     get().markConversationRead(conversationId);
 
+    if (hasCachedMessages && !options.force) {
+      return;
+    }
+
     try {
       const detail = await getConversation(conversationId).catch(() => null);
       const messages = await loadAllMessagePages(conversationId, detail?.messages ?? []);
+      const sortedMessages = sortMessages(messages);
 
       if (requestId !== activeMessageRequest) {
         return;
@@ -606,7 +653,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         conversations: detail?.conversation?.id
           ? upsertConversation(state.conversations, detail.conversation)
           : state.conversations,
-        activeMessages: sortMessages(messages),
+        activeMessages: sortedMessages,
+        messagesByConversationId: {
+          ...state.messagesByConversationId,
+          [conversationId]: sortedMessages,
+        },
         hasOlderMessages: false,
         isLoadingMessages: false,
       }));
@@ -639,6 +690,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       set((state) => ({
         activeMessages: [...sortMessages(olderMessages), ...state.activeMessages],
+        messagesByConversationId: {
+          ...state.messagesByConversationId,
+          [activeConversationId]: [...sortMessages(olderMessages), ...state.activeMessages],
+        },
         hasOlderMessages: olderMessages.length >= PAGE_SIZE,
         isLoadingOlderMessages: false,
       }));
@@ -671,6 +726,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       isSending: true,
       activeMessages: [...state.activeMessages, optimisticMessage],
+      messagesByConversationId: {
+        ...state.messagesByConversationId,
+        [activeConversationId]: [
+          ...(state.messagesByConversationId[activeConversationId] ?? state.activeMessages),
+          optimisticMessage,
+        ],
+      },
       conversations: state.conversations.map((conversation) =>
         conversation.id === activeConversationId
           ? {
@@ -698,6 +760,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         activeMessages: state.activeMessages.map((message) =>
           message.id === clientId ? { ...optimisticMessage, ...sentMessage, status: sentMessage.status ?? 'sent' } : message
         ),
+        messagesByConversationId: {
+          ...state.messagesByConversationId,
+          [activeConversationId]: (state.messagesByConversationId[activeConversationId] ?? state.activeMessages).map((message) =>
+            message.id === clientId ? { ...optimisticMessage, ...sentMessage, status: sentMessage.status ?? 'sent' } : message
+          ),
+        },
         conversations: state.conversations.map((conversation) =>
           conversation.id === activeConversationId ? { ...conversation, status: 'sent' } : conversation
         ),
@@ -708,6 +776,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         activeMessages: state.activeMessages.map((message) =>
           message.id === clientId ? { ...message, status: 'failed' } : message
         ),
+        messagesByConversationId: {
+          ...state.messagesByConversationId,
+          [activeConversationId]: (state.messagesByConversationId[activeConversationId] ?? state.activeMessages).map((message) =>
+            message.id === clientId ? { ...message, status: 'failed' } : message
+          ),
+        },
         conversations: state.conversations.map((conversation) =>
           conversation.id === activeConversationId ? { ...conversation, status: 'failed' } : conversation
         ),
@@ -716,7 +790,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendAttachment: async (asset) => {
+  sendAttachment: async (asset, caption?: string) => {
     const activeConversationId = get().activeConversationId;
     if (!activeConversationId || !asset.uri) {
       return;
@@ -727,16 +801,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const formData = new FormData();
       formData.append('conversationId', activeConversationId);
-      formData.append('type', asset.mimeType?.startsWith('image/') ? 'image' : 'document');
-      formData.append('file', {
-        uri: asset.uri,
-        name: asset.name || `attachment-${Date.now()}`,
-        type: asset.mimeType || asset.type || 'application/octet-stream',
-      } as any);
+      formData.append('channel', get().conversations.find((c) => c.id === activeConversationId)?.channel || 'personal');
+      if (caption) {
+        formData.append('caption', caption);
+      }
+      let mediaType = 'document';
+      if (asset.mimeType?.startsWith('image/')) mediaType = 'image';
+      else if (asset.mimeType?.startsWith('video/')) mediaType = 'video';
+      else if (asset.mimeType?.startsWith('audio/')) mediaType = 'audio';
+
+      formData.append('type', mediaType);
+      let fileData: any = (asset as any).file;
+
+      if (!fileData) {
+        if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+          // Web fallback: fetch blob from URI (blob: URL)
+          const response = await fetch(asset.uri);
+          const blob = await response.blob();
+          fileData = new File([blob], asset.name || `attachment-${Date.now()}`, {
+            type: asset.mimeType || asset.type || 'application/octet-stream',
+          });
+        } else {
+          // React Native format
+          fileData = {
+            uri: asset.uri,
+            name: asset.name || `attachment-${Date.now()}`,
+            type: asset.mimeType || asset.type || 'application/octet-stream',
+          };
+        }
+      }
+
+      formData.append('file', fileData);
 
       await sendMessageWithAttachment(formData);
       set({ isUploadingAttachment: false });
-      await get().setActiveConversation(activeConversationId);
+      await get().setActiveConversation(activeConversationId, { force: true });
     } catch (error) {
       set({
         isUploadingAttachment: false,
@@ -759,6 +858,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       conversationId: activeConversationId,
       conversation_id: activeConversationId,
     });
+  },
+
+  clearConversationMessages: (conversationId) => {
+    set((state) => ({
+      activeMessages: state.activeConversationId === conversationId ? [] : state.activeMessages,
+      messagesByConversationId: {
+        ...state.messagesByConversationId,
+        [conversationId]: [],
+      },
+      conversations: state.conversations.map((conversation) =>
+        conversation.id === conversationId
+          ? { ...conversation, lastMessage: 'No messages yet', unreadCount: 0 }
+          : conversation
+      ),
+    }));
   },
 
   clearActiveConversation: () => {

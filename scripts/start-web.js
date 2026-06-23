@@ -6,7 +6,7 @@ const DEFAULT_AUTH_PROXY_PORT = Number(process.env.AUTH_PROXY_PORT || 8091);
 const DEFAULT_WEB_PORT = Number(process.env.EXPO_WEB_PORT || process.env.PORT || 8083);
 const EXPO_CLI = path.join(process.cwd(), 'node_modules', 'expo', 'bin', 'cli');
 const SHOULD_CLEAR = process.argv.includes('--clear');
-const REQUIRED_PROXY_VERSION = 'master-agent-prospects-v3';
+const REQUIRED_PROXY_VERSION = 'master-agent-prospects-v4';
 
 const children = new Set();
 let shuttingDown = false;

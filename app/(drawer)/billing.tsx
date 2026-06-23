@@ -44,6 +44,8 @@ import {
   getWalletUsageAnalytics,
 } from '@/src/services/settingsHub';
 import { useAppTheme } from '@/src/theme/appTheme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 
 const VOICE_CALL_MINIMUM_CREDITS = 3;
 const WEB_INPUT_RESET = Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
@@ -63,16 +65,24 @@ const CREDIT_PRICING = [
   { title: 'Template Message', detail: 'Per saved template send', cost: '5 credits', icon: 'message' },
   { title: 'LinkedIn Connection', detail: 'Monthly connection fee', cost: '50 cr/mo', icon: 'linkedin' },
 ];
+type BillingRange = '7d' | '30d' | '90d';
+type BillingCache = {
+  billing: BillingOverview;
+  usage: BillingUsageAnalytics;
+};
+const getBillingCacheKey = (range: BillingRange) => `drawer.billing.${range}`;
 
-const formatCredits = (value: number | undefined | null, maxDigits = 4) => {
+const formatCredits = (value: number | undefined | null, maxDigits = 3) => {
   const numeric = Number(value || 0);
   if (!Number.isFinite(numeric)) {
     return '0';
   }
 
+  const fractionDigits = Number.isInteger(numeric) ? 0 : maxDigits;
+
   return numeric.toLocaleString(undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: Number.isInteger(numeric) ? 0 : maxDigits,
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
   });
 };
 
@@ -123,11 +133,12 @@ const FeatureIcon = ({ icon, color, size = 20 }: { icon: string; color: string; 
 
 export default function BillingScreen() {
   const appTheme = useAppTheme();
+  const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
-  const [billing, setBilling] = useState<BillingOverview | null>(null);
-  const [usage, setUsage] = useState<BillingUsageAnalytics>(emptyBillingUsageAnalytics());
-  const [selectedRange, setSelectedRange] = useState<'7d' | '30d' | '90d'>('30d');
-  const [loading, setLoading] = useState(true);
+  const [billing, setBilling] = useState<BillingOverview | null>(() => readScreenCache<BillingCache>(getBillingCacheKey('30d'))?.value.billing ?? null);
+  const [usage, setUsage] = useState<BillingUsageAnalytics>(() => readScreenCache<BillingCache>(getBillingCacheKey('30d'))?.value.usage ?? emptyBillingUsageAnalytics());
+  const [selectedRange, setSelectedRange] = useState<BillingRange>('30d');
+  const [loading, setLoading] = useState(() => !readScreenCache<BillingCache>(getBillingCacheKey('30d')));
   const [refreshing, setRefreshing] = useState(false);
   const [checkoutId, setCheckoutId] = useState('');
   const [checkoutAmount, setCheckoutAmount] = useState<number | null>(null);
@@ -156,12 +167,12 @@ export default function BillingScreen() {
   const isDesktop = viewportWidth >= 1024;
   const contentMaxWidth = isDesktop ? 1080 : 760;
   const contentPadding = isCompact ? Theme.spacing.md : isWide ? Theme.spacing.xxl : Theme.spacing.lg;
-  const metricTileWidth = isWide ? '23.5%' : '48%';
+  const metricTileWidth = '48%';
   const summaryTileWidth = isNarrow ? '100%' : '31.5%';
   const pricingCardWidth = isWide ? '48.7%' : '100%';
   const presetCardWidth = isCompact ? '100%' : '48%';
 
-  const loadBilling = useCallback(async (asRefresh = false, range: '7d' | '30d' | '90d' = '30d') => {
+  const loadBilling = useCallback(async (asRefresh = false, range: BillingRange = '30d') => {
     if (asRefresh) {
       setRefreshing(true);
     } else {
@@ -175,7 +186,9 @@ export default function BillingScreen() {
         getWalletUsageAnalytics(range).catch(() => null),
       ]);
       setBilling(overview);
-      setUsage(usageData || overview.usageAnalytics || emptyBillingUsageAnalytics());
+      const nextUsage = usageData || overview.usageAnalytics || emptyBillingUsageAnalytics();
+      setUsage(nextUsage);
+      writeScreenCache(getBillingCacheKey(range), { billing: overview, usage: nextUsage });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load billing data.');
     } finally {
@@ -185,6 +198,14 @@ export default function BillingScreen() {
   }, []);
 
   useEffect(() => {
+    const cached = readScreenCache<BillingCache>(getBillingCacheKey(selectedRange));
+    if (cached) {
+      setBilling(cached.value.billing);
+      setUsage(cached.value.usage);
+      setLoading(false);
+      return;
+    }
+
     void loadBilling(false, selectedRange);
   }, [loadBilling, selectedRange]);
 
@@ -282,18 +303,20 @@ export default function BillingScreen() {
           {
             maxWidth: contentMaxWidth,
             paddingHorizontal: contentPadding,
+            paddingTop: Theme.spacing.lg,
+            paddingBottom: insets.bottom + 40,
             width: '100%',
           },
         ]}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadBilling(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadBilling(true, selectedRange)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
       >
         <View style={[styles.headerRow, isCompact && styles.headerRowCompact]}>
           <View style={styles.headerText}>
-            <Typography variant="h2" color={appTheme.text}>Billing & Plans</Typography>
-            <Typography variant="bodySmall" color={appTheme.muted}>Live credits, usage, and wallet checkout</Typography>
+            <Typography variant="h2" color={appTheme.text} numberOfLines={2}>Billing & Plans</Typography>
+            <Typography variant="bodySmall" color={appTheme.muted} numberOfLines={2}>Live credits, usage, and wallet checkout</Typography>
           </View>
-          <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadBilling(true)} disabled={refreshing || loading}>
+          <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadBilling(true, selectedRange)} disabled={refreshing || loading}>
             {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={18} />}
           </TouchableOpacity>
         </View>
@@ -351,14 +374,6 @@ export default function BillingScreen() {
               <View style={[styles.divider, { backgroundColor: appTheme.borderSoft }]} />
 
               <View style={styles.metricGrid}>
-                <View style={[styles.metricTile, { width: metricTileWidth, backgroundColor: appTheme.softSurface }]}>
-                  <Typography variant="caption" color={appTheme.muted}>Available</Typography>
-                  <Typography variant="h3" color={appTheme.text} numberOfLines={1}>{formatCredits(availableCredits)}</Typography>
-                </View>
-                <View style={[styles.metricTile, { width: metricTileWidth, backgroundColor: appTheme.softSurface }]}>
-                  <Typography variant="caption" color={appTheme.muted}>Current</Typography>
-                  <Typography variant="h3" color={appTheme.text} numberOfLines={1}>{formatCredits(billing?.currentBalance)}</Typography>
-                </View>
                 <View style={[styles.metricTile, { width: metricTileWidth, backgroundColor: appTheme.softSurface }]}>
                   <Typography variant="caption" color={appTheme.muted}>Reserved</Typography>
                   <Typography variant="h3" color={appTheme.text} numberOfLines={1}>{formatCredits(billing?.reservedBalance)}</Typography>
@@ -513,7 +528,7 @@ export default function BillingScreen() {
                     </View>
                   </View>
                   <Typography variant="bodySmall" color={tx.amount < 0 ? Theme.colors.error : Theme.colors.success} style={styles.transactionAmount}>
-                    {formatMoney(tx.amount, billing.currency)}
+                    {tx.amount < 0 ? '-' : '+'}{formatCredits(Math.abs(tx.amount))} credits
                   </Typography>
                 </View>
               )) : (
@@ -646,6 +661,7 @@ const styles = StyleSheet.create({
   },
   headerText: {
     flex: 1,
+    minWidth: 0,
   },
   refreshButton: {
     width: 42,
