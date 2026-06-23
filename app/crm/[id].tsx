@@ -5,6 +5,7 @@ import {
   Modal,
   PanResponder,
   Platform,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -34,12 +35,12 @@ import {
   Camera,
   ChevronDown,
   ChevronUp,
+  EllipsisVertical,
   Move,
   Mail,
   MapPin,
   MessageCircle,
   MoonStar,
-  MoreHorizontal,
   MousePointerClick,
   Phone,
   Radio,
@@ -55,8 +56,8 @@ import {
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { connectSocket } from '@/src/services/socketService';
+import { useAppTheme } from '@/src/theme/appTheme';
 import {
-  ChannelKey,
   CrmContact,
   ProspectEvent,
   ProspectFollowup,
@@ -87,9 +88,39 @@ const T = {
   info: '#0ea5e9',
 };
 
+function useProfilePalette() {
+  const appTheme = useAppTheme();
+  return useMemo(() => ({
+    darkMode: appTheme.darkMode,
+    background: appTheme.darkMode ? '#0F172A' : '#F8F9FE',
+    surface: appTheme.surface,
+    surfaceElevated: appTheme.darkMode ? '#172033' : '#FFFFFF',
+    softSurface: appTheme.softSurface,
+    input: appTheme.input,
+    text: appTheme.text,
+    muted: appTheme.muted,
+    disabled: appTheme.disabled,
+    border: appTheme.border,
+    borderSoft: appTheme.borderSoft,
+    primary: appTheme.darkMode ? '#B8C7FF' : T.primary,
+    primaryStrong: appTheme.darkMode ? '#FFFFFF' : T.primaryHead,
+    badgeBg: appTheme.darkMode ? 'rgba(184, 199, 255, 0.16)' : T.badgeBg,
+    pillBg: appTheme.darkMode ? '#1E293B' : '#F8FAFC',
+    dangerBg: appTheme.darkMode ? 'rgba(239, 68, 68, 0.12)' : '#FFF1F2',
+    dangerBorder: appTheme.darkMode ? 'rgba(248, 113, 113, 0.34)' : '#FECDD3',
+    dangerText: appTheme.darkMode ? '#FCA5A5' : '#E11D48',
+    warningBg: appTheme.darkMode ? 'rgba(245, 158, 11, 0.14)' : '#FFFBEB',
+    warningBorder: appTheme.darkMode ? 'rgba(251, 191, 36, 0.34)' : '#FDE68A',
+    warningText: appTheme.darkMode ? '#FCD34D' : '#92400E',
+    graphCanvas: appTheme.darkMode ? '#0F172A' : '#FFFFFF',
+    overlay: appTheme.darkMode ? 'rgba(2, 6, 23, 0.72)' : 'rgba(15, 23, 42, 0.38)',
+  }), [appTheme]);
+}
+
 const CHANNELS: Record<string, { label: string; color: string; Icon: IconComponent }> = {
   linkedin: { label: 'LinkedIn', color: T.linkedin, Icon: BriefcaseBusiness },
   whatsapp: { label: 'WhatsApp', color: T.whatsapp, Icon: MessageCircle },
+  waba: { label: 'WhatsApp', color: T.whatsapp, Icon: MessageCircle },
   wapa: { label: 'Personal WA', color: T.whatsapp, Icon: MessageCircle },
   personal_whatsapp: { label: 'Personal WA', color: T.whatsapp, Icon: MessageCircle },
   email: { label: 'Email', color: T.gmail, Icon: Mail },
@@ -154,6 +185,7 @@ interface WarmPath {
   mutualConnections: Array<{ name: string; title: string; confidence: number }>;
   customerReference: { via: string; confidence: number } | null;
   accountPipeline: { company: string; otherContactsInPipeline: Array<{ name: string; title: string; stage: string }> } | null;
+  summary?: string;
   sample: boolean;
 }
 
@@ -175,8 +207,21 @@ interface GraphPos {
   y: number;
 }
 
-const SAMPLE_WARM_PATH: WarmPath = {
-  topConnection: { name: 'Anil Mehra', headline: 'Head of Partnerships, BlueBridge', confidence: 0.92 },
+const EMPTY_WARM_PATH: WarmPath = {
+  topConnection: { name: '', headline: '', confidence: 0 },
+  sharedEmployer: null,
+  mutualConnections: [],
+  customerReference: null,
+  accountPipeline: null,
+  sample: false,
+};
+
+const LAD_FRONTEND_WARM_PATH: WarmPath = {
+  topConnection: {
+    name: 'Anil Mehra',
+    headline: 'Head of Partnerships, BlueBridge',
+    confidence: 0.92,
+  },
   sharedEmployer: { company: 'Cigna MENA', overlap: '2019-2022 (3 yrs)', confidence: 0.88 },
   mutualConnections: [
     { name: 'Reem Al-Hashimi', title: 'VP Marketing, Sehha', confidence: 0.74 },
@@ -194,6 +239,11 @@ const SAMPLE_WARM_PATH: WarmPath = {
 const GRAPH_W = 720;
 const GRAPH_H = 320;
 const GRAPH_CENTER: GraphPos = { x: GRAPH_W / 2, y: 150 };
+const DEGREE_LABELS: Record<string, string> = {
+  FIRST_DEGREE: '1st-degree',
+  SECOND_DEGREE: '2nd-degree',
+  THIRD_DEGREE: '3rd-degree',
+};
 
 const asRecord = (value: unknown): Record<string, any> =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
@@ -233,6 +283,102 @@ function fmtDateTime(value?: string | null): string {
   return date.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
+function cleanText(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  if (Array.isArray(value)) return value.map(cleanText).filter(Boolean).join(', ');
+  if (typeof value === 'object') return '';
+  return String(value).trim();
+}
+
+function firstText(...values: unknown[]): string {
+  for (const value of values) {
+    const text = cleanText(value);
+    if (text) return text;
+  }
+  return '';
+}
+
+function numberOrNull(...values: unknown[]) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function normalizeNetworkDistance(value: unknown) {
+  const text = cleanText(value).toUpperCase().replace(/[\s-]+/g, '_');
+  const aliases: Record<string, string> = {
+    '1': 'FIRST_DEGREE',
+    '1ST': 'FIRST_DEGREE',
+    FIRST: 'FIRST_DEGREE',
+    FIRST_DEGREE: 'FIRST_DEGREE',
+    '2': 'SECOND_DEGREE',
+    '2ND': 'SECOND_DEGREE',
+    SECOND: 'SECOND_DEGREE',
+    SECOND_DEGREE: 'SECOND_DEGREE',
+    '3': 'THIRD_DEGREE',
+    '3RD': 'THIRD_DEGREE',
+    THIRD: 'THIRD_DEGREE',
+    THIRD_DEGREE: 'THIRD_DEGREE',
+  };
+  return aliases[text] || text;
+}
+
+function networkDegreeLabel(value: unknown) {
+  const normalized = normalizeNetworkDistance(value);
+  return DEGREE_LABELS[normalized] || titleCase(normalized);
+}
+
+function employmentItems(raw: Record<string, any>) {
+  const nested = asRecord(raw.profile || raw.person || raw.contact || raw.linkedin_profile || raw.linkedinProfile);
+  return [
+    ...asArray(raw.employment_history),
+    ...asArray(raw.employmentHistory),
+    ...asArray(raw.experience),
+    ...asArray(raw.experiences),
+    ...asArray(raw.work_experience),
+    ...asArray(raw.workExperience),
+    ...asArray(nested.employment_history),
+    ...asArray(nested.employmentHistory),
+    ...asArray(nested.experience),
+  ].map((item) => {
+    if (typeof item === 'string') return { company: item };
+    return asRecord(item);
+  }).filter((item) => Object.keys(item).length);
+}
+
+function companyNamesFromRaw(raw: Record<string, any>, contact?: CrmContact) {
+  const companies = [
+    cleanText(contact?.company),
+    cleanText(raw.company_name),
+    cleanText(raw.companyName),
+    cleanText(raw.company),
+    cleanText(raw.organization_name),
+    cleanText(raw.account_name),
+    ...asArray(raw.company_names).map(cleanText),
+    ...asArray(raw.companyNames).map(cleanText),
+    ...employmentItems(raw).map((item) => firstText(item.company, item.company_name, item.organization, item.name)),
+  ].filter(Boolean);
+  return Array.from(new Set(companies));
+}
+
+function isLinkedInBacked(raw: Record<string, any>, contact?: CrmContact) {
+  return [
+    raw.linkedin_url,
+    raw.linkedinUrl,
+    raw.linkedin,
+    raw.profile_url,
+    raw.profileUrl,
+    raw.source,
+    raw.fit_source,
+    raw.last_channel,
+    raw.profile_enrichment_source,
+    contact?.source,
+  ].some((value) => String(value || '').toLowerCase().includes('linkedin'));
+}
+
 function payloadPreview(payload?: Record<string, unknown>, eventType = 'event') {
   if (!payload || !Object.keys(payload).length) return eventType.replace(/[._]/g, ' ');
   const preview = payload.preview || payload.subject || payload.message || payload.note || payload.role || payload.round;
@@ -263,8 +409,22 @@ function engagementTemperature(contact: CrmContact, events: ProspectEvent[]) {
 }
 
 function channelMeta(channel?: string | null) {
-  const key = HEATMAP_CHANNEL[String(channel || '').toLowerCase()] || String(channel || 'system').toLowerCase();
-  return CHANNELS[key] || CHANNELS.system;
+  const normalized = String(channel || 'system').toLowerCase();
+  return CHANNELS[normalized] || CHANNELS[HEATMAP_CHANNEL[normalized]] || CHANNELS.system;
+}
+
+function lastTouchMeta(channel?: string | null) {
+  const normalized = String(channel || '').toLowerCase().replace(/\s+/g, '_');
+  const canonical = HEATMAP_CHANNEL[normalized] || normalized;
+  if (
+    canonical === 'intent' ||
+    normalized.includes('signal') ||
+    normalized.includes('intent') ||
+    normalized.includes('fit')
+  ) {
+    return CHANNELS.system;
+  }
+  return channelMeta(channel);
 }
 
 function profileImageUrl(raw: ProspectState) {
@@ -310,16 +470,99 @@ function intentSignals(raw: ProspectState) {
 function channelRollups(raw: ProspectState) {
   return Object.entries(asRecord(raw.channel_rollups)).map(([channel, rollup]) => {
     const record = asRecord(rollup);
-    const eventsByType = asRecord(record.events_by_type);
+    const eventsByType = asRecord(record.events_by_type ?? record.eventsByType);
     const count = typeof record.count === 'number'
       ? record.count
       : Object.values(eventsByType).reduce<number>((sum, value) => sum + toNumber(value), 0);
+    const topEventType = Object.entries(eventsByType)
+      .sort((a, b) => toNumber(b[1]) - toNumber(a[1]))[0]?.[0];
     return {
       channel: String(channel),
       count,
-      lastEventAt: record.last_event_at == null ? null : String(record.last_event_at),
+      eventType: firstText(record.last_event_type, record.lastEventType, record.event_type, topEventType, raw.last_event_type, 'activity'),
+      direction: firstText(record.last_direction, record.direction, 'outbound') as ProspectEvent['direction'],
+      lastEventAt: firstText(record.last_event_at, record.lastEventAt, raw.last_event_at, raw.updated_at) || null,
     };
   }).filter((item) => item.count > 0);
+}
+
+function activityWeight(event: ProspectEvent) {
+  const payload = asRecord(event.payload);
+  return Math.max(1, Math.round(toNumber(payload.rollup_count, 1)));
+}
+
+function eventTime(event: ProspectEvent) {
+  const time = new Date(event.occurred_at).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function resolveProfileActivity(contact: CrmContact, events: ProspectEvent[]) {
+  const normalizedEvents = events
+    .filter((event) => event?.occurred_at)
+    .map((event, index) => ({
+      ...event,
+      seq: typeof event.seq === 'number' ? event.seq : index,
+      channel: String(event.channel || 'system'),
+      event_type: String(event.event_type || 'activity'),
+      direction: event.direction || 'system',
+      payload: asRecord(event.payload),
+    }))
+    .sort((a, b) => eventTime(b) - eventTime(a));
+  const realCountsByChannel = normalizedEvents.reduce<Record<string, number>>((acc, event) => {
+    const channel = HEATMAP_CHANNEL[String(event.channel).toLowerCase()] || 'intent';
+    acc[channel] = (acc[channel] || 0) + activityWeight(event);
+    return acc;
+  }, {});
+  const rollupEvents = channelRollups(contact.raw)
+    .filter((rollup) => rollup.lastEventAt)
+    .map((rollup) => {
+      const channel = HEATMAP_CHANNEL[String(rollup.channel).toLowerCase()] || 'intent';
+      return { ...rollup, remainingCount: Math.max(0, rollup.count - (realCountsByChannel[channel] || 0)) };
+    })
+    .filter((rollup) => rollup.remainingCount > 0)
+    .map((rollup, index) => ({
+      id: `${contact.id}-rollup-${rollup.channel}`,
+      seq: -1000 - index,
+      prospect_id: contact.id,
+      channel: rollup.channel,
+      event_type: rollup.eventType,
+      direction: rollup.direction || 'outbound',
+      payload: {
+        rollup_count: rollup.remainingCount,
+        preview: `${channelMeta(rollup.channel).label} activity from backend rollup`,
+      },
+      occurred_at: String(rollup.lastEventAt),
+    } as ProspectEvent));
+  const hasActivity = normalizedEvents.length || rollupEvents.length;
+  const rawFallback = !hasActivity && contact.lastActivityAt
+    ? [{
+      id: `${contact.id}-last-touch`,
+      seq: -1,
+      prospect_id: contact.id,
+      channel: String(contact.raw.last_channel || 'system'),
+      event_type: String(contact.raw.last_event_type || 'activity'),
+      direction: 'outbound',
+      payload: { preview: 'Last backend activity' },
+      occurred_at: contact.lastActivityAt,
+    } as ProspectEvent]
+    : [];
+  return [...normalizedEvents, ...rollupEvents, ...rawFallback].sort((a, b) => eventTime(b) - eventTime(a));
+}
+
+function resolveLastTouch(contact: CrmContact, activity: ProspectEvent[]) {
+  const latest = activity[0];
+  if (latest) {
+    return {
+      channel: String(latest.channel || contact.raw.last_channel || 'system'),
+      occurredAt: latest.occurred_at || contact.lastActivityAt,
+      direction: latest.direction || contact.raw.last_event_type || 'system',
+    };
+  }
+  return {
+    channel: String(contact.raw.last_channel || 'system'),
+    occurredAt: contact.lastActivityAt,
+    direction: contact.raw.last_event_type || 'system',
+  };
 }
 
 function buildWarmPath(contact: CrmContact): WarmPath {
@@ -327,18 +570,6 @@ function buildWarmPath(contact: CrmContact): WarmPath {
   const root = asRecord(raw.warm_path || raw.warmPath || raw.relationship_graph || raw.relationships);
   const topRecord = asRecord(root.top_connection || root.topConnection || raw.top_connection || raw.warm_path_contact);
   const topName = String(topRecord.name || raw.warm_path_name || raw.intro_contact_name || '').trim();
-
-  if (!topName) {
-    return {
-      ...SAMPLE_WARM_PATH,
-      accountPipeline: {
-        ...SAMPLE_WARM_PATH.accountPipeline!,
-        company: contact.company || SAMPLE_WARM_PATH.accountPipeline!.company,
-      },
-      sample: true,
-    };
-  }
-
   const shared = asRecord(root.shared_employer || root.sharedEmployer || raw.shared_employer);
   const customer = asRecord(root.customer_reference || root.customerReference || raw.customer_reference);
   const account = asRecord(root.account_pipeline || root.accountPipeline || raw.account_pipeline);
@@ -352,41 +583,47 @@ function buildWarmPath(contact: CrmContact): WarmPath {
       };
     });
 
-  return {
-    topConnection: {
-      name: topName,
-      headline: String(topRecord.headline || topRecord.title || topRecord.company || 'Warm connection'),
-      confidence: toNumber(topRecord.confidence, 0.8),
-    },
-    sharedEmployer: shared.company ? {
-      company: String(shared.company),
-      overlap: String(shared.overlap || shared.years || 'shared history'),
-      confidence: toNumber(shared.confidence, 0.75),
-    } : null,
-    mutualConnections: mutuals,
-    customerReference: customer.via ? { via: String(customer.via), confidence: toNumber(customer.confidence, 0.75) } : null,
-    accountPipeline: account.company ? {
-      company: String(account.company),
-      otherContactsInPipeline: asArray(account.other_contacts_in_pipeline || account.otherContactsInPipeline).map((item) => {
-        const record = asRecord(item);
-        return {
-          name: String(record.name || record.full_name || 'Contact'),
-          title: String(record.title || record.job_title || ''),
-          stage: String(record.stage || 'new'),
-        };
-      }),
-    } : null,
-    sample: false,
-  };
+  if (topName) {
+    return {
+      topConnection: {
+        name: topName,
+        headline: String(topRecord.headline || topRecord.title || topRecord.company || 'Warm connection'),
+        confidence: toNumber(topRecord.confidence, 0.8),
+      },
+      sharedEmployer: shared.company ? {
+        company: String(shared.company),
+        overlap: String(shared.overlap || shared.years || 'shared history'),
+        confidence: toNumber(shared.confidence, 0.75),
+      } : null,
+      mutualConnections: mutuals,
+      customerReference: customer.via ? { via: String(customer.via), confidence: toNumber(customer.confidence, 0.75) } : null,
+      accountPipeline: account.company ? {
+        company: String(account.company),
+        otherContactsInPipeline: asArray(account.other_contacts_in_pipeline || account.otherContactsInPipeline).map((item) => {
+          const record = asRecord(item);
+          return {
+            name: String(record.name || record.full_name || 'Contact'),
+            title: String(record.title || record.job_title || ''),
+            stage: String(record.stage || 'new'),
+          };
+        }),
+      } : null,
+      sample: false,
+    };
+  }
+
+  return LAD_FRONTEND_WARM_PATH;
 }
 
 export default function CrmProfileScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ id?: string | string[] }>();
+  const params = useLocalSearchParams<{ id?: string | string[]; source?: string | string[] }>();
   const insets = useSafeAreaInsets();
+  const palette = useProfilePalette();
   const { width, height } = useWindowDimensions();
   const id = Array.isArray(params.id) ? params.id[0] : params.id;
-  const isCompact = width < 840;
+  const source = Array.isArray(params.source) ? params.source[0] : params.source;
+  const isCompact = width < 1024;
   const isPhone = width < 520;
   const pagePadding = isPhone ? Theme.spacing.lg : Theme.spacing.xl;
   const contentMaxWidth = width >= 1180 ? 1280 : undefined;
@@ -400,6 +637,7 @@ export default function CrmProfileScreen() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [graphVisible, setGraphVisible] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const enrichTriggered = useRef(false);
 
   const loadProfile = useCallback(async (asRefresh = false) => {
@@ -409,8 +647,8 @@ export default function CrmProfileScreen() {
     setError(null);
     try {
       const [prospect, nextEvents, nextFollowups] = await Promise.all([
-        getProspect(id),
-        listProspectEvents(id, { limit: 100 }).catch(() => []),
+        getProspect(id, { source }),
+        listProspectEvents(id, { limit: 100, source }).catch(() => []),
         getProspectFollowups(id).catch(() => []),
       ]);
       setContact(toCrmContact(prospect));
@@ -422,7 +660,7 @@ export default function CrmProfileScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [id]);
+  }, [id, source]);
 
   useEffect(() => {
     void loadProfile();
@@ -439,14 +677,35 @@ export default function CrmProfileScreen() {
     let socket: ReturnType<typeof connectSocket> | null = null;
     try {
       socket = connectSocket();
-      const refresh = (payload?: unknown) => {
-        const record = asRecord(payload);
-        const eventId = String(record.id || record.prospect_id || record.prospectId || '');
-        if (!eventId || eventId === id) void loadProfile(true);
-      };
-      LIVE_EVENTS.forEach((event) => socket?.on(event, refresh));
+      const listeners = LIVE_EVENTS.map((event) => ({
+        event,
+        refresh: (payload?: unknown) => {
+          const record = asRecord(payload);
+          const nestedLead = asRecord(record.lead);
+          const nestedContact = asRecord(record.contact);
+          const candidateIds = [
+            record.prospect_id,
+            record.prospectId,
+            record.lead_id,
+            record.leadId,
+            record.contact_id,
+            record.contactId,
+            nestedLead.id,
+            nestedContact.id,
+          ].map((value) => String(value || '')).filter(Boolean);
+          const recordId = String(record.id || '');
+          if (
+            !candidateIds.length ||
+            candidateIds.includes(id) ||
+            ((event.includes('prospect') || event.includes('crm')) && recordId === id)
+          ) {
+            void loadProfile(true);
+          }
+        },
+      }));
+      listeners.forEach(({ event, refresh }) => socket?.on(event, refresh));
       return () => {
-        LIVE_EVENTS.forEach((event) => socket?.off(event, refresh));
+        listeners.forEach(({ event, refresh }) => socket?.off(event, refresh));
       };
     } catch {
       return undefined;
@@ -455,16 +714,39 @@ export default function CrmProfileScreen() {
 
   useEffect(() => {
     if (!contact || enrichTriggered.current) return;
-    if (contact.raw.linkedin_url && !contact.raw.profile_enriched_at) {
+    const currentWarmPath = buildWarmPath(contact);
+    const needsDetailedWarmPath = !currentWarmPath.topConnection.name;
+    const canEnrich = Boolean(contact.raw.linkedin_url || contact.raw.linkedinUrl || isLinkedInBacked(asRecord(contact.raw), contact));
+    if (canEnrich && (!contact.raw.profile_enriched_at || needsDetailedWarmPath)) {
       enrichTriggered.current = true;
       void enrichProspect(contact.id)
-        .then(() => setTimeout(() => void loadProfile(true), 2500))
+        .then((result) => {
+          const enriched = asRecord(result);
+          if (Object.keys(enriched).length) {
+            setContact((current) => {
+              if (!current || current.id !== contact.id) return current;
+              return toCrmContact({
+                ...current.raw,
+                ...enriched,
+                profile_enriched_at: enriched.profile_enriched_at || enriched.profileEnrichedAt || current.raw.profile_enriched_at || new Date().toISOString(),
+              } as ProspectState);
+            });
+          }
+          [2500, 8000, 18000].forEach((delay) => setTimeout(() => void loadProfile(true), delay));
+        })
         .catch(() => undefined);
     }
   }, [contact, loadProfile]);
 
-  const warmPath = useMemo(() => contact ? buildWarmPath(contact) : SAMPLE_WARM_PATH, [contact]);
-  const temperature = useMemo(() => contact ? engagementTemperature(contact, events) : null, [contact, events]);
+  const warmPath = useMemo(() => contact ? buildWarmPath(contact) : EMPTY_WARM_PATH, [contact]);
+  const profileActivity = useMemo(() => contact ? resolveProfileActivity(contact, events) : [], [contact, events]);
+  const temperature = useMemo(() => contact ? engagementTemperature(contact, profileActivity) : null, [contact, profileActivity]);
+
+  useEffect(() => {
+    if (!warmPath.topConnection.name && graphVisible) {
+      setGraphVisible(false);
+    }
+  }, [graphVisible, warmPath.topConnection.name]);
 
   const handleBack = () => {
     if (router.canGoBack?.()) router.back();
@@ -498,7 +780,12 @@ export default function CrmProfileScreen() {
 
   const handleAction = async (action: 'quiet' | 'suppress' | 'intro' | 'message') => {
     if (!contact) return;
+    setActionMenuOpen(false);
     if (action === 'intro') {
+      if (!warmPath.topConnection.name || warmPath.sample) {
+        setNotice(`No live warm intro route found yet for ${contact.name}.`);
+        return;
+      }
       setNotice(`Intro route prepared via ${warmPath.topConnection.name}.`);
       return;
     }
@@ -529,7 +816,7 @@ export default function CrmProfileScreen() {
   };
 
   return (
-    <View style={[styles.screen, { paddingTop: insets.top }]}>
+    <View style={[styles.screen, { paddingTop: insets.top, backgroundColor: palette.background }]}>
       <ScrollView
         contentContainerStyle={[
           styles.content,
@@ -541,35 +828,44 @@ export default function CrmProfileScreen() {
             alignSelf: 'center',
           },
         ]}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadProfile(true)} tintColor={T.primary} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadProfile(true)} tintColor={palette.primary} />}
         showsVerticalScrollIndicator={false}
       >
+        {actionMenuOpen ? (
+          <Pressable style={styles.profileMenuDismissLayer} onPress={() => setActionMenuOpen(false)} />
+        ) : null}
         <ProfileTopBar
           name={contact?.name || 'Prospect'}
           onBack={handleBack}
           onRemove={handleRemove}
           removing={busyAction === 'remove'}
-          onMore={() => setNotice('More actions are ready for this profile.')}
+          contact={contact}
+          warmPath={warmPath}
+          busyAction={busyAction}
+          menuOpen={actionMenuOpen}
+          onToggleMenu={() => setActionMenuOpen((current) => !current)}
+          onCloseMenu={() => setActionMenuOpen(false)}
+          onAction={handleAction}
           onMessage={() => void handleAction('message')}
           compact={isPhone}
         />
 
         {error ? (
-          <View style={styles.errorCard}>
-            <Typography variant="bodySmall" color="#be123c">{error}</Typography>
+          <View style={[styles.errorCard, { backgroundColor: palette.dangerBg, borderColor: palette.dangerBorder }]}>
+            <Typography variant="bodySmall" color={palette.dangerText}>{error}</Typography>
           </View>
         ) : null}
 
         {loading || !contact ? (
-          <View style={styles.loadingCard}>
-            <ActivityIndicator color={T.primary} />
-            <Typography variant="bodySmall" color="#64748b">Loading contact profile...</Typography>
+          <View style={[styles.loadingCard, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
+            <ActivityIndicator color={palette.primary} />
+            <Typography variant="bodySmall" color={palette.muted}>Loading contact profile...</Typography>
           </View>
         ) : (
           <>
             <HeroKpis
               contact={contact}
-              events={events}
+              events={profileActivity}
               warmPath={warmPath}
               temperature={temperature}
               compact={isCompact}
@@ -579,15 +875,15 @@ export default function CrmProfileScreen() {
             />
 
             {notice ? (
-              <View style={styles.noticePill}>
-                <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>{notice}</Typography>
+              <View style={[styles.noticePill, { backgroundColor: palette.badgeBg }]}>
+                <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText}>{notice}</Typography>
               </View>
             ) : null}
 
             {warmPath.sample ? (
-              <View style={styles.samplePill}>
-                <Typography variant="caption" color="#92400e" style={styles.boldText}>
-                  Sample data - warm-path is not yet wired to a live source
+              <View style={[styles.samplePill, { backgroundColor: palette.warningBg, borderColor: palette.warningBorder }]}>
+                <Typography variant="caption" color={palette.warningText} style={styles.boldText}>
+                  Warm-path preview
                 </Typography>
               </View>
             ) : null}
@@ -599,7 +895,7 @@ export default function CrmProfileScreen() {
               onToggle={toggleWarmPath}
             />
 
-            <ActivityHeatmap events={events} compact={isPhone} />
+            <ActivityHeatmap events={profileActivity} compact={isPhone} />
 
             <View style={[styles.twoColumnGrid, isCompact && styles.singleColumnGrid]}>
               <FitSignalsCard contact={contact} />
@@ -610,6 +906,7 @@ export default function CrmProfileScreen() {
 
             {isCompact ? (
               <View style={styles.mobileBottomStack}>
+                <RecentActivityCard events={profileActivity} />
                 <ActionsCard
                   contact={contact}
                   warmPath={warmPath}
@@ -617,12 +914,11 @@ export default function CrmProfileScreen() {
                   onAction={handleAction}
                 />
                 <NextFollowupsCard followups={followups} loading={refreshing} />
-                <RecentActivityCard events={events} />
               </View>
             ) : (
               <View style={styles.bottomGrid}>
                 <View style={styles.feedColumn}>
-                  <RecentActivityCard events={events} />
+                  <RecentActivityCard events={profileActivity} />
                 </View>
                 <View style={styles.sideColumn}>
                   <ActionsCard
@@ -655,7 +951,13 @@ function ProfileTopBar({
   onBack,
   onRemove,
   removing,
-  onMore,
+  contact,
+  warmPath,
+  busyAction,
+  menuOpen,
+  onToggleMenu,
+  onCloseMenu,
+  onAction,
   onMessage,
   compact,
 }: {
@@ -663,40 +965,127 @@ function ProfileTopBar({
   onBack: () => void;
   onRemove: () => void;
   removing: boolean;
-  onMore: () => void;
+  contact: CrmContact | null;
+  warmPath: WarmPath;
+  busyAction: string | null;
+  menuOpen: boolean;
+  onToggleMenu: () => void;
+  onCloseMenu: () => void;
+  onAction: (action: 'quiet' | 'suppress' | 'intro' | 'message') => Promise<void>;
   onMessage: () => void;
   compact: boolean;
 }) {
+  const palette = useProfilePalette();
+  const quietActive = Boolean(contact?.raw.quiet_until && new Date(contact.raw.quiet_until).getTime() > Date.now());
+  const hasIntroRoute = Boolean(warmPath.topConnection.name && !warmPath.sample);
+  const actions: Array<{
+    key: 'intro' | 'message' | 'quiet' | 'suppress';
+    label: string;
+    hint: string;
+    Icon: IconComponent;
+    danger?: boolean;
+    busy?: boolean;
+  }> = contact ? [
+    {
+      key: 'intro',
+      label: 'Ask for intro',
+      hint: hasIntroRoute ? `via ${warmPath.topConnection.name.split(' ')[0]}` : 'no warm route yet',
+      Icon: Route,
+    },
+    {
+      key: 'message',
+      label: 'Send message',
+      hint: `best: ${channelMeta(contact.raw.last_channel).label}`,
+      Icon: SendHorizontal,
+    },
+    {
+      key: 'quiet',
+      label: quietActive ? 'Quieted' : 'Quiet 7d',
+      hint: quietActive ? `until ${fmtDateTime(contact.raw.quiet_until)}` : 'pause outreach',
+      Icon: MoonStar,
+      busy: busyAction === 'quiet',
+    },
+    {
+      key: 'suppress',
+      label: 'Do not contact',
+      hint: contact.raw.do_not_contact ? 'suppressed - click to lift' : 'hard suppress',
+      Icon: Ban,
+      danger: true,
+      busy: busyAction === 'suppress',
+    },
+  ] : [];
   return (
     <View style={[styles.topBar, compact && styles.topBarCompact]}>
       <View style={styles.crumbRow}>
         <TouchableOpacity onPress={onBack} activeOpacity={0.76} style={styles.backButton}>
-          <ArrowLeft color="#475569" size={14} />
-          <Typography variant="caption" color="#475569" style={styles.boldText}>All deals</Typography>
+          <ArrowLeft color={palette.muted} size={14} />
+          <Typography variant="caption" color={palette.muted} style={styles.boldText}>All deals</Typography>
         </TouchableOpacity>
-        <Typography variant="caption" color="#cbd5e1">/</Typography>
-        <Typography variant="caption" color={T.primaryHead} style={styles.crumbName} numberOfLines={1}>
+        <Typography variant="caption" color={palette.border}>/</Typography>
+        <Typography variant="caption" color={palette.primaryStrong} style={styles.crumbName} numberOfLines={1}>
           {name}
         </Typography>
       </View>
       <View style={[styles.topActions, compact && styles.topActionsCompact]}>
+        {menuOpen ? <Pressable style={styles.topActionsMenuDismissLayer} onPress={onCloseMenu} /> : null}
         <TouchableOpacity
           onPress={onRemove}
           disabled={removing}
           activeOpacity={0.78}
-          style={[styles.topActionButton, compact && styles.topActionButtonCompact, styles.removeButton]}
+          style={[
+            styles.topActionButton,
+            { backgroundColor: palette.surfaceElevated, borderColor: palette.dangerBorder },
+            compact && styles.topActionButtonCompact,
+          ]}
         >
-          {removing ? <ActivityIndicator color="#e11d48" size="small" /> : <Trash2 color="#e11d48" size={15} />}
-          <Typography variant="caption" color="#e11d48" style={styles.boldText}>Not a fit</Typography>
+          {removing ? <ActivityIndicator color={palette.dangerText} size="small" /> : <Trash2 color={palette.dangerText} size={15} />}
+          <Typography variant="caption" color={palette.dangerText} style={styles.boldText}>Not a fit</Typography>
         </TouchableOpacity>
-        <TouchableOpacity onPress={onMore} activeOpacity={0.78} style={[styles.topActionButton, compact && styles.topActionButtonCompact]}>
-          <MoreHorizontal color={T.primaryHead} size={15} />
-          <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>More</Typography>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={onMessage} activeOpacity={0.78} style={[styles.messageButton, compact && styles.topActionButtonCompact]}>
+        <TouchableOpacity onPress={onMessage} activeOpacity={0.78} style={[styles.messageButton, compact && styles.messageButtonCompact]}>
           <SendHorizontal color="#fff" size={15} />
           <Typography variant="caption" color="#fff" style={styles.boldText}>Message</Typography>
         </TouchableOpacity>
+        <View style={styles.moreActionWrap}>
+          <TouchableOpacity
+            onPress={onToggleMenu}
+            activeOpacity={0.78}
+            disabled={!contact}
+            style={[
+              styles.messageMoreButton,
+              { backgroundColor: palette.surfaceElevated, borderColor: palette.border },
+              !contact && styles.disabledAction,
+            ]}
+          >
+            <EllipsisVertical color={palette.primaryStrong} size={17} />
+          </TouchableOpacity>
+          {menuOpen && actions.length ? (
+            <View style={[styles.actionMenu, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
+              {actions.map(({ key, label, hint, Icon, danger, busy }) => (
+                <TouchableOpacity
+                  key={key}
+                  activeOpacity={0.78}
+                  disabled={busy}
+                  onPress={() => void onAction(key)}
+                  style={[styles.actionMenuItem, { borderBottomColor: palette.borderSoft }]}
+                >
+                  <View style={[styles.actionMenuIcon, { backgroundColor: danger ? palette.dangerBg : palette.badgeBg }]}>
+                    {busy ? (
+                      <ActivityIndicator color={danger ? palette.dangerText : palette.primary} size="small" />
+                    ) : (
+                      <Icon color={danger ? palette.dangerText : palette.primary} size={15} />
+                    )}
+                  </View>
+                  <View style={styles.actionMenuCopy}>
+                    <Typography variant="caption" color={danger ? palette.dangerText : palette.primaryStrong} style={styles.boldText} numberOfLines={1}>
+                      {label}
+                    </Typography>
+                    <Typography variant="caption" color={palette.muted} numberOfLines={1}>{hint}</Typography>
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </View>
+          ) : null}
+        </View>
       </View>
     </View>
   );
@@ -721,18 +1110,29 @@ function HeroKpis({
   onWarmPress: () => void;
   warmOpen: boolean;
 }) {
+  const palette = useProfilePalette();
   const raw = contact.raw;
   const stage = STAGE_META[contact.stage] || STAGE_META.new;
   const avatarUrl = profileImageUrl(raw);
   const dailyCounts = useMemo(() => engagementDailyCounts(events), [events]);
   const total7d = dailyCounts.reduce((sum, count) => sum + count, 0);
   const routeCount = warmRouteCount(warmPath);
-  const lastDirection = events[0]?.direction || raw.last_event_type || 'system';
+  const lastTouch = useMemo(() => resolveLastTouch(contact, events), [contact, events]);
+  const titleLine = contact.title || raw.headline || 'Prospect';
+  const companyLine = contact.company || firstText(raw.company, raw.organization_name, raw.account_name);
+  const locationLine = contact.geo || firstText(raw.geo, raw.city, raw.region, raw.country, raw.address);
 
   return (
     <Card padded={false} style={styles.heroCard}>
       <View style={[styles.heroInner, compact && styles.heroInnerCompact]}>
-        <View style={[styles.heroIdentity, compact && styles.heroIdentityCompact, phone && styles.heroIdentityPhone]}>
+        <View
+          style={[
+            styles.heroIdentity,
+            { borderRightColor: palette.borderSoft, borderBottomColor: palette.borderSoft },
+            compact && styles.heroIdentityCompact,
+            phone && styles.heroIdentityPhone,
+          ]}
+        >
           {avatarUrl ? (
             <Image source={{ uri: avatarUrl }} style={[styles.profileImage, phone && styles.profileImagePhone]} contentFit="cover" />
           ) : (
@@ -742,43 +1142,35 @@ function HeroKpis({
           )}
           <View style={[styles.heroCopy, phone && styles.heroCopyPhone]}>
             <View style={[styles.heroNameRow, phone && styles.heroNameRowPhone]}>
-              <Typography variant="h3" color="#1e293b" style={styles.heroName} numberOfLines={2}>
+              <Typography variant="h3" color={palette.text} style={styles.heroName} numberOfLines={2}>
                 {contact.name}
               </Typography>
-              <StatusPill label={stage.label} color={stage.color} />
-              {!phone && temperature ? <StatusPill label={temperature.label} color={temperature.color} /> : null}
-            </View>
-            {!phone ? (
-              <>
-                <Typography variant="bodySmall" color="#334155" numberOfLines={1}>
-                  {contact.title || raw.headline || 'Prospect'}
-                </Typography>
-                <Typography variant="caption" color="#64748b" numberOfLines={1}>
-                  {contact.company || 'No company'}
-                </Typography>
-              </>
-            ) : null}
-            <View style={[styles.locationLine, phone && styles.locationLinePhone]}>
-              <MapPin color="#64748b" size={12} />
-              {!phone ? (
-                <Typography variant="caption" color="#64748b" numberOfLines={1}>
-                  {contact.geo || 'Location unavailable'}
-                </Typography>
-              ) : null}
-            </View>
-            {!phone ? (
-              <View style={styles.contactLine}>
-                <ContactMini icon={Mail} label={contact.email || 'No email'} verified={contact.emailVerified} />
-                <ContactMini icon={Phone} label={contact.phone || 'No phone'} verified={contact.phoneVerified} />
+                <StatusPill label={stage.label} color={stage.color} />
+                {!phone && temperature ? <StatusPill label={temperature.label} color={temperature.color} /> : null}
               </View>
-            ) : null}
+            <Typography variant="bodySmall" color={palette.text} numberOfLines={phone ? 2 : 1}>
+              {titleLine}
+            </Typography>
+            <Typography variant="caption" color={palette.muted} numberOfLines={phone ? 2 : 1}>
+              {companyLine || 'No company'}
+            </Typography>
+            <View style={[styles.locationLine, phone && styles.locationLinePhone]}>
+              <MapPin color={palette.muted} size={12} />
+              <Typography variant="caption" color={palette.muted} numberOfLines={phone ? 2 : 1}>
+                {locationLine || 'Location unavailable'}
+              </Typography>
+            </View>
+            <View style={styles.contactLine}>
+              <ContactMini icon={Mail} label={contact.email || 'No email'} verified={contact.emailVerified} />
+              <ContactMini icon={Phone} label={contact.phone || 'No phone'} verified={contact.phoneVerified} />
+            </View>
           </View>
         </View>
         <View style={[styles.kpiGrid, compact && styles.kpiGridCompact]}>
           <KpiFit value={contact.fit ?? null} />
           <KpiSpark counts={dailyCounts} total={total7d} />
           <KpiRoutes count={routeCount} top={warmPath.topConnection.name} open={warmOpen} onPress={onWarmPress} />
-          <KpiLast channel={raw.last_channel} occurredAt={contact.lastActivityAt} direction={String(lastDirection)} />
+          <KpiLast channel={lastTouch.channel} occurredAt={lastTouch.occurredAt} direction={String(lastTouch.direction)} />
         </View>
       </View>
     </Card>
@@ -786,38 +1178,41 @@ function HeroKpis({
 }
 
 function ContactMini({ icon: Icon, label, verified }: { icon: IconComponent; label: string; verified?: boolean }) {
+  const palette = useProfilePalette();
   return (
-    <View style={styles.contactMini}>
-      <Icon color="#64748b" size={12} />
-      <Typography variant="caption" color="#475569" numberOfLines={1}>{label}</Typography>
+    <View style={[styles.contactMini, { backgroundColor: palette.pillBg }]}>
+      <Icon color={palette.muted} size={12} />
+      <Typography variant="caption" color={palette.muted} numberOfLines={1}>{label}</Typography>
       {verified ? <View style={styles.verifiedDot} /> : null}
     </View>
   );
 }
 
 function KpiFit({ value }: { value: number | null }) {
+  const palette = useProfilePalette();
   const band = scoreBand(value);
   return (
-    <View style={styles.kpiTile}>
-      <View style={styles.scoreCircle}>
-        <Typography variant="bodyLarge" color={T.primaryHead} style={styles.kpiValue}>{band.level}</Typography>
+    <View style={[styles.kpiTile, { borderRightColor: palette.borderSoft, borderBottomColor: palette.borderSoft }]}>
+      <View style={[styles.scoreCircle, { borderColor: palette.badgeBg }]}>
+        <Typography variant="bodyLarge" color={palette.primaryStrong} style={styles.kpiValue}>{band.level}</Typography>
       </View>
       <View style={styles.kpiText}>
-        <Typography variant="overline" color="#64748b">Fit score</Typography>
-        <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>{band.label}</Typography>
-        <Typography variant="caption" color="#64748b">{value == null ? 'Scored on discovery' : 'Fit to active ICP'}</Typography>
+        <Typography variant="overline" color={palette.muted}>Fit score</Typography>
+        <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText}>{band.label}</Typography>
+        <Typography variant="caption" color={palette.muted}>{value == null ? 'Scored on discovery' : 'Fit to active ICP'}</Typography>
       </View>
     </View>
   );
 }
 
 function KpiSpark({ counts, total }: { counts: number[]; total: number }) {
+  const palette = useProfilePalette();
   return (
-    <View style={styles.kpiTileColumn}>
-      <Typography variant="overline" color="#64748b">Engagement - 7d</Typography>
+    <View style={[styles.kpiTileColumn, { borderRightColor: palette.borderSoft, borderBottomColor: palette.borderSoft }]}>
+      <Typography variant="overline" color={palette.muted}>Engagement - 7d</Typography>
       <View style={styles.kpiNumberRow}>
-        <Typography variant="h2" color="#1e293b" style={styles.kpiValue}>{total}</Typography>
-        <Typography variant="caption" color="#64748b">events</Typography>
+        <Typography variant="h2" color={palette.text} style={styles.kpiValue}>{total}</Typography>
+        <Typography variant="caption" color={palette.muted}>events</Typography>
       </View>
       <Sparkline counts={counts} />
     </View>
@@ -825,6 +1220,7 @@ function KpiSpark({ counts, total }: { counts: number[]; total: number }) {
 }
 
 function Sparkline({ counts }: { counts: number[] }) {
+  const palette = useProfilePalette();
   const { width: viewportWidth } = useWindowDimensions();
   const width = viewportWidth < 360 ? 104 : 132;
   const height = 40;
@@ -841,17 +1237,18 @@ function Sparkline({ counts }: { counts: number[] }) {
 
   return (
     <View style={[styles.sparkline, { width, height }]}>
-      <View style={[styles.sparkBaseline, { top: height - padBottom }]} />
-      <View style={[styles.sparkAreaHint, { left: Math.max(0, last.x - 36), top: Math.max(padTop, last.y), height: Math.max(8, height - padBottom - last.y) }]} />
+      <View style={[styles.sparkBaseline, { top: height - padBottom, backgroundColor: `${palette.primary}44` }]} />
+      <View style={[styles.sparkAreaHint, { left: Math.max(0, last.x - 36), top: Math.max(padTop, last.y), height: Math.max(8, height - padBottom - last.y), backgroundColor: palette.badgeBg }]} />
       {points.slice(0, -1).map((point, index) => (
         <SparkSegment key={index} from={point} to={points[index + 1]} />
       ))}
-      <View style={[styles.sparkLastDot, { left: last.x - 3, top: last.y - 3 }]} />
+      <View style={[styles.sparkLastDot, { left: last.x - 3, top: last.y - 3, backgroundColor: palette.primary }]} />
     </View>
   );
 }
 
 function SparkSegment({ from, to }: { from: { x: number; y: number }; to: { x: number; y: number } }) {
+  const palette = useProfilePalette();
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const distance = Math.sqrt(dx * dx + dy * dy);
@@ -864,6 +1261,7 @@ function SparkSegment({ from, to }: { from: { x: number; y: number }; to: { x: n
           width: distance,
           left: (from.x + to.x) / 2 - distance / 2,
           top: (from.y + to.y) / 2 - 1,
+          backgroundColor: palette.primary,
           transform: [{ rotate: angle }],
         },
       ]}
@@ -872,20 +1270,24 @@ function SparkSegment({ from, to }: { from: { x: number; y: number }; to: { x: n
 }
 
 function KpiRoutes({ count, top, open, onPress }: { count: number; top: string; open: boolean; onPress: () => void }) {
+  const palette = useProfilePalette();
+  const hasRoute = Boolean(top);
   return (
-    <TouchableOpacity activeOpacity={0.78} onPress={onPress} style={styles.kpiTileColumn}>
+    <TouchableOpacity activeOpacity={0.78} disabled={!hasRoute} onPress={onPress} style={[styles.kpiTileColumn, { borderRightColor: palette.borderSoft, borderBottomColor: palette.borderSoft }]}>
       <View style={styles.kpiTopLine}>
-        <Typography variant="overline" color="#64748b">Warm routes</Typography>
-        {open ? <ChevronUp color={T.primary} size={13} /> : <ChevronDown color={T.primary} size={13} />}
+        <Typography variant="overline" color={palette.muted}>Warm routes</Typography>
+        {hasRoute ? (open ? <ChevronUp color={palette.primary} size={13} /> : <ChevronDown color={palette.primary} size={13} />) : null}
       </View>
       <View style={styles.kpiNumberRow}>
-        <Typography variant="h2" color="#1e293b" style={styles.kpiValue}>{count}</Typography>
-        <Typography variant="caption" color={T.primary} style={styles.boldText}>paths</Typography>
+        <Typography variant="h2" color={palette.text} style={styles.kpiValue}>{count}</Typography>
+        <Typography variant="caption" color={palette.primary} style={styles.boldText}>paths</Typography>
       </View>
       <View style={styles.routeVia}>
-        <View style={styles.tinyAvatar}><Typography variant="caption" color="#fff" style={styles.tinyAvatarText}>{initialsOf(top)}</Typography></View>
-        <Typography variant="caption" color="#64748b" numberOfLines={1}>
-          via <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>{top}</Typography>
+        <View style={styles.tinyAvatar}><Typography variant="caption" color="#fff" style={styles.tinyAvatarText}>{hasRoute ? initialsOf(top) : '-'}</Typography></View>
+        <Typography variant="caption" color={palette.muted} numberOfLines={1}>
+          {hasRoute ? (
+            <>via <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText}>{top}</Typography></>
+          ) : 'No path yet'}
         </Typography>
       </View>
     </TouchableOpacity>
@@ -893,21 +1295,22 @@ function KpiRoutes({ count, top, open, onPress }: { count: number; top: string; 
 }
 
 function KpiLast({ channel, occurredAt, direction }: { channel?: string | null; occurredAt?: string | null; direction?: string | null }) {
-  const meta = channelMeta(channel);
+  const palette = useProfilePalette();
+  const meta = lastTouchMeta(channel);
   const Icon = meta.Icon;
   return (
-    <View style={styles.kpiTileColumn}>
-      <Typography variant="overline" color="#64748b">Last touch</Typography>
+    <View style={[styles.kpiTileColumn, { borderRightColor: palette.borderSoft, borderBottomColor: palette.borderSoft }]}>
+      <Typography variant="overline" color={palette.muted}>Last touch</Typography>
       <View style={styles.kpiNumberRow}>
-        <Typography variant="h2" color="#1e293b" style={styles.kpiValue}>{rel(occurredAt)}</Typography>
-        <Typography variant="caption" color="#64748b">ago</Typography>
+        <Typography variant="h2" color={palette.text} style={styles.kpiValue}>{rel(occurredAt)}</Typography>
+        <Typography variant="caption" color={palette.muted}>ago</Typography>
       </View>
       <View style={styles.lastTouchPill}>
         <View style={[styles.channelDotLarge, { backgroundColor: `${meta.color}1a` }]}>
           <Icon color={meta.color} size={12} />
         </View>
         <Typography variant="caption" color={meta.color} style={styles.boldText}>{meta.label}</Typography>
-        <Typography variant="caption" color="#64748b">{direction === 'inbound' ? 'reply' : 'sent'}</Typography>
+        <Typography variant="caption" color={palette.muted}>{direction === 'inbound' ? 'reply' : 'sent'}</Typography>
       </View>
     </View>
   );
@@ -924,13 +1327,14 @@ function WarmPathCard({
   open: boolean;
   onToggle: () => void;
 }) {
+  const palette = useProfilePalette();
   if (!warmPath.topConnection.name) {
     return (
       <Card>
         <CardHeader title="Warm Path" subtitle="Routes from your network to this prospect" />
         <View style={styles.emptyWarmPath}>
-          <RouteOff color="#94a3b8" size={22} />
-          <Typography variant="bodySmall" color="#64748b">No paths found yet.</Typography>
+          <RouteOff color={palette.disabled} size={22} />
+          <Typography variant="bodySmall" color={palette.muted}>No paths found yet.</Typography>
         </View>
       </Card>
     );
@@ -942,26 +1346,32 @@ function WarmPathCard({
         title="Warm Path"
         subtitle={`${warmRouteCount(warmPath)} routes through your network`}
         action={(
-          <TouchableOpacity activeOpacity={0.78} onPress={onToggle} style={styles.graphButton}>
-            <Typography variant="caption" color={T.primary} style={styles.boldText}>{open ? 'Collapse' : 'Open graph'}</Typography>
-            {open ? <ChevronUp color={T.primary} size={13} /> : <ChevronDown color={T.primary} size={13} />}
+          <TouchableOpacity activeOpacity={0.78} onPress={onToggle} style={[styles.graphButton, { backgroundColor: palette.badgeBg }]}>
+            <Typography variant="caption" color={palette.primary} style={styles.boldText}>{open ? 'Collapse' : 'Open graph'}</Typography>
+            {open ? <ChevronUp color={palette.primary} size={13} /> : <ChevronDown color={palette.primary} size={13} />}
           </TouchableOpacity>
         )}
       />
-      <TouchableOpacity activeOpacity={0.82} onPress={onToggle} style={styles.warmSummary}>
-        <View style={styles.warmIcon}><Route color={T.primary} size={20} /></View>
+      <TouchableOpacity activeOpacity={0.82} onPress={onToggle} style={[styles.warmSummary, { backgroundColor: palette.pillBg, borderColor: palette.border }]}>
+        <View style={[styles.warmIcon, { backgroundColor: palette.badgeBg }]}><Route color={palette.primary} size={20} /></View>
         <View style={styles.warmSummaryText}>
-          <Typography variant="bodySmall" color={T.primaryHead} numberOfLines={2}>
-            <Typography variant="bodySmall" color={T.primaryHead} style={styles.boldText}>{warmPath.topConnection.name}</Typography>
-            {' knows '}
-            {contact.name.split(' ')[0]}
-            {warmPath.sharedEmployer ? (
-              ` from ${warmPath.sharedEmployer.company} (${warmPath.sharedEmployer.overlap})`
-            ) : ''}
-            {` - ${Math.round(warmPath.topConnection.confidence * 100)}%`}
+          <Typography variant="bodySmall" color={palette.primaryStrong} numberOfLines={2}>
+            {warmPath.summary ? (
+              warmPath.summary
+            ) : (
+              <>
+                <Typography variant="bodySmall" color={palette.primaryStrong} style={styles.boldText}>{warmPath.topConnection.name}</Typography>
+                {' knows '}
+                {contact.name.split(' ')[0]}
+                {warmPath.sharedEmployer ? (
+                  ` from ${warmPath.sharedEmployer.company} (${warmPath.sharedEmployer.overlap})`
+                ) : ''}
+                {` - ${Math.round(warmPath.topConnection.confidence * 100)}%`}
+              </>
+            )}
           </Typography>
           <View style={styles.warmMetaRow}>
-            <WarmMeta icon={Users} label={`${warmPath.mutualConnections.length} mutuals`} />
+            {warmPath.mutualConnections.length ? <WarmMeta icon={Users} label={`${warmPath.mutualConnections.length} mutuals`} /> : null}
             {warmPath.customerReference ? <WarmMeta icon={Award} label={warmPath.customerReference.via} /> : null}
             {warmPath.accountPipeline ? <WarmMeta icon={BriefcaseBusiness} label="account in pipeline" /> : null}
           </View>
@@ -984,6 +1394,7 @@ function WarmPathGraphSheet({
   maxHeight: number;
   onClose: () => void;
 }) {
+  const palette = useProfilePalette();
   const { width: viewportWidth } = useWindowDimensions();
   const graphWidth = Math.min(GRAPH_W, Math.max(320, viewportWidth - Theme.spacing.lg * 2));
   const graphCenter = useMemo(() => ({ x: graphWidth / 2, y: GRAPH_CENTER.y }), [graphWidth]);
@@ -998,13 +1409,12 @@ function WarmPathGraphSheet({
   const sheetHeight = Math.min(maxHeight, 760);
 
   useEffect(() => {
-    if (visible) {
-      setPositions({});
-      setKidsExpanded(true);
-      setActiveId(null);
-      dragId.current = null;
-    }
-  }, [visible, contact.id]);
+    if (!visible) return;
+    setPositions({});
+    setKidsExpanded(true);
+    setActiveId(null);
+    dragId.current = null;
+  }, [contact.id, visible, warmPath]);
 
   const getPos = useCallback((def: GraphChildDef) => positions[def.id] || { x: def.x, y: def.y }, [positions]);
 
@@ -1063,134 +1473,134 @@ function WarmPathGraphSheet({
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={styles.graphModalRoot}>
-        <TouchableOpacity style={styles.graphBackdrop} activeOpacity={1} onPress={onClose} />
-        <View style={[styles.graphSheet, { maxHeight: sheetHeight }]}>
-          <View style={styles.graphHandle} />
-          <View style={styles.graphSheetHeader}>
-            <View style={styles.graphTitleBlock}>
-              <Typography variant="h3" color={T.primaryHead} style={styles.graphSheetTitle}>Warm Path</Typography>
-              <Typography variant="bodySmall" color="#56657f">{warmRouteCount(warmPath)} routes through your network</Typography>
-            </View>
-            <View style={styles.graphHeaderActions}>
-              {Object.keys(positions).length ? (
-                <TouchableOpacity activeOpacity={0.78} onPress={resetGraph} style={styles.graphTextButton}>
-                  <RotateCcw color="#475569" size={15} />
-                  <Typography variant="caption" color="#475569" style={styles.boldText}>Reset</Typography>
-                </TouchableOpacity>
-              ) : null}
-              <TouchableOpacity activeOpacity={0.78} onPress={onClose} style={styles.graphCollapseButton}>
-                <Typography variant="caption" color={T.primary} style={styles.boldText}>Collapse</Typography>
-                <ChevronUp color={T.primary} size={14} />
-              </TouchableOpacity>
-            </View>
-          </View>
+        <TouchableOpacity style={[styles.graphBackdrop, { backgroundColor: palette.overlay }]} activeOpacity={1} onPress={onClose} />
+        <View style={[styles.graphSheet, { maxHeight: sheetHeight, backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
+          <View style={[styles.graphHandle, { backgroundColor: palette.border }]} />
+      <View style={styles.graphSheetHeader}>
+        <View style={styles.graphTitleBlock}>
+          <Typography variant="h3" color={palette.primaryStrong} style={styles.graphSheetTitle}>Warm Path</Typography>
+          <Typography variant="bodySmall" color={palette.muted}>{childDefs.length} routes through your network</Typography>
+        </View>
+        <View style={styles.graphHeaderActions}>
+          {Object.keys(positions).length ? (
+            <TouchableOpacity activeOpacity={0.78} onPress={resetGraph} style={styles.graphTextButton}>
+              <RotateCcw color={palette.muted} size={15} />
+              <Typography variant="caption" color={palette.muted} style={styles.boldText}>Reset</Typography>
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity activeOpacity={0.78} onPress={onClose} style={[styles.graphCollapseButton, { backgroundColor: palette.badgeBg }]}>
+            <Typography variant="caption" color={palette.primary} style={styles.boldText}>Collapse</Typography>
+            <ChevronUp color={palette.primary} size={14} />
+          </TouchableOpacity>
+        </View>
+      </View>
 
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.graphScrollContent}
-          >
-            <View style={[styles.graphCanvas, { width: graphWidth }]} {...panResponder.panHandlers}>
-              <View style={styles.graphHint}>
-                <Move color="#64748b" size={13} />
-                <Typography variant="caption" color="#64748b">
-                  drag nodes - click {contact.name.split(' ')[0]} to {kidsExpanded ? 'collapse' : 'expand'}
-                </Typography>
-              </View>
-              <Svg width={graphWidth} height={GRAPH_H} viewBox={`0 0 ${graphWidth} ${GRAPH_H}`}>
-                <Defs>
-                  <LinearGradient id="ladLinkProfile" x1="0" x2="1">
-                    <Stop offset="0%" stopColor={T.primary} stopOpacity="0.7" />
-                    <Stop offset="100%" stopColor={T.primary} stopOpacity="0.15" />
-                  </LinearGradient>
-                  <LinearGradient id="ladLinkBlueProfile" x1="0" x2="1">
-                    <Stop offset="0%" stopColor={T.linkedin} stopOpacity="0.1" />
-                    <Stop offset="100%" stopColor={T.linkedin} stopOpacity="0.6" />
-                  </LinearGradient>
-                  <RadialGradient id="ladHaloProfile" cx="50%" cy="50%" r="50%">
-                    <Stop offset="0%" stopColor={T.primary} stopOpacity="0.18" />
-                    <Stop offset="100%" stopColor={T.primary} stopOpacity="0" />
-                  </RadialGradient>
-                </Defs>
-                <Circle cx={graphCenter.x} cy={graphCenter.y} r={kidsExpanded ? 60 : 80} fill="url(#ladHaloProfile)" />
-                {kidsExpanded ? childDefs.map((def) => {
-                  const pos = getPos(def);
-                  const style = linkStyleFor(def.linkType);
-                  const path = linkPath(pos, graphCenter);
-                  const faded = activeId && activeId !== def.id;
-                  return (
-                    <G key={`link-${def.id}`} opacity={faded ? 0.35 : 1}>
-                      <Path
-                        d={path}
-                        stroke={style.stroke}
-                        strokeWidth={style.strokeWidth}
-                        strokeDasharray={style.dash}
-                        fill="none"
-                      />
-                      {def.linkType === 'primary' && def.label ? (
-                        <G>
-                          <SvgText
-                            x={(pos.x + graphCenter.x) / 2}
-                            y={(pos.y + graphCenter.y) / 2 - 6}
-                            textAnchor="middle"
-                            fontSize={11}
-                            fontWeight="700"
-                            fill={T.primary}
-                          >
-                            {Math.round(def.label.confidence * 100)}%
-                          </SvgText>
-                          <SvgText
-                            x={(pos.x + graphCenter.x) / 2}
-                            y={(pos.y + graphCenter.y) / 2 + 9}
-                            textAnchor="middle"
-                            fontSize={10}
-                            fill="#64748b"
-                          >
-                            {def.label.note}
-                          </SvgText>
-                        </G>
-                      ) : null}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.graphScrollContent}
+      >
+        <View style={[styles.graphCanvas, { width: graphWidth, backgroundColor: palette.graphCanvas }]} {...panResponder.panHandlers}>
+          <View style={[styles.graphHint, { backgroundColor: palette.darkMode ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255,255,255,0.92)', borderColor: palette.border }]}>
+            <Move color={palette.muted} size={13} />
+            <Typography variant="caption" color={palette.muted}>
+              drag nodes - click {contact.name.split(' ')[0]} to {kidsExpanded ? 'collapse' : 'expand'}
+            </Typography>
+          </View>
+          <Svg width={graphWidth} height={GRAPH_H} viewBox={`0 0 ${graphWidth} ${GRAPH_H}`}>
+            <Defs>
+              <LinearGradient id="ladLinkProfile" x1="0" x2="1">
+                <Stop offset="0%" stopColor={T.primary} stopOpacity="0.7" />
+                <Stop offset="100%" stopColor={T.primary} stopOpacity="0.15" />
+              </LinearGradient>
+              <LinearGradient id="ladLinkBlueProfile" x1="0" x2="1">
+                <Stop offset="0%" stopColor={T.linkedin} stopOpacity="0.1" />
+                <Stop offset="100%" stopColor={T.linkedin} stopOpacity="0.6" />
+              </LinearGradient>
+              <RadialGradient id="ladHaloProfile" cx="50%" cy="50%" r="50%">
+                <Stop offset="0%" stopColor={T.primary} stopOpacity="0.18" />
+                <Stop offset="100%" stopColor={T.primary} stopOpacity="0" />
+              </RadialGradient>
+            </Defs>
+            <Circle cx={graphCenter.x} cy={graphCenter.y} r={kidsExpanded ? 60 : 80} fill="url(#ladHaloProfile)" />
+            {kidsExpanded ? childDefs.map((def) => {
+              const pos = getPos(def);
+              const style = linkStyleFor(def.linkType);
+              const path = linkPath(pos, graphCenter);
+              const faded = activeId && activeId !== def.id;
+              return (
+                <G key={`link-${def.id}`} opacity={faded ? 0.35 : 1}>
+                  <Path
+                    d={path}
+                    stroke={style.stroke}
+                    strokeWidth={style.strokeWidth}
+                    strokeDasharray={style.dash}
+                    fill="none"
+                  />
+                  {def.linkType === 'primary' && def.label ? (
+                    <G>
+                      <SvgText
+                        x={(pos.x + graphCenter.x) / 2}
+                        y={(pos.y + graphCenter.y) / 2 - 6}
+                        textAnchor="middle"
+                        fontSize={11}
+                        fontWeight="700"
+                        fill={palette.primary}
+                      >
+                        {Math.round(def.label.confidence * 100)}%
+                      </SvgText>
+                      <SvgText
+                        x={(pos.x + graphCenter.x) / 2}
+                        y={(pos.y + graphCenter.y) / 2 + 9}
+                        textAnchor="middle"
+                        fontSize={10}
+                        fill={palette.muted}
+                      >
+                        {def.label.note}
+                      </SvgText>
                     </G>
-                  );
-                }) : null}
-                {kidsExpanded ? childDefs.map((def) => {
-                  const pos = getPos(def);
-                  return (
-                    <GraphNodeSvg
-                      key={def.id}
-                      x={pos.x}
-                      y={pos.y}
-                      name={def.name}
-                      sub={def.sub}
-                      color={def.color}
-                      badge={def.badge}
-                      big={Boolean(def.big)}
-                      active={activeId === def.id}
-                    />
-                  );
-                }) : null}
+                  ) : null}
+                </G>
+              );
+            }) : null}
+            {kidsExpanded ? childDefs.map((def) => {
+              const pos = getPos(def);
+              return (
                 <GraphNodeSvg
-                  x={graphCenter.x}
-                  y={graphCenter.y}
-                  name={contact.name.split(' ')[0]}
-                  sub={kidsExpanded ? 'Click to collapse' : 'Click to expand'}
-                  color={T.primary}
-                  badge={contact.initials}
-                  big
-                  isProspect
-                  collapsed={!kidsExpanded}
-                  active={dragId.current === 'prospect'}
+                  key={def.id}
+                  x={pos.x}
+                  y={pos.y}
+                  name={def.name}
+                  sub={def.sub}
+                  color={def.color}
+                  badge={def.badge}
+                  big={Boolean(def.big)}
+                  active={activeId === def.id}
                 />
-              </Svg>
-            </View>
-          </ScrollView>
+              );
+            }) : null}
+            <GraphNodeSvg
+              x={graphCenter.x}
+              y={graphCenter.y}
+              name={contact.name.split(' ')[0]}
+              sub={kidsExpanded ? 'Click to collapse' : 'Click to expand'}
+              color={T.primary}
+              badge={contact.initials}
+              big
+              isProspect
+              collapsed={!kidsExpanded}
+              active={dragId.current === 'prospect'}
+            />
+          </Svg>
+        </View>
+      </ScrollView>
 
-          <View style={styles.graphLegend}>
-            <LegendItem color={T.primary} label="Strong route" />
-            <LegendItem color={T.linkedin} label="Mutual" dashed />
-            <LegendItem color={T.success} label="Customer reference" dashed />
-            <LegendItem color="#0369a1" label="Shared employer" />
-          </View>
+      <View style={styles.graphLegend}>
+        <LegendItem color={palette.primary} label="Strong route" />
+        <LegendItem color={T.linkedin} label="Mutual" dashed />
+        <LegendItem color={T.success} label="Customer reference" dashed />
+        <LegendItem color="#0369a1" label="Shared employer" />
+      </View>
         </View>
       </View>
     </Modal>
@@ -1220,13 +1630,14 @@ function GraphNodeSvg({
   collapsed?: boolean;
   active?: boolean;
 }) {
+  const palette = useProfilePalette();
   const r = big ? 26 : 18;
   return (
     <G x={x} y={y}>
       <Circle r={r + 14} fill="transparent" />
-      <Circle r={r + 4} fill="#fff" />
+      <Circle r={r + 4} fill={palette.graphCanvas} />
       <Circle r={r} fill={color} opacity={active ? 0.22 : 0.12} />
-      <Circle r={r} fill="#fff" stroke={color} strokeWidth={isProspect ? 2.5 : active ? 2 : 1.5} />
+      <Circle r={r} fill={palette.surfaceElevated} stroke={color} strokeWidth={isProspect ? 2.5 : active ? 2 : 1.5} />
       <SvgText
         x={0}
         y={4}
@@ -1246,11 +1657,11 @@ function GraphNodeSvg({
         </G>
       ) : null}
       <G y={r + 18}>
-        <SvgText x={0} y={0} textAnchor="middle" fontSize={11.5} fontWeight="800" fill={T.primaryHead}>
+        <SvgText x={0} y={0} textAnchor="middle" fontSize={11.5} fontWeight="800" fill={palette.primaryStrong}>
           {name}
         </SvgText>
         {sub ? (
-          <SvgText x={0} y={15} textAnchor="middle" fontSize={10.5} fill="#56657f">
+          <SvgText x={0} y={15} textAnchor="middle" fontSize={10.5} fill={palette.muted}>
             {sub}
           </SvgText>
         ) : null}
@@ -1260,24 +1671,27 @@ function GraphNodeSvg({
 }
 
 function LegendItem({ color, label, dashed }: { color: string; label: string; dashed?: boolean }) {
+  const palette = useProfilePalette();
   return (
     <View style={styles.legendItem}>
       <View style={[styles.legendLine, { backgroundColor: dashed ? 'transparent' : color, borderColor: color, borderStyle: dashed ? 'dashed' : 'solid' }]} />
-      <Typography variant="caption" color="#56657f">{label}</Typography>
+      <Typography variant="caption" color={palette.muted}>{label}</Typography>
     </View>
   );
 }
 
 function WarmMeta({ icon: Icon, label }: { icon: IconComponent; label: string }) {
+  const palette = useProfilePalette();
   return (
     <View style={styles.warmMeta}>
-      <Icon color="#64748b" size={12} />
-      <Typography variant="caption" color="#64748b">{label}</Typography>
+      <Icon color={palette.muted} size={12} />
+      <Typography variant="caption" color={palette.muted}>{label}</Typography>
     </View>
   );
 }
 
 function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact: boolean }) {
+  const palette = useProfilePalette();
   const days = 30;
   const channels = ['linkedin', 'whatsapp', 'email', 'voice', 'instagram', 'intent'];
   const grid = useMemo(() => {
@@ -1288,8 +1702,9 @@ function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact
       const diff = Math.floor((Date.now() - date.getTime()) / (1000 * 60 * 60 * 24));
       if (diff < 0 || diff >= days) return;
       const key = HEATMAP_CHANNEL[String(event.channel).toLowerCase()] || 'intent';
-      if (!out[key]) out.intent[days - 1 - diff] += 1;
-      else out[key][days - 1 - diff] += 1;
+      const weight = activityWeight(event);
+      if (!out[key]) out.intent[days - 1 - diff] += weight;
+      else out[key][days - 1 - diff] += weight;
     });
     return out;
   }, [events]);
@@ -1309,7 +1724,7 @@ function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact
               <View key={channel} style={styles.heatRow}>
                 <View style={styles.heatLabel}>
                   <Icon color={meta.color} size={13} />
-                  <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>{meta.label}</Typography>
+                  <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText}>{meta.label}</Typography>
                 </View>
                 <View style={styles.heatCells}>
                   {grid[channel].map((value, index) => (
@@ -1321,19 +1736,20 @@ function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact
                           width: cellSize,
                           height: cellSize,
                           backgroundColor: value ? meta.color : 'transparent',
+                          borderColor: value ? meta.color : palette.borderSoft,
                           opacity: value ? 0.25 + (value / max) * 0.75 : 1,
                         },
                       ]}
                     />
                   ))}
                 </View>
-                <Typography variant="caption" color="#64748b" style={styles.heatSum}>{sum}</Typography>
+                <Typography variant="caption" color={palette.muted} style={styles.heatSum}>{sum}</Typography>
               </View>
             );
           })}
           <View style={styles.heatFooter}>
-            <Typography variant="caption" color="#64748b">{days} days ago</Typography>
-            <Typography variant="caption" color="#64748b">Today</Typography>
+            <Typography variant="caption" color={palette.muted}>{days} days ago</Typography>
+            <Typography variant="caption" color={palette.muted}>Today</Typography>
           </View>
         </View>
       </ScrollView>
@@ -1342,13 +1758,14 @@ function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact
 }
 
 function FitSignalsCard({ contact }: { contact: CrmContact }) {
+  const palette = useProfilePalette();
   const signals = fitSignals(contact.raw);
   if (!signals.length) {
     return (
       <Card style={styles.equalCard}>
         <CardHeader title="Fit signals" subtitle="Not scored yet" />
         <View style={styles.emptyFit}>
-          <Typography variant="bodySmall" color="#64748b" align="center">
+          <Typography variant="bodySmall" color={palette.muted} align="center">
             No fit signals for this prospect yet - fit is computed when it is discovered via a search.
           </Typography>
         </View>
@@ -1362,11 +1779,11 @@ function FitSignalsCard({ contact }: { contact: CrmContact }) {
       <View style={styles.fitRows}>
         {signals.map((signal) => (
           <View key={signal.key} style={styles.fitRow}>
-            <Typography variant="caption" color="#64748b" style={styles.fitLabel}>{signal.label}</Typography>
-            <View style={styles.fitTrack}>
+            <Typography variant="caption" color={palette.muted} style={styles.fitLabel}>{signal.label}</Typography>
+            <View style={[styles.fitTrack, { backgroundColor: palette.badgeBg }]}>
               <View style={[styles.fitFill, { width: `${signal.value * 100}%` }]} />
             </View>
-            <Typography variant="caption" color={T.primaryHead} style={styles.fitNumber}>{Math.round(signal.value * 100)}</Typography>
+            <Typography variant="caption" color={palette.primaryStrong} style={styles.fitNumber}>{Math.round(signal.value * 100)}</Typography>
           </View>
         ))}
       </View>
@@ -1375,6 +1792,7 @@ function FitSignalsCard({ contact }: { contact: CrmContact }) {
 }
 
 function ChannelMixCard({ contact }: { contact: CrmContact }) {
+  const palette = useProfilePalette();
   const rolls = channelRollups(contact.raw);
   const total = rolls.reduce((sum, rollup) => sum + rollup.count, 0);
   return (
@@ -1382,14 +1800,14 @@ function ChannelMixCard({ contact }: { contact: CrmContact }) {
       <CardHeader title="Channel mix" subtitle={`${total} events - ${rolls.length} channels`} />
       {total === 0 ? (
         <View style={styles.emptyFit}>
-          <Typography variant="bodySmall" color="#64748b">No channel events yet.</Typography>
+          <Typography variant="bodySmall" color={palette.muted}>No channel events yet.</Typography>
         </View>
       ) : (
         <View style={styles.channelMixContent}>
           <View style={styles.donut}>
             <View style={styles.donutInner}>
-              <Typography variant="overline" color="#64748b">Events</Typography>
-              <Typography variant="h3" color={T.primaryHead} style={styles.kpiValue}>{total}</Typography>
+              <Typography variant="overline" color={palette.muted}>Events</Typography>
+              <Typography variant="h3" color={palette.primaryStrong} style={styles.kpiValue}>{total}</Typography>
             </View>
           </View>
           <View style={styles.channelLegend}>
@@ -1398,9 +1816,9 @@ function ChannelMixCard({ contact }: { contact: CrmContact }) {
               return (
                 <View key={rollup.channel} style={styles.legendRow}>
                   <View style={[styles.legendDot, { backgroundColor: meta.color }]} />
-                  <Typography variant="caption" color={T.primaryHead} style={styles.legendName} numberOfLines={1}>{meta.label}</Typography>
-                  <Typography variant="caption" color="#64748b">{rollup.count}</Typography>
-                  <Typography variant="caption" color="#94a3b8" style={styles.percentText}>{Math.round((rollup.count / total) * 100)}%</Typography>
+                  <Typography variant="caption" color={palette.primaryStrong} style={styles.legendName} numberOfLines={1}>{meta.label}</Typography>
+                  <Typography variant="caption" color={palette.muted}>{rollup.count}</Typography>
+                  <Typography variant="caption" color={palette.disabled} style={styles.percentText}>{Math.round((rollup.count / total) * 100)}%</Typography>
                 </View>
               );
             })}
@@ -1412,6 +1830,7 @@ function ChannelMixCard({ contact }: { contact: CrmContact }) {
 }
 
 function IntentCard({ contact }: { contact: CrmContact }) {
+  const palette = useProfilePalette();
   const signals = intentSignals(contact.raw);
   if (!signals.length) return null;
 
@@ -1423,17 +1842,17 @@ function IntentCard({ contact }: { contact: CrmContact }) {
           const meta = intentMeta(signal.signalType);
           const Icon = meta.Icon;
           return (
-            <View key={signal.id} style={styles.intentCard}>
+            <View key={signal.id} style={[styles.intentCard, { borderColor: palette.border, backgroundColor: palette.pillBg }]}>
               <View style={[styles.intentIcon, { backgroundColor: `${meta.color}1a` }]}>
                 <Icon color={meta.color} size={17} />
               </View>
-              <Typography variant="overline" color="#64748b">{meta.label}</Typography>
-              <Typography variant="bodySmall" color={T.primaryHead} style={styles.boldText}>{meta.description(signal.payload)}</Typography>
+              <Typography variant="overline" color={palette.muted}>{meta.label}</Typography>
+              <Typography variant="bodySmall" color={palette.primaryStrong} style={styles.boldText}>{meta.description(signal.payload)}</Typography>
               <View style={styles.intentConfidence}>
-                <View style={styles.fitTrack}>
+                <View style={[styles.fitTrack, { backgroundColor: palette.badgeBg }]}>
                   <View style={[styles.fitFill, { width: `${signal.confidence * 100}%`, backgroundColor: meta.color }]} />
                 </View>
-                <Typography variant="caption" color="#64748b">{Math.round(signal.confidence * 100)}%</Typography>
+                <Typography variant="caption" color={palette.muted}>{Math.round(signal.confidence * 100)}%</Typography>
               </View>
             </View>
           );
@@ -1444,6 +1863,7 @@ function IntentCard({ contact }: { contact: CrmContact }) {
 }
 
 function RecentActivityCard({ events }: { events: ProspectEvent[] }) {
+  const palette = useProfilePalette();
   const recent = events.slice(0, 8);
   return (
     <Card>
@@ -1458,18 +1878,18 @@ function RecentActivityCard({ events }: { events: ProspectEvent[] }) {
                 <Icon color={meta.color} size={14} />
               </View>
               <View style={styles.feedCopy}>
-                <Typography variant="caption" color="#64748b">
-                  <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>{meta.label}</Typography>
+                <Typography variant="caption" color={palette.muted}>
+                  <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText}>{meta.label}</Typography>
                   {` - ${event.direction || 'system'}  ${rel(event.occurred_at)} ago`}
                 </Typography>
-                <Typography variant="caption" color={T.primaryHead} numberOfLines={2}>
+                <Typography variant="caption" color={palette.primaryStrong} numberOfLines={2}>
                   {payloadPreview(event.payload, event.event_type)}
                 </Typography>
               </View>
             </View>
           );
         }) : (
-          <Typography variant="bodySmall" color="#64748b">No activity yet.</Typography>
+          <Typography variant="bodySmall" color={palette.muted}>No activity yet.</Typography>
         )}
       </View>
     </Card>
@@ -1488,11 +1908,18 @@ function ActionsCard({
   onAction: (action: 'quiet' | 'suppress' | 'intro' | 'message') => Promise<void>;
 }) {
   const quietActive = Boolean(contact.raw.quiet_until && new Date(contact.raw.quiet_until).getTime() > Date.now());
+  const hasIntroRoute = Boolean(warmPath.topConnection.name && !warmPath.sample);
   return (
     <Card>
       <CardHeader title="Take action" />
       <View style={styles.actionGrid}>
-        <ActionButton icon={Route} label="Ask for intro" hint={`via ${warmPath.topConnection.name.split(' ')[0]}`} primary onPress={() => onAction('intro')} />
+        <ActionButton
+          icon={Route}
+          label="Ask for intro"
+          hint={hasIntroRoute ? `via ${warmPath.topConnection.name.split(' ')[0]}` : 'no warm route yet'}
+          primary={hasIntroRoute}
+          onPress={() => onAction('intro')}
+        />
         <ActionButton icon={SendHorizontal} label="Send message" hint={`best: ${channelMeta(contact.raw.last_channel).label}`} onPress={() => onAction('message')} />
         <ActionButton
           icon={MoonStar}
@@ -1535,7 +1962,8 @@ function ActionButton({
   busy?: boolean;
   onPress: () => void;
 }) {
-  const color = primary ? '#fff' : danger ? T.danger : T.primary;
+  const palette = useProfilePalette();
+  const color = primary ? '#fff' : danger ? palette.dangerText : palette.primary;
   return (
     <TouchableOpacity
       activeOpacity={0.78}
@@ -1543,32 +1971,34 @@ function ActionButton({
       onPress={onPress}
       style={[
         styles.actionButton,
+        { backgroundColor: palette.surface, borderColor: danger ? palette.dangerBorder : palette.border },
         primary && styles.actionPrimary,
-        danger && styles.actionDanger,
+        danger && [styles.actionDanger, { backgroundColor: palette.dangerBg, borderColor: palette.dangerBorder }],
         active && styles.actionActive,
       ]}
     >
-      <View style={[styles.actionIcon, primary && styles.actionIconPrimary, danger && styles.actionIconDanger]}>
+      <View style={[styles.actionIcon, { backgroundColor: palette.badgeBg }, primary && styles.actionIconPrimary, danger && [styles.actionIconDanger, { backgroundColor: palette.dangerBg }]]}>
         {busy ? <ActivityIndicator color={color} size="small" /> : <Icon color={color} size={19} />}
       </View>
       <View style={styles.actionCopy}>
         <Typography variant="caption" color={color} style={styles.boldText} numberOfLines={1}>{label}</Typography>
-        <Typography variant="caption" color={primary ? '#dbeafe' : '#64748b'} numberOfLines={1}>{hint}</Typography>
+        <Typography variant="caption" color={primary ? '#DBEAFE' : palette.muted} numberOfLines={1}>{hint}</Typography>
       </View>
     </TouchableOpacity>
   );
 }
 
 function NextFollowupsCard({ followups, loading }: { followups: ProspectFollowup[]; loading: boolean }) {
+  const palette = useProfilePalette();
   return (
     <Card>
       <CardHeader title="Next follow-ups" subtitle={loading ? 'Loading...' : followups.length ? `${followups.length} scheduled` : 'Automatic outreach'} />
       {loading ? (
-        <Typography variant="bodySmall" color="#64748b">Checking the schedule...</Typography>
+        <Typography variant="bodySmall" color={palette.muted}>Checking the schedule...</Typography>
       ) : followups.length === 0 ? (
         <View style={styles.followupEmpty}>
-          <CalendarClock color="#64748b" size={16} />
-          <Typography variant="bodySmall" color="#64748b">No automatic follow-ups queued.</Typography>
+          <CalendarClock color={palette.muted} size={16} />
+          <Typography variant="bodySmall" color={palette.muted}>No automatic follow-ups queued.</Typography>
         </View>
       ) : (
         <View style={styles.followupList}>
@@ -1577,14 +2007,14 @@ function NextFollowupsCard({ followups, loading }: { followups: ProspectFollowup
             const Icon = meta.Icon;
             return (
               <View key={followup.id} style={styles.followupRow}>
-                <View style={styles.followupIcon}>
+                <View style={[styles.followupIcon, { backgroundColor: palette.badgeBg }]}>
                   <Icon color={meta.color} size={15} />
                 </View>
                 <View style={styles.followupCopy}>
-                  <Typography variant="caption" color={T.primaryHead} style={styles.boldText} numberOfLines={1}>
+                  <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText} numberOfLines={1}>
                     {meta.label}{followup.type ? ` - ${titleCase(followup.type)}` : ''}
                   </Typography>
-                  <Typography variant="caption" color="#64748b" numberOfLines={1}>
+                  <Typography variant="caption" color={palette.muted} numberOfLines={1}>
                     {fmtDateTime(followup.scheduled_time)}{followup.attempt ? ` - attempt ${followup.attempt}` : ''}
                   </Typography>
                 </View>
@@ -1606,15 +2036,17 @@ function Card({
   padded?: boolean;
   style?: object;
 }) {
-  return <View style={[styles.card, padded && styles.cardPadded, style]}>{children}</View>;
+  const palette = useProfilePalette();
+  return <View style={[styles.card, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }, padded && styles.cardPadded, style]}>{children}</View>;
 }
 
 function CardHeader({ title, subtitle, action }: { title: string; subtitle?: string; action?: React.ReactNode }) {
+  const palette = useProfilePalette();
   return (
     <View style={styles.cardHeader}>
       <View style={styles.cardHeaderText}>
-        <Typography variant="bodySmall" color={T.primaryHead} style={styles.cardTitle}>{title}</Typography>
-        {subtitle ? <Typography variant="caption" color="#64748b">{subtitle}</Typography> : null}
+        <Typography variant="bodySmall" color={palette.primaryStrong} style={styles.cardTitle}>{title}</Typography>
+        {subtitle ? <Typography variant="caption" color={palette.muted}>{subtitle}</Typography> : null}
       </View>
       {action}
     </View>
@@ -1636,14 +2068,14 @@ function engagementDailyCounts(events: ProspectEvent[]) {
   events.forEach((event) => {
     const date = new Date(event.occurred_at);
     const diff = Math.floor((Date.now() - date.getTime()) / (1000 * 60 * 60 * 24));
-    if (diff >= 0 && diff < days) counts[days - 1 - diff] += 1;
+    if (diff >= 0 && diff < days) counts[days - 1 - diff] += activityWeight(event);
   });
   return counts;
 }
 
 function warmRouteCount(warmPath: WarmPath) {
   return (
-    (warmPath.topConnection ? 1 : 0) +
+    (warmPath.topConnection.name ? 1 : 0) +
     (warmPath.sharedEmployer ? 1 : 0) +
     warmPath.mutualConnections.length +
     (warmPath.customerReference ? 1 : 0) +
@@ -1653,6 +2085,7 @@ function warmRouteCount(warmPath: WarmPath) {
 
 function buildGraphChildren(warmPath: WarmPath, graphWidth: number, center: GraphPos): GraphChildDef[] {
   const out: GraphChildDef[] = [];
+  if (!warmPath.topConnection.name) return out;
   const narrow = graphWidth < 560;
   const leftX = narrow ? Math.max(72, center.x - 128) : 150;
   const rightRadius = narrow ? Math.max(108, Math.min(148, graphWidth * 0.34)) : 250;
@@ -1668,7 +2101,7 @@ function buildGraphChildren(warmPath: WarmPath, graphWidth: number, center: Grap
     big: true,
     label: {
       confidence: warmPath.topConnection.confidence,
-      note: `ex-${warmPath.sharedEmployer?.company || 'colleagues'}`,
+      note: warmPath.sharedEmployer ? `ex-${warmPath.sharedEmployer.company}` : 'network',
     },
     linkType: 'primary',
   });
@@ -1792,10 +2225,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#F8F9FE',
   },
   content: {
+    position: 'relative',
     gap: 14,
     paddingTop: Theme.spacing.xl,
   },
+  profileMenuDismissLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 900,
+    elevation: 20,
+  },
   topBar: {
+    position: 'relative',
+    zIndex: 1000,
+    elevation: 24,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -1826,6 +2268,9 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   topActions: {
+    position: 'relative',
+    zIndex: 1001,
+    elevation: 24,
     flexDirection: 'row',
     alignItems: 'center',
     gap: Theme.spacing.sm,
@@ -1834,6 +2279,11 @@ const styles = StyleSheet.create({
     width: '100%',
     justifyContent: 'space-between',
     flexWrap: 'nowrap',
+  },
+  topActionsMenuDismissLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1001,
+    elevation: 24,
   },
   topActionButton: {
     minHeight: 36,
@@ -1852,6 +2302,13 @@ const styles = StyleSheet.create({
     minWidth: 0,
     paddingHorizontal: Theme.spacing.sm,
   },
+  moreActionWrap: {
+    position: 'relative',
+    zIndex: 1002,
+    elevation: 25,
+    minHeight: 36,
+    overflow: 'visible',
+  },
   removeButton: {
     borderColor: '#fecdd3',
   },
@@ -1864,6 +2321,54 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: Theme.spacing.xs,
+  },
+  messageButtonCompact: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: Theme.spacing.sm,
+  },
+  messageMoreButton: {
+    width: 38,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  disabledAction: {
+    opacity: 0.55,
+  },
+  actionMenu: {
+    position: 'absolute',
+    top: 44,
+    right: 0,
+    width: 226,
+    borderWidth: 1,
+    borderRadius: 12,
+    overflow: 'hidden',
+    ...Theme.shadows.medium,
+    zIndex: 9999,
+    elevation: 30,
+  },
+  actionMenuItem: {
+    minHeight: 54,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: Theme.spacing.sm,
+    paddingVertical: Theme.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+  },
+  actionMenuIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionMenuCopy: {
+    flex: 1,
+    minWidth: 0,
   },
   loadingCard: {
     minHeight: 220,
@@ -2021,6 +2526,33 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: T.success,
+  },
+  profileDetailsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Theme.spacing.sm,
+  },
+  profileDetailsGridCompact: {
+    gap: Theme.spacing.xs,
+  },
+  profileDetailItem: {
+    flexGrow: 1,
+    flexBasis: '23%',
+    minWidth: 170,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#eef2f7',
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: Theme.spacing.sm,
+  },
+  profileDetailItemCompact: {
+    flexBasis: '48%',
+    minWidth: 0,
+  },
+  profileDetailValue: {
+    marginTop: 2,
+    fontWeight: '800',
   },
   kpiGrid: {
     flex: 1,
@@ -2244,6 +2776,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#cbd5e1',
     marginBottom: Theme.spacing.xs,
   },
+  graphSheetTitle: {
+    fontWeight: '900',
+  },
   graphSheetHeader: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -2253,9 +2788,6 @@ const styles = StyleSheet.create({
   graphTitleBlock: {
     flex: 1,
     minWidth: 0,
-  },
-  graphSheetTitle: {
-    fontWeight: '900',
   },
   graphHeaderActions: {
     flexDirection: 'row',
@@ -2287,6 +2819,7 @@ const styles = StyleSheet.create({
     height: GRAPH_H,
     position: 'relative',
     backgroundColor: '#fff',
+    borderRadius: 14,
   },
   graphHint: {
     position: 'absolute',

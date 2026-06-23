@@ -50,8 +50,13 @@ export interface MakeCallRequest {
   phoneNumber: string;
   context?: string | Record<string, unknown>;
   fromNumber?: string;
+  fromNumberId?: string;
+  contactName?: string;
+  agentName?: string;
   openingMessage?: string;
   clientCallId?: string;
+  startedAt?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface MakeCallResponse {

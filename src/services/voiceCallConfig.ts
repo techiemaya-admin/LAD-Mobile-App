@@ -201,21 +201,52 @@ const mergeAgentWithSettings = (agent: VoiceAgentOption, settingsAgent?: VoiceAg
   };
 };
 
-export const fetchVoiceCallOptions = async () => {
-  const [agentsResponse, settingsAgentsResponse, numbersResponse] = await Promise.all([
-    apiGet<unknown>('/api/voice-agent/user/available-agents'),
-    apiGet<unknown>('/api/voice-agent/settings/agents').catch(() => null),
-    apiGet<unknown>('/api/voice-agent/user/available-numbers').catch(() => apiGet<unknown>('/api/voice-agent/available-numbers')),
-  ]);
+type VoiceCallOptions = {
+  agents: VoiceAgentOption[];
+  numbers: VoiceNumberOption[];
+};
 
-  const settingsAgents = settingsAgentsResponse ? normalizeVoiceAgents(settingsAgentsResponse.data) : [];
-  const settingsById = new Map(settingsAgents.map((agent) => [agent.id, agent]));
-  const agents = normalizeVoiceAgents(agentsResponse.data).map((agent) => mergeAgentWithSettings(agent, settingsById.get(agent.id)));
+const VOICE_CALL_OPTIONS_CACHE_MS = 60 * 1000;
+let voiceCallOptionsCache: { value: VoiceCallOptions; fetchedAt: number } | null = null;
+let voiceCallOptionsRequest: Promise<VoiceCallOptions> | null = null;
 
-  return {
-    agents,
-    numbers: normalizeVoiceNumbers(numbersResponse.data),
-  };
+export const fetchVoiceCallOptions = async (options: { force?: boolean } = {}) => {
+  const now = Date.now();
+  if (!options.force && voiceCallOptionsCache && now - voiceCallOptionsCache.fetchedAt < VOICE_CALL_OPTIONS_CACHE_MS) {
+    return voiceCallOptionsCache.value;
+  }
+
+  if (!options.force && voiceCallOptionsRequest) {
+    return voiceCallOptionsRequest;
+  }
+
+  voiceCallOptionsRequest = (async () => {
+    const [agentsResponse, settingsAgentsResponse, numbersResponse] = await Promise.all([
+      apiGet<unknown>('/api/voice-agent/user/available-agents'),
+      apiGet<unknown>('/api/voice-agent/settings/agents').catch(() => null),
+      // Match LAD-Frontend-2's number pool: it loads from /available-numbers.
+      // Using the same endpoint ensures the from-numbers shown here are the same
+      // verified, dispatch-capable numbers the working web app uses.
+      apiGet<unknown>('/api/voice-agent/available-numbers').catch(() => apiGet<unknown>('/api/voice-agent/user/available-numbers')),
+    ]);
+
+    const settingsAgents = settingsAgentsResponse ? normalizeVoiceAgents(settingsAgentsResponse.data) : [];
+    const settingsById = new Map(settingsAgents.map((agent) => [agent.id, agent]));
+    const agents = normalizeVoiceAgents(agentsResponse.data).map((agent) => mergeAgentWithSettings(agent, settingsById.get(agent.id)));
+
+    const value = {
+      agents,
+      numbers: normalizeVoiceNumbers(numbersResponse.data),
+    };
+    voiceCallOptionsCache = { value, fetchedAt: Date.now() };
+    return value;
+  })();
+
+  try {
+    return await voiceCallOptionsRequest;
+  } finally {
+    voiceCallOptionsRequest = null;
+  }
 };
 
 export const buildSyncedVoiceAgentPrompt = (context: string) => {

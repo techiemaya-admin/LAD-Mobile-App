@@ -22,6 +22,9 @@ react {
 
     // Build Android Studio debug APKs as standalone APKs instead of waiting for Metro.
     debuggableVariants = []
+    // Android Studio launches Gradle without the shell env used by npm scripts.
+    // This wrapper loads .env.local before Expo embeds the JS bundle.
+    nodeExecutableAndArgs = ["node", new File(projectRoot, "scripts/with-env-node.js").absolutePath]
 
     /* Folders */
      //   The root of your project, i.e. where "package.json" lives. Default is '../..'

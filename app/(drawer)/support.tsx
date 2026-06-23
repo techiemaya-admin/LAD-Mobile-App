@@ -8,16 +8,19 @@ import { Button } from '@/components/ui/Button';
 import { getSupportOverview, submitSupportRequest, SupportOverview } from '@/src/services/settingsHub';
 import useAuthStore from '@/src/store/authStore';
 import { useAppTheme } from '@/src/theme/appTheme';
+import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
+
+const SUPPORT_CACHE_KEY = 'drawer.support';
 
 export default function SupportScreen() {
   const appTheme = useAppTheme();
   const user = useAuthStore((state) => state.user);
-  const [support, setSupport] = useState<SupportOverview | null>(null);
+  const [support, setSupport] = useState<SupportOverview | null>(() => readScreenCache<SupportOverview>(SUPPORT_CACHE_KEY)?.value ?? null);
   const [name, setName] = useState(user?.name || '');
   const [email, setEmail] = useState(user?.email || '');
   const [subject, setSubject] = useState('LAD app support request');
   const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !readScreenCache<SupportOverview>(SUPPORT_CACHE_KEY));
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -33,6 +36,7 @@ export default function SupportScreen() {
     try {
       const data = await getSupportOverview();
       setSupport(data);
+      writeScreenCache(SUPPORT_CACHE_KEY, data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load support status.');
     } finally {
@@ -42,8 +46,10 @@ export default function SupportScreen() {
   }, []);
 
   useEffect(() => {
-    loadSupport();
-  }, [loadSupport]);
+    if (loading) {
+      loadSupport();
+    }
+  }, [loadSupport, loading]);
 
   const handleSubmit = async () => {
     if (!name.trim() || !email.trim() || !message.trim()) {
@@ -87,14 +93,14 @@ export default function SupportScreen() {
   return (
     <View style={[styles.container, { backgroundColor: appTheme.background }]}>
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingTop: Theme.spacing.lg }]}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadSupport(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
       >
         <View style={styles.header}>
           <View style={styles.headerText}>
-            <Typography variant="h2" style={styles.headerTitle}>How can we help?</Typography>
-            <Typography variant="bodyLarge" color={appTheme.muted}>
+            <Typography variant="h2" style={styles.headerTitle} numberOfLines={2}>How can we help?</Typography>
+            <Typography variant="bodyLarge" color={appTheme.muted} numberOfLines={3}>
               Send a support request to the LAD backend or email the team directly.
             </Typography>
           </View>
@@ -167,11 +173,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
-    marginBottom: Theme.spacing.xxl,
+    marginBottom: Theme.spacing.xl,
     gap: Theme.spacing.md,
   },
   headerText: {
     flex: 1,
+    minWidth: 0,
   },
   headerTitle: {
     marginBottom: Theme.spacing.sm,

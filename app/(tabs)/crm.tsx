@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Modal,
   Platform,
   RefreshControl,
@@ -14,6 +15,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
 import {
   BadgeCheck,
@@ -40,13 +42,17 @@ import {
   Sparkles,
   Trash2,
   TrendingUp,
+  UserPlus,
   Users,
   X,
 } from 'lucide-react-native';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
-import { connectSocket } from '@/src/services/socketService';
+import { useAppTheme } from '@/src/theme/appTheme';
+import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { SkeletonActivityRow, SkeletonSummaryCard } from '@/components/ui/SkeletonLoader';
+import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 import {
   CRM_STAGES,
   ChannelKey,
@@ -55,8 +61,6 @@ import {
   ProspectCRMData,
   ProspectEvent,
   ProspectFollowup,
-  SearchBackendRollup,
-  SearchRunResult,
   buildCounts,
   deleteProspect,
   enrichProspect,
@@ -66,9 +70,10 @@ import {
   initialsOf,
   listProspectEvents,
   prospectAction,
-  runProspectSearch,
   toCrmContact,
 } from '@/src/services/prospectsService';
+import { getTeamMembers, TeamMember } from '@/src/services/settingsHub';
+import { assignCRMLeadsToUser } from '@/src/services/pipelineService';
 
 type IconComponent = React.ComponentType<{ color?: string; size?: number; strokeWidth?: number }>;
 
@@ -96,22 +101,11 @@ const EMPTY_DATA: ProspectCRMData = {
   kanbanLeads: [],
   counts: { all: 0, prospects: 0, leads: 0, clients: 0 },
 };
-
-const MAX_RESULTS_OPTIONS = [5, 25, 50, 100, 250, 500];
-
-const LIVE_EVENTS = [
-  'prospect.created',
-  'prospect.updated',
-  'prospect.deleted',
-  'prospect:created',
-  'prospect:updated',
-  'prospects:updated',
-  'fit.discovered',
-  'fit:discovered',
-  'master-agent:prospect',
-  'crm:update',
-  'crm:updated',
-];
+type CrmScreenCache = {
+  data: ProspectCRMData;
+  lastSyncedAt: number;
+};
+const CRM_CACHE_KEY = 'tabs.crm.data';
 
 const CHANNELS: Record<string, { label: string; color: string; Icon: IconComponent }> = {
   linkedin: { label: 'LinkedIn', color: T.linkedin, Icon: BriefcaseBusiness },
@@ -161,6 +155,37 @@ const TYPE_META: Record<string, { label: string; color: string; bg: string }> = 
   imported: { label: 'Imported', color: '#64748b', bg: '#f1f5f9' },
   inbound: { label: 'Inbound', color: '#a16207', bg: '#fef3c7' },
 };
+
+function useCrmPalette() {
+  const appTheme = useAppTheme();
+  return useMemo(() => ({
+    darkMode: appTheme.darkMode,
+    background: appTheme.darkMode ? '#0F172A' : '#F8F9FE',
+    surface: appTheme.surface,
+    surfaceElevated: appTheme.darkMode ? '#172033' : '#fff',
+    softSurface: appTheme.softSurface,
+    input: appTheme.input,
+    text: appTheme.text,
+    muted: appTheme.muted,
+    disabled: appTheme.disabled,
+    border: appTheme.border,
+    borderSoft: appTheme.borderSoft,
+    primary: appTheme.darkMode ? '#B8C7FF' : T.primary,
+    primaryText: appTheme.darkMode ? '#F8FAFC' : T.primaryHead,
+    icon: appTheme.darkMode ? '#E2E8F0' : '#1e293b',
+    badgeBg: appTheme.darkMode ? 'rgba(184, 199, 255, 0.16)' : T.badgeBg,
+    neutralPill: appTheme.darkMode ? '#1E293B' : '#f1f5f9',
+    errorBg: appTheme.darkMode ? 'rgba(239, 68, 68, 0.12)' : '#fff1f2',
+    errorBorder: appTheme.darkMode ? 'rgba(248, 113, 113, 0.38)' : '#fecdd3',
+    errorText: appTheme.darkMode ? '#FCA5A5' : '#be123c',
+    successBg: appTheme.darkMode ? 'rgba(34, 197, 94, 0.12)' : '#ecfdf5',
+    successBorder: appTheme.darkMode ? 'rgba(34, 197, 94, 0.30)' : '#bbf7d0',
+    successText: appTheme.darkMode ? '#86EFAC' : '#166534',
+    infoBg: appTheme.darkMode ? 'rgba(59, 130, 246, 0.14)' : '#eff6ff',
+    infoBorder: appTheme.darkMode ? 'rgba(96, 165, 250, 0.30)' : '#bfdbfe',
+    infoText: appTheme.darkMode ? '#BFDBFE' : '#1d4ed8',
+  }), [appTheme]);
+}
 
 function rel(from?: string | null, now = new Date()): string {
   if (!from) return '-';
@@ -221,19 +246,10 @@ function payloadPreview(payload?: Record<string, unknown>) {
   return JSON.stringify(payload).slice(0, 120);
 }
 
-function friendlySearchError(message: string) {
-  if (message === 'no_active_icp') {
-    return 'No active ICP found. Define your Ideal Customer Profile first.';
-  }
-  if (message.toLowerCase().includes('tenant')) {
-    return 'Session tenant could not be resolved. Sign in again or check tenant settings.';
-  }
-  return message;
-}
-
 export default function CRMScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const palette = useCrmPalette();
   const { width } = useWindowDimensions();
   const isPhone = width < 480;
   const isCompact = width < 720;
@@ -248,27 +264,51 @@ export default function CRMScreen() {
       ? Math.min(380, Math.max(320, width - horizontalPadding * 2))
       : 280;
 
-  const [data, setData] = useState<ProspectCRMData>(EMPTY_DATA);
+  const [data, setData] = useState<ProspectCRMData>(() => readScreenCache<CrmScreenCache>(CRM_CACHE_KEY)?.value.data ?? EMPTY_DATA);
   const [view, setView] = useState<VisibleView>('board');
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [stageFilter, setStageFilter] = useState<string>('all');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !readScreenCache<CrmScreenCache>(CRM_CACHE_KEY));
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(() => {
+    const cached = readScreenCache<CrmScreenCache>(CRM_CACHE_KEY);
+    return cached ? new Date(cached.value.lastSyncedAt) : null;
+  });
   const [selectedContact, setSelectedContact] = useState<CrmContact | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [events, setEvents] = useState<ProspectEvent[]>([]);
   const [followups, setFollowups] = useState<ProspectFollowup[]>([]);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [maxResults, setMaxResults] = useState(25);
-  const [searchRunning, setSearchRunning] = useState(false);
-  const [searchResult, setSearchResult] = useState<SearchRunResult | null>(null);
-  const [searchError, setSearchError] = useState<string | null>(null);
+  const crmPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Silent background refresh every 90 s while the CRM tab is focused
+  useFocusEffect(
+    useCallback(() => {
+      crmPollRef.current = setInterval(() => {
+        fetchProspectCRMData({ limit: 200 })
+          .then((next) => {
+            setData(next);
+            const syncedAt = Date.now();
+            setLastSyncedAt(new Date(syncedAt));
+            writeScreenCache(CRM_CACHE_KEY, { data: next, lastSyncedAt: syncedAt });
+          })
+          .catch(() => { /* silent */ });
+      }, 90_000);
+      return () => {
+        if (crmPollRef.current) {
+          clearInterval(crmPollRef.current);
+          crmPollRef.current = null;
+        }
+      };
+    }, []),
+  );
 
   const openProfile = useCallback((contact: CrmContact) => {
-    router.push(`/crm/${encodeURIComponent(contact.id)}` as never);
+    const source = String(contact.raw.crm_source || contact.raw.backend_source || contact.source || '');
+    const sourceQuery = source ? `?source=${encodeURIComponent(source)}` : '';
+    router.push(`/crm/${encodeURIComponent(contact.id)}${sourceQuery}` as never);
   }, [router]);
 
   const loadCRM = useCallback(async (asRefresh = false) => {
@@ -279,7 +319,9 @@ export default function CRMScreen() {
     try {
       const next = await fetchProspectCRMData({ limit: 200 });
       setData(next);
-      setLastSyncedAt(new Date());
+      const syncedAt = Date.now();
+      setLastSyncedAt(new Date(syncedAt));
+      writeScreenCache(CRM_CACHE_KEY, { data: next, lastSyncedAt: syncedAt });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Could not load prospects.');
     } finally {
@@ -289,27 +331,10 @@ export default function CRMScreen() {
   }, []);
 
   useEffect(() => {
-    void loadCRM();
-  }, [loadCRM]);
-
-  useEffect(() => {
-    const timer = setInterval(() => void loadCRM(true), 20000);
-    return () => clearInterval(timer);
-  }, [loadCRM]);
-
-  useEffect(() => {
-    let socket: ReturnType<typeof connectSocket> | null = null;
-    try {
-      socket = connectSocket();
-      const refresh = () => void loadCRM(true);
-      LIVE_EVENTS.forEach((event) => socket?.on(event, refresh));
-      return () => {
-        LIVE_EVENTS.forEach((event) => socket?.off(event, refresh));
-      };
-    } catch {
-      return undefined;
+    if (loading) {
+      void loadCRM();
     }
-  }, [loadCRM]);
+  }, [loadCRM, loading]);
 
   const baseRows = useMemo(() => {
     if (view === 'prospects') return data.contacts.filter((contact) => contact.type === 'prospect');
@@ -347,8 +372,14 @@ export default function CRMScreen() {
       setDetailLoading(true);
       try {
         const [prospect, nextEvents, nextFollowups] = await Promise.all([
-          getProspect(selectedContact.id).catch(() => null),
-          listProspectEvents(selectedContact.id, { limit: 100 }).catch(() => []),
+          getProspect(selectedContact.id, {
+            source: String(selectedContact.raw.crm_source || selectedContact.raw.backend_source || selectedContact.source || ''),
+            snapshot: selectedContact.raw,
+          }).catch(() => null),
+          listProspectEvents(selectedContact.id, {
+            limit: 100,
+            source: String(selectedContact.raw.crm_source || selectedContact.raw.backend_source || selectedContact.source || ''),
+          }).catch(() => []),
           getProspectFollowups(selectedContact.id).catch(() => []),
         ]);
 
@@ -368,7 +399,10 @@ export default function CRMScreen() {
   }, [selectedContact?.id]);
 
   const refreshSelected = async (contact: CrmContact) => {
-    const prospect = await getProspect(contact.id);
+    const prospect = await getProspect(contact.id, {
+      source: String(contact.raw.crm_source || contact.raw.backend_source || contact.source || ''),
+      snapshot: contact.raw,
+    });
     const updated = toCrmContact(prospect);
     setSelectedContact(updated);
     setData((current) => {
@@ -380,21 +414,6 @@ export default function CRMScreen() {
         counts: buildCounts(contacts),
       };
     });
-  };
-
-  const runSearch = async () => {
-    setSearchRunning(true);
-    setSearchError(null);
-    setSearchResult(null);
-    try {
-      const result = await runProspectSearch({ maxResults, triggeredBy: 'manual' });
-      setSearchResult(result);
-      setTimeout(() => void loadCRM(true), 1500);
-    } catch (searchRunError) {
-      setSearchError(searchRunError instanceof Error ? searchRunError.message : 'Search failed.');
-    } finally {
-      setSearchRunning(false);
-    }
   };
 
   const confirmRemove = (contact: CrmContact) => {
@@ -430,14 +449,16 @@ export default function CRMScreen() {
     ]);
   };
 
-  const handleProspectAction = async (contact: CrmContact, action: 'pause' | 'suppress' | 'enrich') => {
+  const handleProspectAction = async (contact: CrmContact, action: 'pause' | 'suppress' | 'enrich' | 'assign', assigneeId?: string) => {
     setBusyAction(action);
     try {
       if (action === 'pause') {
         await prospectAction(contact.id, { quietDays: 7 });
       } else if (action === 'suppress') {
         await prospectAction(contact.id, { doNotContact: true });
-      } else {
+      } else if (action === 'assign' && assigneeId) {
+        await assignCRMLeadsToUser(assigneeId, [contact.id]);
+      } else if (action === 'enrich') {
         await enrichProspect(contact.id);
       }
       await refreshSelected(contact);
@@ -487,7 +508,7 @@ export default function CRMScreen() {
     : 'pending';
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top, backgroundColor: '#F8F9FE' }]}>
+    <AnimatedScreen style={[styles.container, { paddingTop: insets.top, backgroundColor: palette.background }]}>
       <ScrollView
         contentContainerStyle={[
           styles.content,
@@ -500,19 +521,19 @@ export default function CRMScreen() {
             alignSelf: 'center',
           },
         ]}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadCRM(true)} tintColor={T.primary} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadCRM(true)} tintColor={palette.primary} />}
         showsVerticalScrollIndicator={false}
         onScroll={handleBottomTabScroll}
         scrollEventThrottle={16}
       >
         <View style={styles.pageHeader}>
           <View style={styles.titleRow}>
-            <TrendingUp color="#1e293b" size={isCompact ? 25 : 30} />
+            <TrendingUp color={palette.icon} size={isCompact ? 25 : 30} />
             <View style={styles.titleText}>
-              <Typography variant={isCompact ? 'h2' : 'h1'} color="#1e293b" style={styles.pageTitle}>
+              <Typography variant={isCompact ? 'h2' : 'h1'} color={palette.text} style={styles.pageTitle}>
                 Deals Pipeline
               </Typography>
-              <Typography variant="bodySmall" color="#56657f">
+              <Typography variant="bodySmall" color={palette.muted}>
                 Live cross-channel prospects from the Master Agent
               </Typography>
             </View>
@@ -520,44 +541,44 @@ export default function CRMScreen() {
           <TouchableOpacity
             onPress={() => void loadCRM(true)}
             activeOpacity={0.78}
-            style={styles.refreshButton}
+            style={[styles.refreshButton, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}
           >
-            {refreshing ? <ActivityIndicator color={T.primary} size="small" /> : <RefreshCw color={T.primaryHead} size={18} />}
+            {refreshing ? <ActivityIndicator color={palette.primary} size="small" /> : <RefreshCw color={palette.primaryText} size={18} />}
           </TouchableOpacity>
         </View>
 
-        <RunSearchPanel
-          maxResults={maxResults}
-          setMaxResults={setMaxResults}
-          running={searchRunning}
-          result={searchResult}
-          error={searchError}
-          onRun={runSearch}
-          onDismiss={() => {
-            setSearchError(null);
-            setSearchResult(null);
-          }}
-        />
-
         {error ? (
-          <View style={styles.errorBox}>
-            <Typography variant="bodySmall" color="#b45309">{error}</Typography>
+          <View style={[styles.errorBox, { backgroundColor: palette.errorBg, borderColor: palette.errorBorder }]}>
+            <Typography variant="bodySmall" color={palette.errorText}>{error}</Typography>
           </View>
         ) : null}
 
-        <StatsCards counts={data.counts} selected={view} onSelect={(next) => setView(view === next ? 'board' : next)} />
+        <StatsCards
+          counts={data.counts}
+          selected={view}
+          isPending={false}
+          onSelect={(next) => setView(view === next ? 'board' : next)}
+        />
 
-        <ViewPills view={view} onChange={setView} compact={isCompact} />
+        <ViewPills
+          view={view}
+          onChange={(next) => setView(next)}
+          compact={isCompact}
+          isPending={false}
+        />
 
         {loading ? (
-          <View style={styles.emptyBox}>
-            <ActivityIndicator color={T.primary} />
-            <Typography variant="bodySmall" color="#64748b">Loading prospects...</Typography>
+          <View style={{ gap: 16 }}>
+            <SkeletonActivityRow />
+            <SkeletonActivityRow />
+            <SkeletonActivityRow />
+            <SkeletonActivityRow />
+            <SkeletonActivityRow />
           </View>
         ) : data.contacts.length === 0 && !error ? (
-          <View style={styles.emptyBox}>
-            <Inbox color="#94a3b8" size={26} />
-            <Typography variant="bodySmall" color="#64748b" align="center">
+          <View style={[styles.emptyBox, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
+            <Inbox color={palette.disabled} size={26} />
+            <Typography variant="bodySmall" color={palette.muted} align="center">
               No prospects yet. As channel events flow into the Master Agent, they will appear here.
             </Typography>
           </View>
@@ -583,15 +604,14 @@ export default function CRMScreen() {
             onSelect={openProfile}
             onRemove={confirmRemove}
             onExport={() => void exportRows()}
-            onNew={() => void runSearch()}
           />
         )}
 
         <View style={styles.footer}>
-          <Typography variant="caption" color="#94a3b8">
+          <Typography variant="caption" color={palette.disabled}>
             {data.counts.all} contacts - {data.counts.leads} active deals - {data.counts.clients} clients
           </Typography>
-          <Typography variant="caption" color="#94a3b8">
+          <Typography variant="caption" color={palette.disabled}>
             Mr LAD - Master Agent - synced {lastSynced}
           </Typography>
         </View>
@@ -608,154 +628,7 @@ export default function CRMScreen() {
         onRemove={confirmRemove}
         onAction={handleProspectAction}
       />
-    </View>
-  );
-}
-
-function RunSearchPanel({
-  maxResults,
-  setMaxResults,
-  running,
-  result,
-  error,
-  onRun,
-  onDismiss,
-}: {
-  maxResults: number;
-  setMaxResults: (value: number) => void;
-  running: boolean;
-  result: SearchRunResult | null;
-  error: string | null;
-  onRun: () => void;
-  onDismiss: () => void;
-}) {
-  return (
-    <View style={styles.searchPanel}>
-      <View style={styles.searchPanelTop}>
-        <View style={styles.searchCopy}>
-          <Typography variant="bodyLarge" color="#020617" style={styles.panelTitle}>
-            Discover new prospects
-          </Typography>
-          <Typography variant="bodySmall" color="#56657f">
-            Runs Apollo + Sales Navigator using your active ICP, dedupes, and emits matches to the Master Agent.
-          </Typography>
-        </View>
-        <TouchableOpacity
-          activeOpacity={0.82}
-          disabled={running}
-          onPress={onRun}
-          style={[styles.runButton, running && styles.disabledButton]}
-        >
-          {running ? <ActivityIndicator color="#fff" size="small" /> : null}
-          <Typography variant="bodySmall" color="#fff" style={styles.runButtonText}>
-            {running ? 'Running' : 'Run search'}
-          </Typography>
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.maxResultRow}>
-        <Typography variant="caption" color="#475569" style={styles.maxLabel}>Max results</Typography>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionScroller}>
-          {MAX_RESULTS_OPTIONS.map((option) => {
-            const active = option === maxResults;
-            return (
-              <TouchableOpacity
-                key={option}
-                activeOpacity={0.78}
-                disabled={running}
-                onPress={() => setMaxResults(option)}
-                style={[styles.optionChip, active && styles.optionChipActive]}
-              >
-                <Typography variant="caption" color={active ? '#fff' : T.primaryHead} style={styles.optionText}>
-                  {option}
-                </Typography>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      </View>
-
-      {running ? (
-        <View style={styles.runningStrip}>
-          <Typography variant="caption" color="#1d4ed8">Calling Apollo + Sales Navigator. Typically 3-8s.</Typography>
-        </View>
-      ) : null}
-
-      {error ? (
-        <View style={styles.searchErrorStrip}>
-          <Typography variant="caption" color="#be123c" style={styles.flexText}>
-            Search failed: {friendlySearchError(error)}
-          </Typography>
-          <TouchableOpacity onPress={onDismiss}>
-            <Typography variant="caption" color="#be123c" style={styles.underlined}>dismiss</Typography>
-          </TouchableOpacity>
-        </View>
-      ) : null}
-
-      {result && !running && !error ? (
-        <SearchResultStrip result={result} onDismiss={onDismiss} />
-      ) : null}
-    </View>
-  );
-}
-
-function SearchResultStrip({ result, onDismiss }: { result: SearchRunResult; onDismiss: () => void }) {
-  if (result.error === 'no_active_icp') {
-    return (
-      <View style={styles.searchErrorStrip}>
-        <Typography variant="caption" color="#be123c" style={styles.flexText}>
-          Search failed: {friendlySearchError('no_active_icp')}
-        </Typography>
-        <TouchableOpacity onPress={onDismiss}>
-          <Typography variant="caption" color="#be123c" style={styles.underlined}>dismiss</Typography>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  const count = result.count ?? result.candidates?.length ?? 0;
-  const searchId = result.searchId ?? result.search_id ?? '';
-  const totalCost = Number(result.totalCostUsd ?? result.total_cost_usd ?? 0);
-  const backendResults = result.backendResults ?? result.backend_results ?? {};
-
-  return (
-    <View style={styles.searchSuccessStrip}>
-      <View style={styles.searchSuccessTop}>
-        <Typography variant="caption" color="#166534" style={styles.flexText}>
-          <Typography variant="caption" color="#166534" style={styles.boldText}>{count}</Typography>
-          {' '}candidate{count === 1 ? '' : 's'} discovered - search id {searchId ? searchId.slice(0, 8) : '-'} - cost ${totalCost.toFixed(2)}
-        </Typography>
-        <TouchableOpacity onPress={onDismiss}>
-          <Typography variant="caption" color="#64748b" style={styles.underlined}>dismiss</Typography>
-        </TouchableOpacity>
-      </View>
-      <View style={styles.backendRow}>
-        {Object.entries(backendResults).map(([name, rollup]) => (
-          <BackendChip key={name} name={name} rollup={rollup} />
-        ))}
-      </View>
-      {count > 0 ? (
-        <Typography variant="caption" color="#475569">
-          New prospects will appear within seconds as the Master Agent ingests the fit events.
-        </Typography>
-      ) : null}
-    </View>
-  );
-}
-
-function BackendChip({ name, rollup }: { name: string; rollup: SearchBackendRollup }) {
-  const label = name.replace(/_/g, ' ');
-  const text = rollup.skipped
-    ? `${label}: skipped${rollup.reason ? ` - ${rollup.reason}` : ''}`
-    : rollup.error
-      ? `${label}: error - ${String(rollup.error).slice(0, 32)}`
-      : `${label}: ${rollup.candidates ?? 0}${rollup.total_matches != null ? ` / ${rollup.total_matches}` : ''}`;
-  const color = rollup.error ? '#be123c' : rollup.skipped ? '#64748b' : T.primaryHead;
-  const backgroundColor = rollup.error ? '#ffe4e6' : '#fff';
-  return (
-    <View style={[styles.backendChip, { backgroundColor, borderColor: '#e2e8f0' }]}>
-      <Typography variant="caption" color={color} style={styles.backendText}>{text}</Typography>
-    </View>
+    </AnimatedScreen>
   );
 }
 
@@ -763,11 +636,14 @@ function StatsCards({
   counts,
   selected,
   onSelect,
+  isPending = false,
 }: {
   counts: ProspectCRMData['counts'];
   selected: VisibleView;
   onSelect: (key: Exclude<VisibleView, 'board'>) => void;
+  isPending?: boolean;
 }) {
+  const palette = useCrmPalette();
   const { width } = useWindowDimensions();
   const isMobile = width < 720;
   const mobileBasis = '48%' as const;
@@ -779,7 +655,7 @@ function StatsCards({
   ];
 
   return (
-    <View style={styles.statsGrid}>
+    <View style={[styles.statsGrid, isPending && { opacity: 0.75 }]}>
       {cards.map((card) => {
         const Icon = card.Icon;
         const active = selected === card.key;
@@ -788,11 +664,13 @@ function StatsCards({
             key={card.key}
             activeOpacity={0.82}
             onPress={() => onSelect(card.key)}
+            disabled={isPending}
             style={[
               styles.statCard,
+              { backgroundColor: palette.surfaceElevated, borderColor: active ? palette.primary : palette.border },
               isMobile && [styles.statCardMobile, { flexBasis: mobileBasis }],
               !isMobile && styles.statCardDesktop,
-              active && styles.statCardActive,
+              active && [styles.statCardActive, { shadowColor: palette.primary }],
             ]}
           >
             <View style={styles.statIconWrap}>
@@ -801,8 +679,8 @@ function StatsCards({
               </View>
             </View>
             <View style={styles.statBottom}>
-              <Typography variant="caption" color="#56657f">{card.title}</Typography>
-              <Typography variant="h2" color="#071a44" style={styles.statValue}>{card.value}</Typography>
+              <Typography variant="caption" color={palette.muted}>{card.title}</Typography>
+              <Typography variant="h2" color={palette.text} style={styles.statValue}>{card.value}</Typography>
             </View>
           </TouchableOpacity>
         );
@@ -815,11 +693,14 @@ function ViewPills({
   view,
   onChange,
   compact,
+  isPending = false,
 }: {
   view: VisibleView;
   onChange: (view: VisibleView) => void;
   compact: boolean;
+  isPending?: boolean;
 }) {
+  const palette = useCrmPalette();
   const pills = VIEW_DEFS.map((definition) => {
     const Icon = definition.Icon;
     const active = view === definition.key;
@@ -828,10 +709,11 @@ function ViewPills({
         key={definition.key}
         activeOpacity={0.78}
         onPress={() => onChange(definition.key)}
-        style={[styles.viewPill, compact && styles.viewPillCompact, active && styles.viewPillActive]}
+        disabled={isPending}
+        style={[styles.viewPill, compact && styles.viewPillCompact, active && styles.viewPillActive, isPending && { opacity: 0.7 }]}
       >
-        <Icon color={active ? '#fff' : T.primaryHead} size={compact ? 12 : 14} />
-        <Typography variant="caption" color={active ? '#fff' : T.primaryHead} style={styles.viewPillText}>
+        <Icon color={active ? '#fff' : palette.primaryText} size={compact ? 12 : 14} />
+        <Typography variant="caption" color={active ? '#fff' : palette.primaryText} style={styles.viewPillText}>
           {definition.label}
         </Typography>
       </TouchableOpacity>
@@ -841,14 +723,14 @@ function ViewPills({
   if (compact) {
     return (
       <View style={[styles.viewHeader, styles.viewHeaderCompact]}>
-        <Typography variant="caption" color="#56657f" style={[styles.viewLabel, styles.viewLabelCompact]}>
+        <Typography variant="caption" color={palette.muted} style={[styles.viewLabel, styles.viewLabelCompact]}>
           VIEW
         </Typography>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
           style={[styles.pillScroll, styles.pillScrollCompact]}
-          contentContainerStyle={[styles.pillWrap, styles.pillWrapCompact]}
+          contentContainerStyle={[styles.pillWrap, styles.pillWrapCompact, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}
         >
           {pills}
         </ScrollView>
@@ -859,19 +741,19 @@ function ViewPills({
   return (
     <View style={styles.viewHeader}>
       <View style={styles.viewLeft}>
-        <Typography variant="caption" color="#56657f" style={styles.viewLabel}>VIEW</Typography>
+        <Typography variant="caption" color={palette.muted} style={styles.viewLabel}>VIEW</Typography>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
           style={styles.pillScroll}
-          contentContainerStyle={styles.pillWrap}
+          contentContainerStyle={[styles.pillWrap, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}
         >
           {pills}
         </ScrollView>
       </View>
       <Typography
         variant="caption"
-        color="#64748b"
+        color={palette.muted}
         style={styles.clickHint}
         numberOfLines={1}
       >
@@ -894,6 +776,7 @@ function KanbanBoard({
   compact: boolean;
   onSelect: (lead: KanbanLead) => void;
 }) {
+  const palette = useCrmPalette();
   const [activeStageKey, setActiveStageKey] = useState(CRM_STAGES[0]?.key ?? 'new');
   const visibleStages = compact ? CRM_STAGES.filter((stage) => stage.key === activeStageKey) : CRM_STAGES;
 
@@ -917,14 +800,15 @@ function KanbanBoard({
                 onPress={() => setActiveStageKey(stage.key)}
                 style={[
                   styles.stageTab,
+                  { backgroundColor: palette.surfaceElevated, borderColor: palette.border },
                   active && [styles.stageTabActive, { backgroundColor: color, borderColor: color }],
                 ]}
               >
-                <Typography variant="caption" color={active ? '#fff' : T.primaryHead} style={styles.stageTabText}>
+                <Typography variant="caption" color={active ? '#fff' : palette.primaryText} style={styles.stageTabText}>
                   {getStageLabel(stage)}
                 </Typography>
-                <View style={[styles.stageTabCount, active && styles.stageTabCountActive]}>
-                  <Typography variant="caption" color={active ? color : '#64748b'} style={styles.stageTabCountText}>
+                <View style={[styles.stageTabCount, { backgroundColor: active ? '#fff' : palette.neutralPill }, active && styles.stageTabCountActive]}>
+                  <Typography variant="caption" color={active ? color : palette.muted} style={styles.stageTabCountText}>
                     {count}
                   </Typography>
                 </View>
@@ -944,29 +828,29 @@ function KanbanBoard({
           const stageLeads = leads.filter((lead) => lead.stageKey === stage.key);
           const pipelineValue = stageLeads.reduce((sum, lead) => sum + (lead.value || 0), 0);
           return (
-            <View key={stage.key} style={[styles.boardColumn, { width: columnWidth }]}>
+            <View key={stage.key} style={[styles.boardColumn, { width: columnWidth, backgroundColor: palette.softSurface }]}>
               <View style={styles.columnHeader}>
                 <View style={styles.columnTitleRow}>
-                  <Typography variant="bodyLarge" color={T.primaryHead} style={styles.columnTitle} numberOfLines={1}>
+                  <Typography variant="bodyLarge" color={palette.primaryText} style={styles.columnTitle} numberOfLines={1}>
                     {getStageLabel(stage)}
                   </Typography>
-                  <View style={styles.countPill}>
-                    <Typography variant="caption" color={T.primaryHead} style={styles.countText}>{stageLeads.length}</Typography>
+                  <View style={[styles.countPill, { backgroundColor: palette.badgeBg }]}>
+                    <Typography variant="caption" color={palette.primaryText} style={styles.countText}>{stageLeads.length}</Typography>
                   </View>
                 </View>
                 <TouchableOpacity activeOpacity={0.76} style={styles.columnAdd}>
-                  <Plus color="#8aa0c2" size={16} />
+                  <Plus color={palette.disabled} size={16} />
                 </TouchableOpacity>
               </View>
-              <Typography variant="caption" color="#64748b" style={styles.pipelineValue}>
+              <Typography variant="caption" color={palette.muted} style={styles.pipelineValue}>
                 {fmtCurrency(pipelineValue)} pipeline
               </Typography>
               <View style={styles.stageCards}>
                 {stageLeads.length ? stageLeads.map((lead) => (
                   <KanbanCard key={lead.id} lead={lead} selected={selectedId === lead.id} onPress={() => onSelect(lead)} />
                 )) : (
-                  <View style={styles.noDealsBox}>
-                    <Typography variant="caption" color="#8190ad">No deals here</Typography>
+                  <View style={[styles.noDealsBox, { borderColor: palette.border }]}>
+                    <Typography variant="caption" color={palette.disabled}>No deals here</Typography>
                   </View>
                 )}
               </View>
@@ -979,34 +863,43 @@ function KanbanBoard({
 }
 
 function KanbanCard({ lead, selected, onPress }: { lead: KanbanLead; selected: boolean; onPress: () => void }) {
+  const palette = useCrmPalette();
   return (
-    <TouchableOpacity activeOpacity={0.84} onPress={onPress} style={[styles.leadCard, selected && styles.leadCardSelected]}>
+    <TouchableOpacity
+      activeOpacity={0.84}
+      onPress={onPress}
+      style={[
+        styles.leadCard,
+        { backgroundColor: palette.surfaceElevated, borderColor: selected ? palette.primary : palette.border },
+        selected && styles.leadCardSelected,
+      ]}
+    >
       <View style={styles.leadCardTop}>
         <Avatar name={lead.name} initials={lead.initials} tone={lead.tone} size={40} />
         <View style={styles.leadCardText}>
           <View style={styles.leadNameRow}>
-            <Typography variant="bodySmall" color={T.primaryHead} style={styles.rowName} numberOfLines={1}>
+            <Typography variant="bodySmall" color={palette.primaryText} style={styles.rowName} numberOfLines={1}>
               {lead.name}
             </Typography>
-            <Typography variant="caption" color={T.primary} style={styles.moneyText}>{fmtCurrency(lead.value)}</Typography>
+            <Typography variant="caption" color={palette.primary} style={styles.moneyText}>{fmtCurrency(lead.value)}</Typography>
           </View>
-          <Typography variant="caption" color="#64748b" numberOfLines={1}>{lead.company || 'No company'}</Typography>
+          <Typography variant="caption" color={palette.muted} numberOfLines={1}>{lead.company || 'No company'}</Typography>
         </View>
       </View>
       <View style={styles.leadCardBottom}>
         <ChannelChips channels={lead.channels} />
         <View style={styles.cardScoreRow}>
-          <View style={styles.scoreMini}>
-            <Sparkles color={T.primary} size={12} />
-            <Typography variant="caption" color={T.primaryHead} style={styles.scoreText}>{scoreLabel(lead.fit)}</Typography>
+          <View style={[styles.scoreMini, { backgroundColor: palette.badgeBg }]}>
+            <Sparkles color={palette.primary} size={12} />
+            <Typography variant="caption" color={palette.primaryText} style={styles.scoreText}>{scoreLabel(lead.fit)}</Typography>
           </View>
-          <Typography variant="caption" color="#94a3b8">{rel(lead.lastAt)}</Typography>
+          <Typography variant="caption" color={palette.disabled}>{rel(lead.lastAt)}</Typography>
         </View>
       </View>
       {lead.warmPath ? (
         <View style={styles.warmPathLine}>
-          <Route color={T.primary} size={13} />
-          <Typography variant="caption" color={T.primary} style={styles.warmPathText}>Warm via {lead.warmPath}</Typography>
+          <Route color={palette.primary} size={13} />
+          <Typography variant="caption" color={palette.primary} style={styles.warmPathText}>Warm via {lead.warmPath}</Typography>
         </View>
       ) : null}
     </TouchableOpacity>
@@ -1026,7 +919,6 @@ function ContactList({
   onSelect,
   onRemove,
   onExport,
-  onNew,
 }: {
   view: Exclude<VisibleView, 'board'>;
   rows: CrmContact[];
@@ -1040,8 +932,8 @@ function ContactList({
   onSelect: (contact: CrmContact) => void;
   onRemove: (contact: CrmContact) => void;
   onExport: () => void;
-  onNew: () => void;
 }) {
+  const palette = useCrmPalette();
   const title = view === 'all' ? 'All Contacts' : view === 'prospects' ? 'Prospects' : view === 'leads' ? 'Leads' : 'Clients';
   const subtitle = view === 'prospects'
     ? 'Top-of-funnel contacts sourced from Apollo, LinkedIn Sales Nav, imports, or referrals.'
@@ -1052,39 +944,35 @@ function ContactList({
         : 'Every contact in this tenant: imported, prospected, inbound, and customer.';
 
   return (
-    <View style={styles.tableShell}>
-      <View style={styles.tableHeader}>
+    <View style={[styles.tableShell, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
+      <View style={[styles.tableHeader, { borderBottomColor: palette.borderSoft }]}>
         <View style={styles.tableTitleBlock}>
           <View style={styles.tableTitleRow}>
-            <Typography variant="bodyLarge" color={T.primaryHead} style={styles.tableTitle}>{title}</Typography>
-            <View style={styles.countPill}>
-              <Typography variant="caption" color={T.primaryHead} style={styles.countText}>
+            <Typography variant="bodyLarge" color={palette.primaryText} style={styles.tableTitle}>{title}</Typography>
+            <View style={[styles.countPill, { backgroundColor: palette.badgeBg }]}>
+              <Typography variant="caption" color={palette.primaryText} style={styles.countText}>
                 {rows.length}{rows.length !== totalCount ? ` / ${totalCount}` : ''}
               </Typography>
             </View>
           </View>
-          <Typography variant="caption" color="#64748b">{subtitle}</Typography>
+          <Typography variant="caption" color={palette.muted}>{subtitle}</Typography>
         </View>
         <View style={styles.tableActions}>
-          <TouchableOpacity onPress={onExport} activeOpacity={0.78} style={styles.tableActionButton}>
-            <Download color={T.primaryHead} size={15} />
-            <Typography variant="caption" color={T.primaryHead} style={styles.tableActionText}>Export</Typography>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={onNew} activeOpacity={0.78} style={styles.newButton}>
-            <Plus color="#fff" size={15} />
-            <Typography variant="caption" color="#fff" style={styles.tableActionText}>New</Typography>
+          <TouchableOpacity onPress={onExport} activeOpacity={0.78} style={[styles.tableActionButton, { borderColor: palette.border }]}>
+            <Download color={palette.primaryText} size={15} />
+            <Typography variant="caption" color={palette.primaryText} style={styles.tableActionText}>Export</Typography>
           </TouchableOpacity>
         </View>
       </View>
 
-      <View style={styles.searchBox}>
-        <Search color="#94a3b8" size={16} />
+      <View style={[styles.searchBox, { backgroundColor: palette.input, borderColor: palette.border }]}>
+        <Search color={palette.disabled} size={16} />
         <TextInput
           value={query}
           onChangeText={setQuery}
           placeholder="Search..."
-          placeholderTextColor="#94a3b8"
-          style={[styles.searchInput, WEB_INPUT_RESET]}
+          placeholderTextColor={palette.disabled}
+          style={[styles.searchInput, WEB_INPUT_RESET, { color: palette.text }]}
         />
       </View>
 
@@ -1125,17 +1013,17 @@ function ContactList({
           />
         )) : (
           <View style={styles.noMatches}>
-            <Inbox color="#94a3b8" size={24} />
-            <Typography variant="bodySmall" color="#64748b">No matches.</Typography>
+            <Inbox color={palette.disabled} size={24} />
+            <Typography variant="bodySmall" color={palette.muted}>No matches.</Typography>
           </View>
         )}
       </View>
 
-      <View style={styles.tableFooter}>
-        <Typography variant="caption" color="#64748b">
-          Showing <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>{rows.length}</Typography> of {totalCount}
+      <View style={[styles.tableFooter, { borderTopColor: palette.borderSoft }]}>
+        <Typography variant="caption" color={palette.muted}>
+          Showing <Typography variant="caption" color={palette.primaryText} style={styles.boldText}>{rows.length}</Typography> of {totalCount}
         </Typography>
-        <Typography variant="caption" color={T.primaryHead} style={styles.tableActionText}>Page 1 of 1</Typography>
+        <Typography variant="caption" color={palette.primaryText} style={styles.tableActionText}>Page 1 of 1</Typography>
       </View>
     </View>
   );
@@ -1152,14 +1040,15 @@ function ContactRow({
   onPress: () => void;
   onRemove: () => void;
 }) {
+  const palette = useCrmPalette();
   return (
-    <TouchableOpacity activeOpacity={0.84} onPress={onPress} style={styles.contactRow}>
+    <TouchableOpacity activeOpacity={0.84} onPress={onPress} style={[styles.contactRow, { borderColor: palette.border, backgroundColor: palette.surface }]}>
       <View style={styles.contactTop}>
         <View style={styles.contactIdentity}>
           <Avatar name={contact.name} initials={contact.initials} size={34} />
           <View style={styles.contactNameBlock}>
-            <Typography variant="bodySmall" color={T.primaryHead} style={styles.rowName} numberOfLines={1}>{contact.name}</Typography>
-            <Typography variant="caption" color="#64748b" numberOfLines={1}>
+            <Typography variant="bodySmall" color={palette.primaryText} style={styles.rowName} numberOfLines={1}>{contact.name}</Typography>
+            <Typography variant="caption" color={palette.muted} numberOfLines={1}>
               {view === 'all' ? contact.title : `${contact.title || '-'} - ${contact.company || 'No company'}`}
             </Typography>
           </View>
@@ -1167,7 +1056,7 @@ function ContactRow({
         <View style={styles.rowRight}>
           {view === 'all' ? <TypePill type={contact.type} /> : <StagePill stage={contact.stage} />}
           <TouchableOpacity activeOpacity={0.78} onPress={(event) => { event.stopPropagation(); onRemove(); }} style={styles.rowIconButton}>
-            <Trash2 color="#be123c" size={15} />
+            <Trash2 color={palette.errorText} size={15} />
           </TouchableOpacity>
         </View>
       </View>
@@ -1204,15 +1093,15 @@ function ContactRow({
         )}
       </View>
 
-      <View style={styles.rowMeta}>
+      <View style={[styles.rowMeta, { borderTopColor: palette.borderSoft }]}>
         <ChannelChips channels={contact.channels} />
-        <Typography variant="caption" color="#64748b">
+        <Typography variant="caption" color={palette.muted}>
           Owner: {contact.ownerName || 'Unassigned'}
         </Typography>
-        <Typography variant="caption" color="#64748b">
+        <Typography variant="caption" color={palette.muted}>
           {contact.lastActivityAt ? `${rel(contact.lastActivityAt)} ago` : 'No activity'}
         </Typography>
-        <ChevronRight color="#94a3b8" size={16} />
+        <ChevronRight color={palette.disabled} size={16} />
       </View>
     </TouchableOpacity>
   );
@@ -1237,32 +1126,39 @@ function ProspectDetailModal({
   busyAction: string | null;
   onClose: () => void;
   onRemove: (contact: CrmContact) => void;
-  onAction: (contact: CrmContact, action: 'pause' | 'suppress' | 'enrich') => void;
+  onAction: (contact: CrmContact, action: 'pause' | 'suppress' | 'enrich' | 'assign', assigneeId?: string) => void;
 }) {
+  const palette = useCrmPalette();
+  const [assignSheetVisible, setAssignSheetVisible] = useState(false);
   if (!contact) return null;
   const raw = contact.raw;
+
+  const openLink = (url: string) => {
+    if (!url || url === '-') return;
+    void Linking.openURL(url).catch(() => undefined);
+  };
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={styles.modalOverlay}>
-        <View style={styles.detailSheet}>
-          <View style={styles.modalHeader}>
+        <View style={[styles.detailSheet, { backgroundColor: palette.surface, borderColor: palette.border }]}>
+          <View style={[styles.modalHeader, { borderBottomColor: palette.borderSoft }]}>
             <View style={styles.modalIdentity}>
               <Avatar name={contact.name} initials={contact.initials} tone={STAGE_COLOR[contact.stage] || T.primary} size={42} />
               <View style={styles.modalTitleBlock}>
-                <Typography variant="h3" color={T.primaryHead} numberOfLines={1}>{contact.name}</Typography>
-                <Typography variant="caption" color="#64748b" numberOfLines={1}>
+                <Typography variant="h3" color={palette.primaryText} numberOfLines={1}>{contact.name}</Typography>
+                <Typography variant="caption" color={palette.muted} numberOfLines={1}>
                   {contact.title || 'Prospect'} - {contact.company || 'No company'}
                 </Typography>
               </View>
             </View>
-            <TouchableOpacity onPress={onClose} activeOpacity={0.76} style={styles.closeButton}>
-              <X color={T.primaryHead} size={20} />
+            <TouchableOpacity onPress={onClose} activeOpacity={0.76} style={[styles.closeButton, { backgroundColor: palette.softSurface }]}>
+              <X color={palette.primaryText} size={20} />
             </TouchableOpacity>
           </View>
 
           <ScrollView contentContainerStyle={styles.detailContent} showsVerticalScrollIndicator={false}>
-            <View style={styles.detailHero}>
+            <View style={[styles.detailHero, { backgroundColor: palette.softSurface, borderColor: palette.border }]}>
               <View style={styles.detailPills}>
                 <TypePill type={contact.type} />
                 <StagePill stage={contact.stage} />
@@ -1278,17 +1174,17 @@ function ProspectDetailModal({
             </View>
 
             <Section title="Contact">
-              <InfoLine icon={Mail} label="Email" value={contact.email || '-'} verified={contact.emailVerified} />
-              <InfoLine icon={Phone} label="Phone" value={contact.phone || '-'} verified={contact.phoneVerified} />
-              <InfoLine icon={ExternalLink} label="LinkedIn" value={String(raw.linkedin_url || '-')} />
-              <InfoLine icon={Users} label="Owner" value={contact.ownerName || 'Unassigned'} />
+              <InfoLine icon={Mail} label="Email" value={contact.email || '-'} verified={contact.emailVerified} onPress={contact.email ? () => openLink(`mailto:${contact.email}`) : undefined} />
+              <InfoLine icon={Phone} label="Phone" value={contact.phone || '-'} verified={contact.phoneVerified} onPress={contact.phone ? () => openLink(`tel:${contact.phone}`) : undefined} />
+              <InfoLine icon={ExternalLink} label="LinkedIn" value={String(raw.linkedin_url || '-')} onPress={raw.linkedin_url ? () => openLink(String(raw.linkedin_url)) : undefined} />
+              <InfoLine icon={Users} label="Owner" value={contact.ownerName || 'Unassigned'} onPress={() => setAssignSheetVisible(true)} actionLabel="Assign" />
               <InfoLine icon={Route} label="Warm path" value={contact.warmPath || '-'} />
             </Section>
 
             <Section title="Engagement">
               <View style={styles.channelDetailRow}>
                 <ChannelChips channels={contact.channels} />
-                <Typography variant="caption" color="#64748b">
+                <Typography variant="caption" color={palette.muted}>
                   Last channel: {titleCase(String(raw.last_channel || 'system'))}
                 </Typography>
               </View>
@@ -1300,9 +1196,9 @@ function ProspectDetailModal({
                   : eventCounts.reduce<number>((sum, value) => sum + Number(value || 0), 0);
                 return (
                   <View key={channel} style={styles.rollupRow}>
-                    <Typography variant="caption" color={T.primaryHead} style={styles.rollupChannel}>{titleCase(channel)}</Typography>
-                    <Typography variant="caption" color="#64748b">{count} events</Typography>
-                    <Typography variant="caption" color="#64748b">{fmtDateTime(String(record.last_event_at || ''))}</Typography>
+                    <Typography variant="caption" color={palette.primaryText} style={styles.rollupChannel}>{titleCase(channel)}</Typography>
+                    <Typography variant="caption" color={palette.muted}>{count} events</Typography>
+                    <Typography variant="caption" color={palette.muted}>{fmtDateTime(String(record.last_event_at || ''))}</Typography>
                   </View>
                 );
               })}
@@ -1316,43 +1212,43 @@ function ProspectDetailModal({
             </Section>
 
             <Section title="Scheduled follow-ups">
-              {loading ? <ActivityIndicator color={T.primary} /> : null}
+              {loading ? <ActivityIndicator color={palette.primary} /> : null}
               {followups.length ? followups.map((followup) => (
                 <View key={followup.id} style={styles.followupRow}>
-                  <Clock color={T.primary} size={15} />
+                  <Clock color={palette.primary} size={15} />
                   <View style={styles.followupText}>
-                    <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>
+                    <Typography variant="caption" color={palette.primaryText} style={styles.boldText}>
                       {titleCase(followup.channel || 'channel')} - {titleCase(followup.type || 'follow-up')}
                     </Typography>
-                    <Typography variant="caption" color="#64748b">
+                    <Typography variant="caption" color={palette.muted}>
                       {fmtDateTime(followup.scheduled_time)} - attempt {followup.attempt ?? '-'}
                     </Typography>
                   </View>
                 </View>
               )) : (
-                <Typography variant="caption" color="#64748b">No upcoming follow-ups.</Typography>
+                <Typography variant="caption" color={palette.muted}>No upcoming follow-ups.</Typography>
               )}
             </Section>
 
             <Section title="Activity timeline">
-              {loading ? <ActivityIndicator color={T.primary} /> : null}
+              {loading ? <ActivityIndicator color={palette.primary} /> : null}
               {events.length ? events.map((event) => (
                 <View key={`${event.seq}-${event.occurred_at}`} style={styles.eventRow}>
                   <ChannelDot channel={String(event.channel)} />
                   <View style={styles.eventText}>
-                    <Typography variant="caption" color={T.primaryHead} style={styles.boldText}>
+                    <Typography variant="caption" color={palette.primaryText} style={styles.boldText}>
                       {titleCase(event.event_type)}
                     </Typography>
-                    <Typography variant="caption" color="#64748b">
+                    <Typography variant="caption" color={palette.muted}>
                       {titleCase(String(event.direction || 'system'))} - {fmtDateTime(event.occurred_at)}
                     </Typography>
                     {payloadPreview(event.payload) ? (
-                      <Typography variant="caption" color="#64748b">{payloadPreview(event.payload)}</Typography>
+                      <Typography variant="caption" color={palette.muted}>{payloadPreview(event.payload)}</Typography>
                     ) : null}
                   </View>
                 </View>
               )) : (
-                <Typography variant="caption" color="#64748b">No activity yet.</Typography>
+                <Typography variant="caption" color={palette.muted}>No activity yet.</Typography>
               )}
             </Section>
 
@@ -1363,6 +1259,12 @@ function ProspectDetailModal({
                   label="Enrich profile"
                   busy={busyAction === 'enrich'}
                   onPress={() => onAction(contact, 'enrich')}
+                />
+                <ActionButton
+                  icon={UserPlus}
+                  label="Assign"
+                  busy={busyAction === 'assign'}
+                  onPress={() => setAssignSheetVisible(true)}
                 />
                 <ActionButton
                   icon={ShieldMinus}
@@ -1389,6 +1291,16 @@ function ProspectDetailModal({
           </ScrollView>
         </View>
       </View>
+      <AssignMemberSheet
+        visible={assignSheetVisible}
+        contactId={contact.id}
+        contactName={contact.name}
+        onClose={() => setAssignSheetVisible(false)}
+        onAssigned={(member) => {
+          setAssignSheetVisible(false);
+          onAction(contact, 'assign', member.id);
+        }}
+      />
     </Modal>
   );
 }
@@ -1415,8 +1327,9 @@ function Avatar({ name, initials, tone, size = 28 }: { name?: string; initials?:
 }
 
 function ChannelChips({ channels }: { channels?: ChannelKey[] }) {
+  const palette = useCrmPalette();
   if (!channels?.length) {
-    return <Typography variant="caption" color="#94a3b8">-</Typography>;
+    return <Typography variant="caption" color={palette.disabled}>-</Typography>;
   }
   return (
     <View style={styles.channelChips}>
@@ -1447,7 +1360,8 @@ function TypePill({ type }: { type: string }) {
 }
 
 function StagePill({ stage }: { stage?: string }) {
-  if (!stage) return <Typography variant="caption" color="#94a3b8">-</Typography>;
+  const palette = useCrmPalette();
+  if (!stage) return <Typography variant="caption" color={palette.disabled}>-</Typography>;
   const color = STAGE_COLOR[stage] || '#64748b';
   return (
     <View style={[styles.statusPill, { backgroundColor: `${color}1a` }]}>
@@ -1466,36 +1380,40 @@ function StatusBadge({ label, color, bg }: { label: string; color: string; bg: s
 }
 
 function DetailPair({ label, value }: { label: string; value: string }) {
+  const palette = useCrmPalette();
   return (
     <View style={styles.detailPair}>
-      <Typography variant="overline" color="#94a3b8">{label}</Typography>
-      <Typography variant="caption" color={T.primaryHead} numberOfLines={2}>{value || '-'}</Typography>
+      <Typography variant="overline" color={palette.disabled}>{label}</Typography>
+      <Typography variant="caption" color={palette.primaryText} numberOfLines={2}>{value || '-'}</Typography>
     </View>
   );
 }
 
 function KpiTile({ label, value }: { label: string; value: string }) {
+  const palette = useCrmPalette();
   return (
-    <View style={styles.kpiTile}>
-      <Typography variant="overline" color="#94a3b8">{label}</Typography>
-      <Typography variant="h3" color={T.primaryHead} style={styles.kpiValue}>{value}</Typography>
+    <View style={[styles.kpiTile, { backgroundColor: palette.surfaceElevated, borderColor: palette.borderSoft }]}>
+      <Typography variant="overline" color={palette.disabled}>{label}</Typography>
+      <Typography variant="h3" color={palette.primaryText} style={styles.kpiValue}>{value}</Typography>
     </View>
   );
 }
 
 function FilterChip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  const palette = useCrmPalette();
   return (
-    <TouchableOpacity activeOpacity={0.78} onPress={onPress} style={[styles.filterChip, active && styles.filterChipActive]}>
+    <TouchableOpacity activeOpacity={0.78} onPress={onPress} style={[styles.filterChip, { borderColor: active ? T.primary : palette.border, backgroundColor: active ? T.primary : palette.surface }, active && styles.filterChipActive]}>
       {active ? <Check color="#fff" size={13} /> : null}
-      <Typography variant="caption" color={active ? '#fff' : T.primaryHead} style={styles.tableActionText}>{label}</Typography>
+      <Typography variant="caption" color={active ? '#fff' : palette.primaryText} style={styles.tableActionText}>{label}</Typography>
     </TouchableOpacity>
   );
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  const palette = useCrmPalette();
   return (
-    <View style={styles.detailSection}>
-      <Typography variant="bodySmall" color={T.primaryHead} style={styles.sectionTitle}>{title}</Typography>
+    <View style={[styles.detailSection, { borderTopColor: palette.borderSoft, backgroundColor: palette.surfaceElevated }]}>
+      <Typography variant="bodySmall" color={palette.primaryText} style={styles.sectionTitle}>{title}</Typography>
       {children}
     </View>
   );
@@ -1506,21 +1424,137 @@ function InfoLine({
   label,
   value,
   verified,
+  onPress,
+  actionLabel,
 }: {
   icon: IconComponent;
   label: string;
   value: string;
   verified?: boolean;
+  onPress?: () => void;
+  actionLabel?: string;
 }) {
-  return (
-    <View style={styles.infoLine}>
-      <Icon color={T.primary} size={16} />
+  const palette = useCrmPalette();
+  const inner = (
+    <>
+      <Icon color={onPress ? palette.primary : palette.icon} size={16} />
       <View style={styles.infoText}>
-        <Typography variant="overline" color="#94a3b8">{label}</Typography>
-        <Typography variant="caption" color={T.primaryHead} numberOfLines={2}>{value}</Typography>
+        <Typography variant="overline" color={palette.disabled}>{label}</Typography>
+        <Typography variant="caption" color={onPress ? palette.primary : palette.primaryText} numberOfLines={2}>{value}</Typography>
       </View>
       {verified ? <BadgeCheck color={T.success} size={16} /> : null}
+      {actionLabel && !verified ? (
+        <View style={[styles.infoActionChip, { backgroundColor: palette.softSurface, borderColor: palette.border }]}>
+          <Typography variant="overline" color={palette.primary} style={styles.boldText}>{actionLabel}</Typography>
+        </View>
+      ) : null}
+    </>
+  );
+  if (onPress) {
+    return (
+      <TouchableOpacity activeOpacity={0.75} onPress={onPress} style={[styles.infoLine, { borderColor: palette.border, backgroundColor: palette.surface }]}>
+        {inner}
+      </TouchableOpacity>
+    );
+  }
+  return (
+    <View style={[styles.infoLine, { borderColor: palette.border, backgroundColor: palette.surface }]}>
+      {inner}
     </View>
+  );
+}
+
+function AssignMemberSheet({
+  visible,
+  contactId,
+  contactName,
+  onClose,
+  onAssigned,
+}: {
+  visible: boolean;
+  contactId: string;
+  contactName: string;
+  onClose: () => void;
+  onAssigned: (member: TeamMember) => void;
+}) {
+  const palette = useCrmPalette();
+  const [members, setMembers] = useState<TeamMember[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    setLoading(true);
+    setError(null);
+    getTeamMembers()
+      .then((data) => setMembers(data))
+      .catch(() => setError('Unable to load team members.'))
+      .finally(() => setLoading(false));
+  }, [visible]);
+
+  const handleSelect = async (member: TeamMember) => {
+    setBusy(member.id);
+    setError(null);
+    try {
+      await assignCRMLeadsToUser(member.id, [contactId]);
+      onAssigned(member);
+    } catch {
+      setError('Failed to assign. Please try again.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.assignSheet, { backgroundColor: palette.surface, borderColor: palette.border }]}>
+          <View style={[styles.modalHeader, { borderBottomColor: palette.borderSoft }]}>
+            <View style={styles.modalTitleBlock}>
+              <Typography variant="h3" color={palette.primaryText}>Assign contact</Typography>
+              <Typography variant="caption" color={palette.muted} numberOfLines={1}>Assigning {contactName}</Typography>
+            </View>
+            <TouchableOpacity onPress={onClose} activeOpacity={0.76} style={[styles.closeButton, { backgroundColor: palette.softSurface }]}>
+              <X color={palette.primaryText} size={20} />
+            </TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={styles.assignList} showsVerticalScrollIndicator={false}>
+            {error ? (
+              <Typography variant="caption" color={palette.errorText} style={styles.assignError}>{error}</Typography>
+            ) : null}
+            {loading ? (
+              <ActivityIndicator color={palette.primary} style={styles.assignLoader} />
+            ) : members.length === 0 ? (
+              <Typography variant="caption" color={palette.muted} style={styles.assignEmpty}>No team members found.</Typography>
+            ) : (
+              members.map((member) => (
+                <TouchableOpacity
+                  key={member.id}
+                  activeOpacity={0.78}
+                  disabled={busy === member.id}
+                  onPress={() => void handleSelect(member)}
+                  style={[styles.assignMemberRow, { borderBottomColor: palette.borderSoft }]}
+                >
+                  <View style={[styles.assignAvatar, { backgroundColor: T.badgeBg }]}>
+                    <Typography variant="caption" color={T.primary} style={styles.boldText}>
+                      {initialsOf(member.name)}
+                    </Typography>
+                  </View>
+                  <View style={styles.assignMemberInfo}>
+                    <Typography variant="caption" color={palette.primaryText} style={styles.boldText}>{member.name}</Typography>
+                    <Typography variant="caption" color={palette.muted}>{member.role}{member.email ? ` · ${member.email}` : ''}</Typography>
+                  </View>
+                  {busy === member.id ? (
+                    <ActivityIndicator color={palette.primary} size="small" />
+                  ) : null}
+                </TouchableOpacity>
+              ))
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -1537,11 +1571,21 @@ function ActionButton({
   busy?: boolean;
   onPress: () => void;
 }) {
-  const color = danger ? '#be123c' : T.primary;
+  const palette = useCrmPalette();
+  const actionColor = danger ? palette.errorText : palette.primary;
   return (
-    <TouchableOpacity activeOpacity={0.78} disabled={busy} onPress={onPress} style={[styles.detailActionButton, danger && styles.dangerAction]}>
-      {busy ? <ActivityIndicator color={color} size="small" /> : <Icon color={color} size={16} />}
-      <Typography variant="caption" color={color} style={styles.tableActionText}>{label}</Typography>
+    <TouchableOpacity
+      activeOpacity={0.78}
+      disabled={busy}
+      onPress={onPress}
+      style={[
+        styles.detailActionButton,
+        { backgroundColor: danger ? palette.errorBg : palette.surface, borderColor: danger ? palette.errorBorder : palette.border },
+        danger && styles.dangerAction,
+      ]}
+    >
+      {busy ? <ActivityIndicator color={actionColor} size="small" /> : <Icon color={actionColor} size={16} />}
+      <Typography variant="caption" color={actionColor} style={styles.tableActionText}>{label}</Typography>
     </TouchableOpacity>
   );
 }
@@ -1572,7 +1616,7 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   pageTitle: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   refreshButton: {
     width: 42,
@@ -1605,7 +1649,7 @@ const styles = StyleSheet.create({
     minWidth: 240,
   },
   panelTitle: {
-    fontWeight: '900',
+    fontWeight: '600',
     marginBottom: 2,
   },
   runButton: {
@@ -1622,7 +1666,7 @@ const styles = StyleSheet.create({
     opacity: 0.62,
   },
   runButtonText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   maxResultRow: {
     borderTopWidth: 1,
@@ -1633,7 +1677,7 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   maxLabel: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   optionScroller: {
     gap: Theme.spacing.sm,
@@ -1654,7 +1698,7 @@ const styles = StyleSheet.create({
     borderColor: T.primary,
   },
   optionText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   runningStrip: {
     borderTopWidth: 1,
@@ -1745,7 +1789,7 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   statValue: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   viewHeader: {
     marginBottom: Theme.spacing.md,
@@ -1775,7 +1819,7 @@ const styles = StyleSheet.create({
     flex: 0,
   },
   viewLabel: {
-    fontWeight: '900',
+    fontWeight: '600',
     letterSpacing: 0.8,
     flexShrink: 0,
   },
@@ -1824,7 +1868,7 @@ const styles = StyleSheet.create({
     backgroundColor: T.primary,
   },
   viewPillText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   clickHint: {
     flexShrink: 1,
@@ -1862,7 +1906,7 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
   },
   stageTabText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   stageTabCount: {
     minWidth: 24,
@@ -1877,7 +1921,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   stageTabCountText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   boardScroller: {
     gap: Theme.spacing.md,
@@ -1909,7 +1953,7 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   columnTitle: {
-    fontWeight: '900',
+    fontWeight: '600',
     flexShrink: 1,
   },
   countPill: {
@@ -1922,7 +1966,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
   },
   countText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   columnAdd: {
     width: 28,
@@ -1967,11 +2011,11 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   rowName: {
-    fontWeight: '900',
+    fontWeight: '600',
     flexShrink: 1,
   },
   moneyText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   leadCardBottom: {
     flexDirection: 'row',
@@ -1994,7 +2038,7 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   scoreText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   warmPathLine: {
     flexDirection: 'row',
@@ -2002,7 +2046,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   warmPathText: {
-    fontWeight: '800',
+    fontWeight: '600',
   },
   noDealsBox: {
     minHeight: 48,
@@ -2041,7 +2085,7 @@ const styles = StyleSheet.create({
     marginBottom: 3,
   },
   tableTitle: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   tableActions: {
     flexDirection: 'row',
@@ -2070,7 +2114,7 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.xs,
   },
   tableActionText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   searchBox: {
     marginHorizontal: Theme.spacing.lg,
@@ -2189,7 +2233,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   avatarText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   channelChips: {
     flexDirection: 'row',
@@ -2218,7 +2262,7 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   pillText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   footer: {
     paddingTop: Theme.spacing.xl,
@@ -2296,6 +2340,9 @@ const styles = StyleSheet.create({
   },
   detailHero: {
     gap: Theme.spacing.md,
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: Theme.spacing.md,
   },
   detailPills: {
     flexDirection: 'row',
@@ -2318,7 +2365,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   kpiValue: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   detailSection: {
     borderTopWidth: 1,
@@ -2327,7 +2374,7 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   sectionTitle: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   infoLine: {
     minHeight: 48,
@@ -2358,7 +2405,7 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   rollupChannel: {
-    fontWeight: '900',
+    fontWeight: '600',
     minWidth: 86,
   },
   followupRow: {
@@ -2404,9 +2451,55 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   boldText: {
-    fontWeight: '900',
+    fontWeight: '600',
   },
   underlined: {
     textDecorationLine: 'underline',
+  },
+  infoActionChip: {
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  assignSheet: {
+    maxHeight: '70%',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    overflow: 'hidden',
+    borderWidth: 1,
+  },
+  assignList: {
+    padding: Theme.spacing.lg,
+    gap: Theme.spacing.sm,
+    paddingBottom: Theme.spacing.xxl,
+  },
+  assignMemberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.md,
+    paddingVertical: Theme.spacing.md,
+    borderBottomWidth: 1,
+  },
+  assignAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  assignMemberInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  assignLoader: {
+    marginVertical: Theme.spacing.xl,
+  },
+  assignEmpty: {
+    textAlign: 'center',
+    marginVertical: Theme.spacing.xl,
+  },
+  assignError: {
+    marginBottom: Theme.spacing.md,
   },
 });

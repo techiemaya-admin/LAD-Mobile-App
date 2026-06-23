@@ -17,8 +17,14 @@ export const CHAT_SYNC_ENDPOINTS = {
   sendMessage: '/api/chat',
   sendChannelMessage: '/api/chat/send-message',
   linkedinAccounts: '/api/campaigns/linkedin/accounts',
-  googleStatus: '/api/social-integration/calendar/google/status',
-  microsoftStatus: '/api/social-integration/calendar/microsoft/status',
+  googleStatus: '/api/social-integration/email/google/status',
+  microsoftStatus: '/api/social-integration/email/microsoft/status',
+  whatsappPersonalAccounts: '/api/personal-whatsapp/accounts',
+  whatsappAIAccounts: '/api/whatsapp-conversations/admin/whatsapp-accounts',
+  instagramAccounts: '/api/instagram-conversations/accounts',
+  goHighLevelStatus: '/api/social-integration/gohighlevel/status',
+  mindbodyStatus: '/api/social-integration/mindbody/status',
+  routeMagicStatus: '/api/social-integration/routemagic/status',
   currentUser: '/api/auth/me',
 } as const;
 
@@ -147,17 +153,10 @@ export async function getLinkedInIntegrations(): Promise<ConnectedIntegration[]>
   }
 }
 
-export async function getEmailIntegrations(userId?: string): Promise<ConnectedIntegration[]> {
-  if (!userId) {
-    return [
-      blankIntegration('email', 'Google/Gmail', 'unknown'),
-      blankIntegration('email', 'Microsoft/Outlook', 'unknown'),
-    ];
-  }
-
+export async function getEmailIntegrations(): Promise<ConnectedIntegration[]> {
   const [google, microsoft] = await Promise.allSettled([
-    apiPost(CHAT_SYNC_ENDPOINTS.googleStatus, { user_id: userId }),
-    apiPost(CHAT_SYNC_ENDPOINTS.microsoftStatus, { user_id: userId }),
+    apiPost(CHAT_SYNC_ENDPOINTS.googleStatus),
+    apiPost(CHAT_SYNC_ENDPOINTS.microsoftStatus),
   ]);
 
   const normalizeEmailProvider = (
@@ -193,35 +192,109 @@ export async function getEmailIntegrations(userId?: string): Promise<ConnectedIn
   ];
 }
 
-export async function inferWhatsAppIntegration(): Promise<ConnectedIntegration> {
+export async function getWhatsAppIntegrations(): Promise<ConnectedIntegration[]> {
+  const integrations: ConnectedIntegration[] = [];
+  
+  // WhatsApp Personal
   try {
-    const conversations = await getConversations({ page: 1, limit: 1, channel: 'whatsapp' });
-    const hasWhatsApp = conversations.some((conversation) => conversation.channel === 'whatsapp');
-
-    return {
-      ...blankIntegration('whatsapp', 'WhatsApp', hasWhatsApp ? 'connected' : 'unknown'),
-      connected: hasWhatsApp,
-    };
+    const response = await apiGet(CHAT_SYNC_ENDPOINTS.whatsappPersonalAccounts);
+    const accounts = firstArray(response.data, ['accounts', 'data']);
+    const connected = accounts.some(
+      (a: RawRecord) =>
+        a.status === 'connected' || a.status === 'open' || a.status === 'active' ||
+        a.status === 'READY' || a.status === 'ready',
+    );
+    integrations.push(blankIntegration('whatsapp', 'WhatsApp Personal', connected ? 'connected' : 'disconnected'));
   } catch (error) {
-    if (isFeatureUnavailableError(error)) {
-      return blankIntegration('whatsapp', 'WhatsApp', 'unknown');
-    }
-
-    return { ...blankIntegration('whatsapp', 'WhatsApp', 'unknown'), error: error instanceof Error ? error.message : undefined };
+    integrations.push(blankIntegration('whatsapp', 'WhatsApp Personal', 'disconnected'));
   }
+
+  // WhatsApp API Agent
+  try {
+    const response = await apiGet(CHAT_SYNC_ENDPOINTS.whatsappAIAccounts);
+    const accounts = firstArray(response.data, ['accounts', 'data']);
+    // LAD-Frontend-2 checking: a.status === 'active' || a.status === 'connected'
+    const connected = accounts.some((a: RawRecord) => a.status === 'active' || a.status === 'connected');
+    integrations.push(blankIntegration('whatsapp', 'WhatsApp API Agent', connected ? 'connected' : 'disconnected'));
+  } catch (error) {
+    integrations.push(blankIntegration('whatsapp', 'WhatsApp API Agent', 'disconnected'));
+  }
+
+  return integrations;
+}
+
+export async function getInstagramIntegrations(): Promise<ConnectedIntegration[]> {
+  try {
+    const response = await apiGet(CHAT_SYNC_ENDPOINTS.instagramAccounts);
+    const accounts = firstArray(response.data, ['accounts', 'data']);
+    const connected = accounts.some((a: RawRecord) => (a.status ?? 'active') !== 'inactive' && !a.is_deleted);
+    return [blankIntegration('instagram', 'Instagram', connected ? 'connected' : 'disconnected')];
+  } catch (error) {
+    return [blankIntegration('instagram', 'Instagram', 'disconnected')];
+  }
+}
+
+export async function getGoHighLevelIntegration(): Promise<ConnectedIntegration[]> {
+  try {
+    const response = await apiGet(CHAT_SYNC_ENDPOINTS.goHighLevelStatus);
+    const data = firstRecord(response.data, ['data']);
+    const connected = Boolean(data.connected);
+    return [blankIntegration('gohighlevel', 'GoHighLevel', connected ? 'connected' : 'disconnected')];
+  } catch (error) {
+    return [blankIntegration('gohighlevel', 'GoHighLevel', 'disconnected')];
+  }
+}
+
+export async function getMindBodyIntegration(): Promise<ConnectedIntegration[]> {
+  try {
+    const response = await apiPost(CHAT_SYNC_ENDPOINTS.mindbodyStatus);
+    const payload = isRecord(response.data) ? response.data : {};
+    const connected = Boolean(payload.connected);
+    return [blankIntegration('mindbody', 'MindBody', connected ? 'connected' : 'disconnected')];
+  } catch (error) {
+    return [blankIntegration('mindbody', 'MindBody', 'disconnected')];
+  }
+}
+
+export async function getRouteMagicIntegration(): Promise<ConnectedIntegration[]> {
+  try {
+    const response = await apiGet(CHAT_SYNC_ENDPOINTS.routeMagicStatus);
+    const payload = isRecord(response.data) ? response.data : {};
+    const connected = Boolean(payload.connected);
+    return [blankIntegration('routemagic', 'Route Magic', connected ? 'connected' : 'disconnected')];
+  } catch (error) {
+    return [blankIntegration('routemagic', 'Route Magic', 'disconnected')];
+  }
+}
+
+export async function getCustomEmailIntegration(): Promise<ConnectedIntegration[]> {
+  // Custom Email doesn't have a status endpoint in LAD-Frontend-2's IntegrationsSettings
+  // Assuming it's disconnected by default or checked differently
+  return [blankIntegration('custom-email', 'Custom Email (SMTP)', 'disconnected')];
+}
+
+export async function getSlackIntegration(): Promise<ConnectedIntegration[]> {
+  // Slack is coming soon
+  return [blankIntegration('slack', 'Slack', 'disconnected')];
 }
 
 export async function getConnectedIntegrations(): Promise<IntegrationSummary> {
   const session = await getCurrentAgentSession().catch(() => ({ id: undefined }));
-  const [linkedin, email, whatsapp] = await Promise.all([
+  const [linkedin, email, whatsapp, instagram, gohighlevel, mindbody, routemagic, customEmail, slack] = await Promise.all([
     getLinkedInIntegrations(),
-    getEmailIntegrations(session.id),
-    inferWhatsAppIntegration(),
+    getEmailIntegrations(),
+    getWhatsAppIntegrations(),
+    getInstagramIntegrations(),
+    getGoHighLevelIntegration(),
+    getMindBodyIntegration(),
+    getRouteMagicIntegration(),
+    getCustomEmailIntegration(),
+    getSlackIntegration(),
   ]);
 
   return {
     userId: session.id,
-    integrations: [whatsapp, ...linkedin, ...email],
+    integrations: [...whatsapp, ...linkedin, ...email, ...instagram, ...gohighlevel, ...mindbody, ...routemagic, ...customEmail, ...slack],
   };
 }
 

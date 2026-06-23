@@ -253,27 +253,35 @@ const normalizeStage = (item: unknown, index: number): CRMStage => {
 };
 
 const normalizeLead = (item: unknown): CRMLead => {
-  const record = asRecord(item);
+  const record = getRecordPayload(item, ['lead', 'contact', 'prospect', 'item', 'record']);
+  const metadata = asRecord(record.metadata);
   const firstName = record.first_name ?? record.firstName ?? '';
   const lastName = record.last_name ?? record.lastName ?? '';
   const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
-  const id = record.id ?? record._id ?? record.lead_id ?? `${Date.now()}-${Math.random()}`;
+  const id = record.id ?? record._id ?? record.lead_id ?? record.leadId ?? record.contact_id ?? record.contactId ?? `${Date.now()}-${Math.random()}`;
   const stage = normalizeKey(record.stage ?? record.stage_key ?? record.stageKey ?? record.pipeline_stage, 'new');
   const status = normalizeKey(record.status ?? record.status_key ?? record.statusKey ?? 'new', 'new');
 
   return {
     ...record,
     id,
-    name: record.name ?? record.contact_name ?? record.contactName ?? fullName ?? '',
-    contact_name: record.contact_name ?? record.contactName ?? record.name ?? fullName ?? '',
-    company_name: record.company_name ?? record.companyName ?? record.company ?? record.organization ?? '',
-    company: record.company ?? record.company_name ?? record.organization ?? '',
+    name: record.name ?? record.full_name ?? record.fullName ?? record.contact_name ?? record.contactName ?? metadata.name ?? metadata.full_name ?? fullName ?? '',
+    contact_name: record.contact_name ?? record.contactName ?? record.full_name ?? record.fullName ?? record.name ?? metadata.full_name ?? fullName ?? '',
+    company_name: record.company_name ?? record.companyName ?? record.company ?? record.organization ?? record.account_name ?? metadata.company_name ?? metadata.company ?? '',
+    company: record.company ?? record.company_name ?? record.organization ?? record.account_name ?? metadata.company ?? metadata.company_name ?? '',
+    email: record.email ?? record.email_address ?? record.emailAddress ?? record.contact_email ?? metadata.email ?? null,
+    phone: record.phone ?? record.phone_e164 ?? record.phone_number ?? record.phoneNumber ?? record.mobile ?? record.contact_phone ?? metadata.phone_e164 ?? metadata.phone ?? null,
     stage,
     status,
     priority: record.priority ? normalizeKey(record.priority, 'medium') : record.priority,
-    source: record.source ? normalizeKey(record.source, 'manual') : record.source,
+    source: record.source ? normalizeKey(record.source, 'manual') : record.channel ? normalizeKey(record.channel, 'manual') : record.source,
     value: record.value ?? record.amount ?? record.deal_size ?? null,
     amount: record.amount ?? record.value ?? record.deal_size ?? null,
+    probability: record.probability ?? record.probability_percent ?? record.win_probability ?? metadata.probability ?? null,
+    lead_score: record.lead_score ?? record.leadScore ?? record.fit_score ?? record.score ?? metadata.lead_score ?? metadata.fit_score ?? null,
+    last_contacted: record.last_contacted ?? record.lastContacted ?? record.last_event_at ?? record.lastActivityAt ?? record.updated_at ?? null,
+    next_followup: record.next_followup ?? record.nextFollowup ?? record.next_step ?? metadata.next_step ?? null,
+    expected_close_date: record.expected_close_date ?? record.expectedCloseDate ?? record.expected_close ?? record.close_date ?? null,
     tags: normalizeTags(record.tags ?? record.lead_tags ?? record.lead_category),
   };
 };

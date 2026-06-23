@@ -14,21 +14,72 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, Bot, Building2, Check, ChevronDown, ExternalLink, History, MessageSquare, RefreshCw, Search, Send, Sparkles, UserRound, UsersRound, Zap } from 'lucide-react-native';
+import { ArrowLeft, Building2, Check, ChevronDown, ExternalLink, History, ImageIcon, Mail, MessageSquare, Plus, RefreshCw, Search, Send, Sparkles, Star, UserPlus, UserRound, UsersRound, Zap } from 'lucide-react-native';
+import Svg, { Path } from 'react-native-svg';
 import Theme from '@/constants/theme';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Typography } from '@/components/ui/Typography';
 import { useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { useAdvancedSearch } from '@/src/hooks/useAdvancedSearch';
 import { AssistantChatMessage, MobileAssistantLead } from '@/src/services/mobileAIAssistantService';
+import { runProspectSearch } from '@/src/services/prospectsService';
+import type { SearchBackendRollup, SearchRunResult } from '@/src/services/prospectsService';
 import { useAppTheme } from '@/src/theme/appTheme';
 
 const WEB_INPUT_RESET = Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
+const MAX_RESULTS_OPTIONS = [5, 25, 50, 100, 250, 500];
+const ICP_LEADS_PROMPT = 'Get leads from my active ICP';
+const PLACEHOLDER_SUGGESTIONS = [
+  'Connect me with founders in trading companies in UAE',
+  'Connect me with CFO in Goldman Sachs in USA',
+  'Schedule sales meetings with procurement managers in HVAC in UAE',
+  'Find VP of Sales in SaaS companies in UK',
+  'Reach out to HR directors in manufacturing in Germany',
+  'Strengthen my relationship with existing clients',
+];
+const LANDING_SUGGESTIONS = [
+  { label: 'Founders in trading in UAE', value: 'Connect me with founders in trading companies in UAE', icon: 'search' },
+  { label: 'Sales meetings with HVAC managers', value: 'Schedule sales meetings with procurement managers in HVAC in UAE', icon: 'building' },
+  { label: 'VP of Sales in UK SaaS', value: 'Find VP of Sales in SaaS companies in UK', icon: 'people' },
+  { label: 'Strengthen client relationships', value: 'Strengthen my relationship with existing clients', icon: 'relationship' },
+  { label: ICP_LEADS_PROMPT, value: ICP_LEADS_PROMPT, icon: 'spark' },
+  { label: 'Media Generation', value: 'Help me create media for an outreach campaign', icon: 'image' },
+];
+const LANDING_BACKGROUND = '#FBFCFF';
+const LANDING_SOFT = '#F6F8FF';
+const LANDING_BORDER = '#AFC2FF';
 
 const scoreTone = (score?: number) => {
   if ((score ?? 0) >= 70) return { bg: '#DCFCE7', fg: '#166534', label: 'Strong' };
   if ((score ?? 0) >= 45) return { bg: '#FEF9C3', fg: '#854D0E', label: 'Moderate' };
   return { bg: '#E0E7FF', fg: '#3730A3', label: 'Match' };
+};
+
+const LADMark = ({ size = 32, color = '#0B1957' }: { size?: number; color?: string }) => (
+  <Svg width={size} height={size} viewBox="50 120 110 130">
+    <Path
+      fill={color}
+      fillRule="evenodd"
+      d="M90.605 187.719c-13.835-4.52-27.66 7.976-24.097 22.394 4.594 17.77 23.656 26.117 42.418 25.469v-12.828c-31.363.25-42.027-33.168-18.32-35.035Zm5.2 9.379a3.029 3.029 0 1 0 0 6.058 3.029 3.029 0 0 0 0-6.058Zm10.734 0a3.029 3.029 0 1 0 0 6.058 3.029 3.029 0 0 0 0-6.058Zm10.73 0a3.029 3.029 0 1 0 0 6.058 3.029 3.029 0 0 0 0-6.058ZM98.324 160.398c-14.512-4.254-33.902-13.273-39.133-28.687-1.629 5.144-2.117 10.398-1.593 15.48.383 3.735 1.02 6.989 1.87 9.833 2.571 6.68 7.126 12.62 13.356 16.882-.629-3.601-.172-7.308 1.309-10.648 8.472 10.969 37.125 14.453 50.476 23.406 5.45 3.656 8.785 9.816 8.785 16.477 0 12.058-16.421 23.84-24.168 32.433 17.418-.691 34.508-9.14 39.461-25.011 13.723-44.004-53.984-49.23-76.855-80.922 1.023 15.945 12.512 24.859 26.492 30.757Z"
+    />
+  </Svg>
+);
+
+const LandingSuggestionIcon = ({ icon, color }: { icon: string; color: string }) => {
+  switch (icon) {
+    case 'building':
+      return <Building2 color={color} size={15} />;
+    case 'people':
+      return <UsersRound color={color} size={15} />;
+    case 'relationship':
+      return <UserPlus color={color} size={15} />;
+    case 'spark':
+      return <Sparkles color={color} size={15} />;
+    case 'image':
+      return <ImageIcon color={color} size={15} />;
+    default:
+      return <Search color={color} size={15} />;
+  }
 };
 
 export default function AIAssistantScreen() {
@@ -39,17 +90,64 @@ export default function AIAssistantScreen() {
   const { width } = useWindowDimensions();
   const assistant = useAdvancedSearch();
   const listRef = useRef<FlatList<AssistantChatMessage>>(null);
+  const landingInputRef = useRef<TextInput>(null);
   const [showLeadResults, setShowLeadResults] = useState(true);
   const [activePanel, setActivePanel] = useState<'chat' | 'leads' | 'flow'>('chat');
+  const [showDiscovery, setShowDiscovery] = useState(false);
+  const [showLanding, setShowLanding] = useState(true);
+  const [showLandingMenu, setShowLandingMenu] = useState(false);
+  const [typedPlaceholder, setTypedPlaceholder] = useState('');
   const isCompact = width < 520;
   const horizontalPadding = isCompact ? Theme.spacing.md : Theme.spacing.xl;
   const contentMaxWidth = width >= 900 ? 860 : undefined;
   const hasLeads = assistant.leads.length > 0;
+  const hasUsefulContext = showDiscovery || hasLeads || Boolean(assistant.lastSearchQuery) || assistant.outreachJourney.length > 0;
+  const landingContentWidth = Math.min(Math.max(width - horizontalPadding * 2, 300), 640);
 
   useEffect(() => {
     const timer = setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 80);
     return () => clearTimeout(timer);
   }, [assistant.messages.length, assistant.isBusy, assistant.isSearching]);
+
+  useEffect(() => {
+    if (!showLanding || assistant.input.trim()) {
+      setTypedPlaceholder('');
+      return undefined;
+    }
+
+    let suggestionIndex = 0;
+    let charIndex = 0;
+    let deleting = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const tick = () => {
+      const current = PLACEHOLDER_SUGGESTIONS[suggestionIndex];
+      if (!deleting) {
+        charIndex += 1;
+        setTypedPlaceholder(current.slice(0, charIndex));
+        if (charIndex === current.length) {
+          deleting = true;
+          timer = setTimeout(tick, 1600);
+          return;
+        }
+        timer = setTimeout(tick, 48);
+        return;
+      }
+
+      charIndex -= 1;
+      setTypedPlaceholder(current.slice(0, charIndex));
+      if (charIndex === 0) {
+        deleting = false;
+        suggestionIndex = (suggestionIndex + 1) % PLACEHOLDER_SUGGESTIONS.length;
+        timer = setTimeout(tick, 360);
+        return;
+      }
+      timer = setTimeout(tick, 24);
+    };
+
+    timer = setTimeout(tick, 500);
+    return () => clearTimeout(timer);
+  }, [assistant.input, showLanding]);
 
   useEffect(() => {
     if (!hasLeads && activePanel !== 'chat') {
@@ -63,6 +161,43 @@ export default function AIAssistantScreen() {
       return;
     }
     router.replace('/(tabs)');
+  };
+
+  const handleReset = () => {
+    assistant.resetConversation();
+    setActivePanel('chat');
+    setShowDiscovery(false);
+    setShowLanding(true);
+    setShowLandingMenu(false);
+  };
+
+  const openActiveIcpDiscovery = () => {
+    assistant.setInput('');
+    setActivePanel('chat');
+    setShowLanding(false);
+    setShowLandingMenu(false);
+    setShowDiscovery(true);
+  };
+
+  const handleLandingSubmit = async (value?: string) => {
+    const text = (value ?? assistant.input).trim();
+    if (!text || assistant.isBusy || assistant.isSearching) return;
+
+    if (text === ICP_LEADS_PROMPT) {
+      openActiveIcpDiscovery();
+      return;
+    }
+
+    setActivePanel('chat');
+    setShowDiscovery(false);
+    setShowLanding(false);
+    setShowLandingMenu(false);
+    await assistant.submitMessage(text);
+  };
+
+  const handleLandingSuggestion = (value: string) => {
+    assistant.setInput(value);
+    requestAnimationFrame(() => landingInputRef.current?.focus());
   };
 
   const openUrl = (url?: string) => {
@@ -142,7 +277,7 @@ export default function AIAssistantScreen() {
       <View style={[styles.messageRow, isUser ? styles.messageRowUser : styles.messageRowAssistant]}>
         {!isUser ? (
           <View style={[styles.botDot, { backgroundColor: appTheme.infoSoft }]}>
-            <Bot color={appTheme.primaryAccent} size={16} />
+            <LADMark color={appTheme.primaryAccent} size={20} />
           </View>
         ) : null}
         <View style={[
@@ -194,11 +329,11 @@ export default function AIAssistantScreen() {
           ? 'Outreach journey not created'
           : 'Outreach journey ready';
     const statusBody = assistant.outreachWorkflowStage === 'launching'
-      ? 'Sending the campaign, leads, channels, and workflow steps to the LAD backend.'
+      ? 'Preparing the campaign, leads, channels, and workflow steps.'
       : assistant.outreachWorkflowStage === 'launched'
         ? assistant.launchedCampaignId
           ? `Campaign ID ${assistant.launchedCampaignId} is now available in Campaigns.`
-          : 'The LAD backend accepted the journey. You can monitor it from Campaigns.'
+          : 'The journey is ready. You can monitor it from Campaigns.'
         : hasLaunchError
           ? assistant.error
           : `${assistant.leads.length} lead${assistant.leads.length === 1 ? '' : 's'} - ${selectedChannels.join(', ')} - ${assistant.campaignDays || 30} days`;
@@ -333,7 +468,7 @@ export default function AIAssistantScreen() {
       <View style={styles.panelTitleRow}>
         <View style={styles.panelTitleCopy}>
           <Typography variant="h3" color={appTheme.text}>Flow</Typography>
-          <Typography variant="caption" color={appTheme.muted}>Suggested outreach journey from LAD Frontend 2</Typography>
+          <Typography variant="caption" color={appTheme.muted}>Suggested outreach journey</Typography>
         </View>
         <TouchableOpacity
           activeOpacity={0.82}
@@ -441,6 +576,144 @@ export default function AIAssistantScreen() {
     );
   };
 
+  if (showLanding) {
+    const landingChipWidth = width < 360 ? '100%' : '48%';
+    const canSendLanding = Boolean(assistant.input.trim()) && !assistant.isBusy && !assistant.isSearching;
+
+    return (
+      <KeyboardAvoidingView
+        style={[styles.container, { backgroundColor: LANDING_BACKGROUND }]}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={0}
+      >
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          onScroll={handleBottomTabScroll}
+          scrollEventThrottle={16}
+          contentContainerStyle={[
+            styles.landingContent,
+            {
+              paddingTop: insets.top + Theme.spacing.lg,
+              paddingBottom: Math.max(insets.bottom + 32, Theme.spacing.xxl),
+              paddingHorizontal: horizontalPadding,
+            },
+          ]}
+        >
+          <View style={[styles.landingTopBar, { width: landingContentWidth }]}>
+            <TouchableOpacity onPress={handleBack} style={[styles.landingBackBtn, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} activeOpacity={0.76}>
+              <ArrowLeft color={appTheme.text} size={22} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={openActiveIcpDiscovery}
+              style={[styles.landingMagicBtn, { backgroundColor: appTheme.primaryAccent }]}
+              activeOpacity={0.82}
+            >
+              <Sparkles color={Theme.colors.surface} size={25} />
+            </TouchableOpacity>
+          </View>
+
+          <View style={[styles.landingHero, { width: landingContentWidth }]}>
+            <View style={styles.landingLogoWrap}>
+              <LADMark color={appTheme.primaryAccent} size={64} />
+            </View>
+            <Typography variant={isCompact ? 'h4' : 'h3'} color={appTheme.text} style={styles.landingTitle} numberOfLines={2}>
+              Hey! I am LAD, How can I help you today?
+            </Typography>
+            <View style={styles.landingSparkleGhost}>
+              <Sparkles color="#C9D8FF" size={30} />
+            </View>
+          </View>
+
+          <View style={[styles.landingInputOuter, { width: landingContentWidth, borderColor: appTheme.primaryAccent, backgroundColor: appTheme.surface }]}>
+            <TextInput
+              ref={landingInputRef}
+              style={[styles.landingInput, WEB_INPUT_RESET, { color: appTheme.text }]}
+              placeholder={typedPlaceholder || 'Ask LAD to find leads, research accounts, or build outreach...'}
+              placeholderTextColor={appTheme.primaryAccent}
+              value={assistant.input}
+              onChangeText={assistant.setInput}
+              editable={!assistant.isBusy && !assistant.isSearching}
+              multiline
+              blurOnSubmit
+              returnKeyType="send"
+              onSubmitEditing={() => void handleLandingSubmit()}
+            />
+            <View style={styles.landingInputFooter}>
+              <TouchableOpacity
+                activeOpacity={0.78}
+                onPress={() => setShowLandingMenu((value) => !value)}
+                style={[styles.landingCircleBtn, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+              >
+                <Plus color={appTheme.primaryAccent} size={18} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                activeOpacity={0.78}
+                onPress={assistant.toggleSalesNav}
+                style={[
+                  styles.landingPremiumChip,
+                  {
+                    backgroundColor: assistant.useSalesNav ? appTheme.primaryAccent : appTheme.softSurface,
+                    borderColor: assistant.useSalesNav ? appTheme.primaryAccent : appTheme.border,
+                  },
+                ]}
+              >
+                <Star color={assistant.useSalesNav ? Theme.colors.surface : appTheme.primaryAccent} size={12} />
+                <Typography variant="caption" color={assistant.useSalesNav ? Theme.colors.surface : appTheme.muted} style={styles.landingPremiumText}>
+                  {assistant.useSalesNav ? 'Premium Search ON' : 'Premium Search'}
+                </Typography>
+              </TouchableOpacity>
+              <TouchableOpacity
+                activeOpacity={0.82}
+                disabled={!canSendLanding}
+                onPress={() => void handleLandingSubmit()}
+                style={[styles.landingSendBtn, { backgroundColor: canSendLanding ? appTheme.primaryAccent : appTheme.border }]}
+              >
+                {assistant.isBusy || assistant.isSearching ? <ActivityIndicator color={Theme.colors.surface} size="small" /> : <Send color={Theme.colors.surface} size={18} />}
+              </TouchableOpacity>
+            </View>
+            {showLandingMenu ? (
+              <View style={[styles.landingToolMenu, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
+                <TouchableOpacity activeOpacity={0.78} style={styles.landingToolItem} onPress={openActiveIcpDiscovery}>
+                  <Sparkles color={appTheme.primaryAccent} size={16} />
+                  <View style={styles.landingToolCopy}>
+                    <Typography variant="caption" color={appTheme.text} style={styles.landingToolTitle}>Use active ICP</Typography>
+                    <Typography variant="overline" color={appTheme.muted}>Run prospect discovery</Typography>
+                  </View>
+                </TouchableOpacity>
+                <TouchableOpacity activeOpacity={0.78} style={styles.landingToolItem} onPress={() => handleLandingSuggestion('Research a company')}>
+                  <Search color={appTheme.primaryAccent} size={16} />
+                  <View style={styles.landingToolCopy}>
+                    <Typography variant="caption" color={appTheme.text} style={styles.landingToolTitle}>Research account</Typography>
+                    <Typography variant="overline" color={appTheme.muted}>Company insight prompt</Typography>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+          </View>
+
+          <View style={[styles.landingSuggestions, { width: landingContentWidth }]}>
+            {LANDING_SUGGESTIONS.map((suggestion) => (
+              <TouchableOpacity
+                key={suggestion.label}
+                activeOpacity={0.78}
+                onPress={() => handleLandingSuggestion(suggestion.value)}
+                style={[styles.landingSuggestionChip, { width: landingChipWidth, borderColor: LANDING_BORDER, backgroundColor: appTheme.surface }]}
+              >
+                <View style={styles.landingSuggestionIcon}>
+                  <LandingSuggestionIcon icon={suggestion.icon} color={appTheme.primaryAccent} />
+                </View>
+                <Typography variant="caption" color={appTheme.text} style={styles.landingSuggestionText}>
+                  {suggestion.label}
+                </Typography>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    );
+  }
+
   return (
     <KeyboardAvoidingView
       style={[styles.container, { backgroundColor: appTheme.background }]}
@@ -454,35 +727,49 @@ export default function AIAssistantScreen() {
         <View style={styles.titleBlock}>
           <Typography variant={isCompact ? 'h4' : 'h3'} color={appTheme.text} numberOfLines={1}>AI Assistant</Typography>
           <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
-            LAD Frontend 2 workflow, mobile optimized
+            Lead discovery and outreach assistant
           </Typography>
         </View>
-        <TouchableOpacity onPress={assistant.resetConversation} style={[styles.iconBtn, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]} activeOpacity={0.76}>
+        <TouchableOpacity onPress={handleReset} style={[styles.iconBtn, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]} activeOpacity={0.76}>
           <RefreshCw color={appTheme.muted} size={19} />
         </TouchableOpacity>
       </View>
 
+      {hasUsefulContext ? (
       <View style={[styles.contextBand, { paddingHorizontal: horizontalPadding, backgroundColor: appTheme.surface, borderBottomColor: appTheme.borderSoft }]}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={[styles.contextScroll, { maxWidth: contentMaxWidth }]}>
-          <View style={[styles.contextChip, { backgroundColor: appTheme.infoSoft }]}>
-            <Sparkles color={appTheme.primaryAccent} size={15} />
-            <Typography variant="caption" color={appTheme.text} style={styles.contextText}>Lead chat</Typography>
-          </View>
-          <View style={[styles.contextChip, { backgroundColor: appTheme.successSoft }]}>
-            <Search color={Theme.colors.success} size={15} />
-            <Typography variant="caption" color={appTheme.text} style={styles.contextText}>Unified search</Typography>
-          </View>
-          <View style={[styles.contextChip, { backgroundColor: appTheme.warningSoft }]}>
-            <Zap color={Theme.colors.warning} size={15} />
-            <Typography variant="caption" color={appTheme.text} style={styles.contextText}>{assistant.leads.length} leads</Typography>
-          </View>
-          {assistant.lastModuleUsed ? (
-            <View style={[styles.contextChip, { backgroundColor: appTheme.softSurface }]}>
-              <Typography variant="caption" color={appTheme.muted} style={styles.contextText}>{assistant.lastModuleUsed.replace(/_/g, ' ')}</Typography>
+          {assistant.lastSearchQuery ? (
+            <View style={[styles.contextChip, { backgroundColor: appTheme.successSoft }]}>
+              <Search color={Theme.colors.success} size={15} />
+              <Typography variant="caption" color={appTheme.text} style={styles.contextText} numberOfLines={1}>
+                {assistant.lastModuleUsed ? assistant.lastModuleUsed.replace(/_/g, ' ') : 'Unified search'}
+              </Typography>
+            </View>
+          ) : null}
+          <TouchableOpacity
+            activeOpacity={0.78}
+            onPress={() => {
+              setActivePanel('chat');
+              setShowDiscovery((current) => !current);
+            }}
+            style={[styles.contextChip, { backgroundColor: showDiscovery ? appTheme.primaryAccent : appTheme.softSurface }]}
+          >
+            <Sparkles color={showDiscovery ? Theme.colors.surface : appTheme.primaryAccent} size={15} />
+            <Typography variant="caption" color={showDiscovery ? Theme.colors.surface : appTheme.text} style={styles.contextText}>
+              Discover prospects
+            </Typography>
+          </TouchableOpacity>
+          {hasLeads ? (
+            <View style={[styles.contextChip, { backgroundColor: appTheme.warningSoft }]}>
+              <Zap color={Theme.colors.warning} size={15} />
+              <Typography variant="caption" color={appTheme.text} style={styles.contextText}>
+                {assistant.totalResults || assistant.leads.length} leads
+              </Typography>
             </View>
           ) : null}
         </ScrollView>
       </View>
+      ) : null}
 
       {activePanel === 'chat' ? (
       <FlatList
@@ -506,6 +793,9 @@ export default function AIAssistantScreen() {
         scrollEventThrottle={16}
         ListHeaderComponent={
           <View>
+            {showDiscovery ? (
+              <ProspectDiscoveryPanel onComplete={() => undefined} />
+            ) : null}
             {assistant.recentSearches.length ? (
               <View style={styles.recentBlock}>
                 <View style={styles.recentTitle}>
@@ -529,7 +819,7 @@ export default function AIAssistantScreen() {
               <GlassCard style={[styles.thinkingCard, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
                 <ActivityIndicator color={appTheme.primaryAccent} size="small" />
                 <Typography variant="caption" color={appTheme.muted}>
-                  {assistant.isSearching ? 'Searching LAD backend...' : 'Assistant is thinking...'}
+                  {assistant.isSearching ? 'Searching LAD for the best matches...' : 'Assistant is thinking...'}
                 </Typography>
               </GlassCard>
             ) : null}
@@ -652,6 +942,153 @@ export default function AIAssistantScreen() {
   );
 }
 
+function discoveryError(message: string) {
+  if (message === 'no_active_icp') {
+    return 'No active ICP found. Define your Ideal Customer Profile first.';
+  }
+  if (message.toLowerCase().includes('tenant')) {
+    return 'Session tenant could not be resolved. Sign in again or check tenant settings.';
+  }
+  return message;
+}
+
+function ProspectDiscoveryPanel({ onComplete }: { onComplete?: (result: SearchRunResult) => void }) {
+  const appTheme = useAppTheme();
+  const [maxResults, setMaxResults] = useState(25);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<SearchRunResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const runSearch = async () => {
+    setRunning(true);
+    setError(null);
+    setResult(null);
+    try {
+      const next = await runProspectSearch({ maxResults, triggeredBy: 'manual' });
+      setResult(next);
+      onComplete?.(next);
+    } catch (searchError) {
+      setError(searchError instanceof Error ? searchError.message : 'Search failed.');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const count = result ? result.count ?? result.candidates?.length ?? 0 : 0;
+  const searchId = result ? result.searchId ?? result.search_id ?? '' : '';
+  const totalCost = result ? Number(result.totalCostUsd ?? result.total_cost_usd ?? 0) : 0;
+  const backendResults = result ? result.backendResults ?? result.backend_results ?? {} : {};
+
+  return (
+    <GlassCard style={[styles.discoveryPanel, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
+      <View style={styles.discoveryHeader}>
+        <View style={styles.discoveryTitleCopy}>
+          <Typography variant="body" color={appTheme.text} style={styles.panelTitle}>Discover new prospects</Typography>
+          <Typography variant="caption" color={appTheme.muted}>
+            Runs the active ICP search and adds matching prospects to CRM.
+          </Typography>
+        </View>
+        <TouchableOpacity
+          activeOpacity={0.82}
+          disabled={running}
+          onPress={runSearch}
+          style={[styles.discoveryRunButton, { backgroundColor: appTheme.primaryAccent }, running && styles.disabled]}
+        >
+          {running ? <ActivityIndicator color={Theme.colors.surface} size="small" /> : null}
+          <Typography variant="caption" color={Theme.colors.surface} style={styles.loadMoreText}>
+            {running ? 'Running' : 'Run search'}
+          </Typography>
+        </TouchableOpacity>
+      </View>
+
+      <View style={[styles.discoveryOptions, { borderTopColor: appTheme.borderSoft }]}>
+        <Typography variant="caption" color={appTheme.muted} style={styles.discoveryOptionLabel}>Max results</Typography>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.discoveryOptionScroll}>
+          {MAX_RESULTS_OPTIONS.map((option) => {
+            const active = option === maxResults;
+            return (
+              <TouchableOpacity
+                key={option}
+                activeOpacity={0.78}
+                disabled={running}
+                onPress={() => setMaxResults(option)}
+                style={[
+                  styles.discoveryOption,
+                  {
+                    backgroundColor: active ? appTheme.primaryAccent : appTheme.softSurface,
+                    borderColor: active ? appTheme.primaryAccent : appTheme.border,
+                  },
+                ]}
+              >
+                <Typography variant="caption" color={active ? Theme.colors.surface : appTheme.text} style={styles.optionText}>
+                  {option}
+                </Typography>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </View>
+
+      {running ? (
+        <View style={[styles.discoveryStrip, { backgroundColor: appTheme.infoSoft, borderTopColor: appTheme.borderSoft }]}>
+          <Typography variant="caption" color={appTheme.primaryAccent}>Calling Apollo + Sales Navigator. Typically 3-8s.</Typography>
+        </View>
+      ) : null}
+
+      {error ? (
+        <View style={[styles.discoveryStrip, { backgroundColor: '#FFF7ED', borderTopColor: '#FDBA74' }]}>
+          <Typography variant="caption" color="#C2410C">Search failed: {discoveryError(error)}</Typography>
+        </View>
+      ) : null}
+
+      {result && !running && !error ? (
+        <View style={[styles.discoveryResult, { borderTopColor: appTheme.borderSoft }]}>
+          {result.error === 'no_active_icp' ? (
+            <Typography variant="caption" color="#C2410C">Search failed: {discoveryError('no_active_icp')}</Typography>
+          ) : (
+            <>
+              <Typography variant="caption" color={appTheme.text} style={styles.discoveryResultText}>
+                {count} candidate{count === 1 ? '' : 's'} discovered
+                {searchId ? ` - search ${searchId.slice(0, 8)}` : ''}
+                {` - cost $${totalCost.toFixed(2)}`}
+              </Typography>
+              {Object.entries(backendResults).length ? (
+                <View style={styles.discoveryBackendRow}>
+                  {Object.entries(backendResults).map(([name, rollup]) => (
+                    <DiscoveryBackendChip key={name} name={name} rollup={rollup} />
+                  ))}
+                </View>
+              ) : null}
+              {count > 0 ? (
+                <Typography variant="caption" color={appTheme.muted}>
+                  New prospects will appear in CRM after the discovery run completes.
+                </Typography>
+              ) : null}
+            </>
+          )}
+        </View>
+      ) : null}
+    </GlassCard>
+  );
+}
+
+function DiscoveryBackendChip({ name, rollup }: { name: string; rollup: SearchBackendRollup }) {
+  const appTheme = useAppTheme();
+  const label = name.replace(/_/g, ' ');
+  const text = rollup.skipped
+    ? `${label}: skipped${rollup.reason ? ` - ${rollup.reason}` : ''}`
+    : rollup.error
+      ? `${label}: error - ${String(rollup.error).slice(0, 32)}`
+      : `${label}: ${rollup.candidates ?? 0}${rollup.total_matches != null ? ` / ${rollup.total_matches}` : ''}`;
+  return (
+    <View style={[styles.discoveryBackendChip, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]}>
+      <Typography variant="caption" color={rollup.error ? '#C2410C' : appTheme.text} style={styles.discoveryBackendText}>
+        {text}
+      </Typography>
+    </View>
+  );
+}
+
 const getJourneyColor = (channel: string) => {
   const normalized = channel.toLowerCase();
   if (normalized.includes('whatsapp')) return '#25D366';
@@ -663,13 +1100,178 @@ const getJourneyColor = (channel: string) => {
 const getJourneyIcon = (channel: string, color: string) => {
   const normalized = channel.toLowerCase();
   if (normalized.includes('whatsapp')) return <MessageSquare color={color} size={20} />;
-  if (normalized.includes('email')) return <Bot color={color} size={20} />;
+  if (normalized.includes('email')) return <Mail color={color} size={20} />;
   if (normalized.includes('voice')) return <Zap color={color} size={20} />;
   return <UsersRound color={color} size={20} />;
 };
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  landingContent: {
+    flexGrow: 1,
+    alignItems: 'center',
+    backgroundColor: LANDING_BACKGROUND,
+  },
+  landingTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  landingBackBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Theme.shadows.small,
+  },
+  landingMagicBtn: {
+    width: 60,
+    height: 60,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Theme.shadows.large,
+  },
+  landingHero: {
+    alignItems: 'center',
+    marginTop: 36,
+  },
+  landingLogoWrap: {
+    width: 82,
+    height: 76,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Theme.spacing.sm,
+  },
+  landingTitle: {
+    textAlign: 'center',
+    fontWeight: '800',
+    marginBottom: Theme.spacing.sm,
+    letterSpacing: 0,
+    paddingHorizontal: Theme.spacing.sm,
+  },
+  landingSparkleGhost: {
+    width: 44,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  landingInputOuter: {
+    borderWidth: 1.4,
+    borderRadius: 26,
+    paddingHorizontal: Theme.spacing.lg,
+    paddingTop: 22,
+    paddingBottom: Theme.spacing.md,
+    marginTop: 28,
+    shadowColor: '#0B1957',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    elevation: 5,
+  },
+  landingInput: {
+    minHeight: 70,
+    maxHeight: 128,
+    fontSize: 19,
+    lineHeight: 27,
+    textAlign: 'center',
+    paddingHorizontal: Theme.spacing.sm,
+    paddingVertical: 0,
+    fontWeight: '500',
+  },
+  landingInputFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: Theme.spacing.md,
+  },
+  landingCircleBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  landingPremiumChip: {
+    minHeight: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  landingPremiumText: {
+    fontWeight: '800',
+  },
+  landingSendBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  landingToolMenu: {
+    borderWidth: 1,
+    borderRadius: Theme.radius.lg,
+    padding: Theme.spacing.sm,
+    marginTop: Theme.spacing.md,
+    gap: Theme.spacing.xs,
+  },
+  landingToolItem: {
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+    paddingHorizontal: Theme.spacing.sm,
+  },
+  landingToolCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  landingToolTitle: {
+    fontWeight: '900',
+  },
+  landingSuggestions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    rowGap: Theme.spacing.sm,
+    marginTop: 26,
+  },
+  landingSuggestionChip: {
+    minHeight: 70,
+    borderWidth: 1,
+    borderRadius: 20,
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: Theme.spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+    shadowColor: '#0B1957',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    elevation: 1,
+  },
+  landingSuggestionIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: LANDING_SOFT,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  landingSuggestionText: {
+    flex: 1,
+    fontWeight: '700',
+    lineHeight: 17,
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -721,6 +1323,79 @@ const styles = StyleSheet.create({
     paddingHorizontal: Theme.spacing.sm,
     paddingVertical: Theme.spacing.xs,
     maxWidth: 220,
+  },
+  discoveryPanel: {
+    borderRadius: Theme.radius.lg,
+    padding: 0,
+    marginBottom: Theme.spacing.lg,
+    overflow: 'hidden',
+  },
+  discoveryHeader: {
+    padding: Theme.spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Theme.spacing.md,
+  },
+  discoveryTitleCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  discoveryRunButton: {
+    minHeight: 36,
+    borderRadius: 18,
+    paddingHorizontal: Theme.spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Theme.spacing.xs,
+  },
+  discoveryOptions: {
+    borderTopWidth: 1,
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: Theme.spacing.sm,
+    gap: Theme.spacing.xs,
+  },
+  discoveryOptionLabel: {
+    fontWeight: '900',
+  },
+  discoveryOptionScroll: {
+    gap: Theme.spacing.sm,
+  },
+  discoveryOption: {
+    minHeight: 30,
+    minWidth: 44,
+    borderRadius: 15,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Theme.spacing.sm,
+  },
+  discoveryStrip: {
+    borderTopWidth: 1,
+    padding: Theme.spacing.md,
+  },
+  discoveryResult: {
+    borderTopWidth: 1,
+    padding: Theme.spacing.md,
+    gap: Theme.spacing.sm,
+  },
+  discoveryResultText: {
+    fontWeight: '900',
+  },
+  discoveryBackendRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Theme.spacing.sm,
+  },
+  discoveryBackendChip: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: Theme.spacing.sm,
+    paddingVertical: 4,
+  },
+  discoveryBackendText: {
+    textTransform: 'capitalize',
   },
   messageRow: {
     flexDirection: 'row',

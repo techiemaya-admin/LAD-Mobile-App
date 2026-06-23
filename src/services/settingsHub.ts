@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost } from '@/src/api';
+import { apiDelete, apiGet, apiPost, apiPut } from '@/src/api';
 
 type ApiRecord = Record<string, unknown>;
 
@@ -39,15 +39,20 @@ export type TeamMember = {
   id: string;
   name: string;
   email?: string;
+  phoneNumber?: string;
   role: string;
   status: string;
   avatar?: string;
+  capabilities: string[];
+  maskPhoneNumber: boolean;
+  createdAt?: string;
 };
 
 export type BillingTransaction = {
   id: string;
   type: string;
   amount: number;
+  balanceAfter?: number | null;
   description: string;
   createdAt?: string;
 };
@@ -137,20 +142,26 @@ export type SupportRequest = {
 };
 
 const SUPPORT_EMAIL = 'support@techiemaya.com';
+const DEFAULT_CREDITS_PER_DOLLAR = 1000 / 99;
 
 const asRecord = (value: unknown): ApiRecord => (
   value && typeof value === 'object' && !Array.isArray(value) ? value as ApiRecord : {}
 );
 
-const pickNumber = (...values: unknown[]) => {
+const pickOptionalNumber = (...values: unknown[]) => {
   for (const value of values) {
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
     const parsed = typeof value === 'number' ? value : Number(value);
     if (Number.isFinite(parsed)) {
       return parsed;
     }
   }
-  return 0;
+  return null;
 };
+
+const pickNumber = (...values: unknown[]) => pickOptionalNumber(...values) ?? 0;
 
 const pickString = (...values: unknown[]) => {
   for (const value of values) {
@@ -159,6 +170,40 @@ const pickString = (...values: unknown[]) => {
     }
   }
   return '';
+};
+
+const pickBoolean = (...values: unknown[]) => {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+    if (typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'number') {
+      return value !== 0;
+    }
+    const normalized = String(value).trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) {
+      return true;
+    }
+    if (['false', '0', 'no', 'off'].includes(normalized)) {
+      return false;
+    }
+  }
+  return false;
+};
+
+const pickStringList = (...values: unknown[]) => {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      return value.map((item) => String(item || '').trim()).filter(Boolean);
+    }
+    if (typeof value === 'string' && value.trim()) {
+      return value.split(',').map((item) => item.trim()).filter(Boolean);
+    }
+  }
+  return [];
 };
 
 const unwrapData = (payload: unknown): unknown => {
@@ -191,6 +236,23 @@ const unwrapList = (payload: unknown): ApiRecord[] => {
   return [];
 };
 
+const unwrapRecordList = (payload: unknown): ApiRecord[] => {
+  const list = unwrapList(payload);
+  if (list.length) {
+    return list;
+  }
+
+  const record = asRecord(payload);
+  return Object.entries(record)
+    .map(([key, value]) => {
+      const nested = asRecord(value);
+      return Object.keys(nested).length
+        ? { featureKey: key, ...nested }
+        : { featureKey: key, value };
+    })
+    .filter((item) => item.featureKey);
+};
+
 const normalizeCampaign = (raw: ApiRecord, index: number): CampaignItem => ({
   id: pickString(raw.id, raw.campaign_id, raw.uuid, `campaign-${index}`),
   name: pickString(raw.name, raw.campaign_name, raw.title, 'Untitled campaign'),
@@ -208,7 +270,7 @@ const normalizeCampaign = (raw: ApiRecord, index: number): CampaignItem => ({
 });
 
 const buildCampaignStatsFromCampaigns = (campaigns: CampaignItem[]): CampaignStats => {
-  const activeStatuses = new Set(['running', 'active']);
+  const activeStatuses = new Set(['running', 'active', 'in_progress', 'scheduled']);
   const totalConnected = campaigns.reduce((sum, campaign) => sum + campaign.connectedCount, 0);
   const totalSent = campaigns.reduce((sum, campaign) => sum + campaign.sentCount, 0);
   const totalReplied = campaigns.reduce((sum, campaign) => sum + campaign.repliedCount, 0);
@@ -232,11 +294,13 @@ const buildCampaignStatsFromCampaigns = (campaigns: CampaignItem[]): CampaignSta
 const normalizeCampaignStats = (payload: unknown, campaigns: CampaignItem[] = []): CampaignStats => {
   const data = asRecord(unwrapData(payload));
   const fallback = buildCampaignStatsFromCampaigns(campaigns);
-  const breakdown = data.connections_daily_breakdown;
+  const breakdown = data.connections_daily_breakdown ?? data.connectionsDailyBreakdown;
 
+  // Use live data from the backend stats API if available, falling back to locally calculated metrics if needed.
+  // Note: activeCampaigns is calculated locally from live campaigns status as the backend stats API active count is incorrect.
   return {
     totalCampaigns: pickNumber(data.total_campaigns, data.totalCampaigns, fallback.totalCampaigns),
-    activeCampaigns: pickNumber(data.active_campaigns, data.activeCampaigns, fallback.activeCampaigns),
+    activeCampaigns: fallback.activeCampaigns,
     totalLeads: pickNumber(data.total_leads, data.totalLeads, fallback.totalLeads),
     totalSent: pickNumber(data.total_sent, data.totalSent, fallback.totalSent),
     totalDelivered: pickNumber(data.total_delivered, data.totalDelivered, fallback.totalDelivered),
@@ -259,24 +323,67 @@ const normalizeTeamMember = (raw: ApiRecord, index: number): TeamMember => {
   const firstName = pickString(raw.first_name, raw.firstName);
   const lastName = pickString(raw.last_name, raw.lastName);
   const fullName = [firstName, lastName].filter(Boolean).join(' ');
+  const metadata = asRecord(raw.metadata);
 
   return {
     id: pickString(raw.id, raw.user_id, raw.uuid, `member-${index}`),
     name: pickString(raw.name, raw.full_name, fullName, raw.email, 'Team member'),
     email: pickString(raw.email, raw.user_email) || undefined,
+    phoneNumber: pickString(raw.phoneNumber, raw.phone_number, raw.phone, raw.mobile, raw.mobile_number) || undefined,
     role: pickString(raw.role, raw.user_role, raw.permission, raw.type, 'Member'),
     status: pickString(raw.status, raw.state, raw.is_active === false ? 'inactive' : 'active'),
     avatar: pickString(raw.avatar, raw.avatar_url, raw.photo_url) || undefined,
+    capabilities: pickStringList(raw.capabilities, raw.permissions, raw.page_permissions, metadata.capabilities, metadata.permissions),
+    maskPhoneNumber: pickBoolean(raw.maskPhoneNumber, raw.mask_phone_number, metadata.maskPhoneNumber, metadata.mask_phone_number),
+    createdAt: pickString(raw.created_at, raw.createdAt) || undefined,
   };
 };
 
-const normalizeBillingTransaction = (raw: ApiRecord, index: number): BillingTransaction => ({
-  id: pickString(raw.id, raw.transaction_id, `transaction-${index}`),
-  type: pickString(raw.type, raw.transaction_type, raw.status, 'transaction'),
-  amount: pickNumber(raw.credits_amount, raw.creditsAmount, raw.totalCost, raw.total_cost, raw.amount),
-  description: pickString(raw.description, raw.featureKey, raw.reference_type, 'Usage event'),
-  createdAt: pickString(raw.created_at, raw.createdAt, raw.chargedAt) || undefined,
-});
+const getNormalizedTransactionType = (raw: ApiRecord, rawAmount: number): 'credit' | 'debit' => {
+  const rawType = pickString(raw.transaction_type, raw.transactionType, raw.type).toLowerCase();
+  if (['topup', 'credit', 'refund'].includes(rawType)) {
+    return 'credit';
+  }
+  if (['debit', 'charge', 'usage', 'deduction'].includes(rawType)) {
+    return 'debit';
+  }
+  return rawAmount < 0 ? 'debit' : 'credit';
+};
+
+const normalizeBillingTransaction = (
+  raw: ApiRecord,
+  index: number,
+  creditsPerDollar = DEFAULT_CREDITS_PER_DOLLAR,
+): BillingTransaction => {
+  const rawAmount = pickOptionalNumber(raw.amount, raw.amount_usd, raw.usd, raw.totalCost, raw.total_cost) ?? 0;
+  const rawCurrency = pickString(raw.currency).toLowerCase();
+  const type = getNormalizedTransactionType(raw, rawAmount);
+  const backendCreditAmount = pickOptionalNumber(
+    raw.credits_amount,
+    raw.creditsAmount,
+    raw.credit_amount,
+    raw.credits,
+    raw.totalCredits,
+    raw.total_credits,
+  );
+  const amountInCredits = Math.abs(backendCreditAmount ?? (
+    rawCurrency === 'credits' ? Math.abs(rawAmount) : Math.abs(rawAmount) * creditsPerDollar
+  ));
+  const rawCreditBalanceAfter = pickOptionalNumber(raw.credits_balance_after, raw.creditsBalanceAfter);
+  const rawBalanceAfter = pickOptionalNumber(raw.balance_after, raw.balanceAfter);
+  const balanceAfter = rawCreditBalanceAfter ?? (
+    rawBalanceAfter !== null ? rawBalanceAfter * creditsPerDollar : null
+  );
+
+  return {
+    id: pickString(raw.id, raw.transaction_id, raw.transactionId, `transaction-${index}`),
+    type,
+    amount: type === 'debit' ? -amountInCredits : amountInCredits,
+    balanceAfter,
+    description: pickString(raw.description, raw.reference_type, raw.referenceType, raw.featureKey, raw.feature_key, 'Usage event'),
+    createdAt: pickString(raw.created_at, raw.createdAt, raw.chargedAt) || undefined,
+  };
+};
 
 const normalizeCreditPackage = (raw: ApiRecord, index: number): CreditPackage => ({
   id: pickString(raw.id, raw.packageId, `package-${index}`),
@@ -299,15 +406,28 @@ export const emptyBillingUsageAnalytics = (): BillingUsageAnalytics => ({
 });
 
 const normalizeBillingUsageAnalytics = (payload: unknown): BillingUsageAnalytics => {
-  const data = asRecord(unwrapData(payload));
+  const root = asRecord(unwrapData(payload));
+  const data = asRecord(root.analytics ?? root.usageAnalytics ?? root.usage_analytics ?? root);
   const trend = asRecord(data.monthlyTrend ?? data.monthly_trend);
-  const topFeatures = unwrapList(data.topFeatures ?? data.top_features).map((item) => ({
-    featureName: pickString(item.featureName, item.feature_name, item.featureKey, item.feature_key, 'Usage'),
-    totalCredits: pickNumber(item.totalCredits, item.total_credits, item.totalCost, item.total_cost, item.credits),
-    usageCount: pickNumber(item.usageCount, item.usage_count, item.count, item.eventCount, item.events),
-    percentage: pickNumber(item.percentage),
+  const topFeaturesSource = data.topFeatures
+    ?? data.top_features
+    ?? data.usageByFeature
+    ?? data.usage_by_feature
+    ?? data.byFeature
+    ?? data.by_feature
+    ?? data.features;
+  const dailyUsageSource = data.dailyUsage
+    ?? data.daily_usage
+    ?? data.byDay
+    ?? data.by_day
+    ?? data.daily;
+  const topFeatures = unwrapRecordList(topFeaturesSource).map((item) => ({
+    featureName: pickString(item.featureName, item.feature_name, item.name, item.featureKey, item.feature_key, 'Usage'),
+    totalCredits: pickNumber(item.totalCredits, item.total_credits, item.totalCost, item.total_cost, item.credits, item.cost, item.value),
+    usageCount: pickNumber(item.usageCount, item.usage_count, item.count, item.eventCount, item.event_count, item.events, item.totalEvents, item.total_events),
+    percentage: pickNumber(item.percentage, item.percent),
     icon: pickString(item.icon, item.featureIcon, item.feature_icon, 'bar-chart'),
-  })).slice(0, 8);
+  }));
 
   const totalCreditsUsed = pickNumber(
     data.totalCreditsUsed,
@@ -320,10 +440,10 @@ const normalizeBillingUsageAnalytics = (payload: unknown): BillingUsageAnalytics
   return {
     totalCreditsUsed,
     topFeatures,
-    dailyUsage: unwrapList(data.dailyUsage ?? data.daily_usage).map((item) => ({
-      date: pickString(item.date, item.day, item.created_at),
-      credits: pickNumber(item.credits, item.totalCredits, item.total_credits, item.totalCost, item.total_cost),
-    })).filter((item) => item.date).slice(-30),
+    dailyUsage: unwrapRecordList(dailyUsageSource).map((item) => ({
+      date: pickString(item.date, item.day, item.created_at, item.featureKey),
+      credits: pickNumber(item.credits, item.totalCredits, item.total_credits, item.totalCost, item.total_cost, item.cost, item.value),
+    })).filter((item) => item.date),
     monthlyTrend: {
       currentMonth: pickNumber(trend.currentMonth, trend.current_month),
       lastMonth: pickNumber(trend.lastMonth, trend.last_month),
@@ -339,9 +459,20 @@ const normalizeBillingOverview = (
   usagePayload: unknown,
 ): BillingOverview => {
   const walletRoot = asRecord(walletPayload);
-  const wallet = asRecord(walletRoot.wallet ?? walletRoot.data ?? walletRoot);
+  const walletData = asRecord(unwrapData(walletPayload));
+  const wallet = asRecord(walletData.wallet ?? walletRoot.wallet ?? walletData);
   const usage = normalizeBillingUsageAnalytics(usagePayload);
   const transactionsRoot = asRecord(transactionsPayload);
+  const transactionsData = asRecord(unwrapData(transactionsPayload));
+  const creditsPerDollar = pickNumber(
+    transactionsData.creditsPerDollar,
+    transactionsData.credits_per_dollar,
+    transactionsRoot.creditsPerDollar,
+    transactionsRoot.credits_per_dollar,
+    walletRoot.creditsPerDollar,
+    walletRoot.credits_per_dollar,
+    DEFAULT_CREDITS_PER_DOLLAR,
+  );
 
   return {
     currentBalance: pickNumber(wallet.currentBalance, wallet.current_balance, wallet.balance, wallet.credits, walletRoot.credits),
@@ -349,10 +480,10 @@ const normalizeBillingOverview = (
     reservedBalance: pickNumber(wallet.reservedBalance, wallet.reserved_balance),
     currency: pickString(wallet.currency, walletRoot.currency, 'credits'),
     status: pickString(wallet.status, walletRoot.status, 'active'),
-    planTier: pickString(wallet.planTier, wallet.plan_tier, transactionsRoot.planTier, walletRoot.planTier, 'starter'),
-    monthlyUsage: pickNumber(walletRoot.monthlyUsage, walletRoot.monthly_usage, usage.totalCreditsUsed),
-    totalSpent: pickNumber(walletRoot.totalSpent, walletRoot.total_spent),
-    transactions: unwrapList(transactionsPayload).map(normalizeBillingTransaction).slice(0, 8),
+    planTier: pickString(wallet.planTier, wallet.plan_tier, walletData.planTier, walletData.plan_tier, transactionsData.planTier, transactionsData.plan_tier, transactionsRoot.planTier, walletRoot.planTier, 'starter'),
+    monthlyUsage: pickNumber(walletData.monthlyUsage, walletData.monthly_usage, walletRoot.monthlyUsage, walletRoot.monthly_usage, usage.totalCreditsUsed),
+    totalSpent: pickNumber(walletData.totalSpent, walletData.total_spent, walletRoot.totalSpent, walletRoot.total_spent),
+    transactions: unwrapList(transactionsPayload).map((item, index) => normalizeBillingTransaction(item, index, creditsPerDollar)),
     packages: unwrapList(packagesPayload).map(normalizeCreditPackage).slice(0, 4),
     usageAnalytics: usage,
   };
@@ -417,14 +548,27 @@ export async function deleteCampaign(campaignId: string) {
 }
 
 export async function getTeamMembers(): Promise<TeamMember[]> {
-  const response = await apiGet<unknown>('/api/overview/users');
+  const response = await apiGet<unknown>('/api/users')
+    .catch(() => apiGet<unknown>('/api/overview/users'));
   return unwrapList(response.data).map(normalizeTeamMember);
+}
+
+export async function updateTeamMemberPhoneMask(userId: string, maskPhoneNumber: boolean) {
+  const response = await apiPut<unknown>(`/api/users/${encodeURIComponent(userId)}/mask-phone`, {
+    maskPhoneNumber,
+  });
+
+  return normalizeTeamMember(asRecord(unwrapData(response.data)), 0);
+}
+
+export async function deleteTeamMember(userId: string) {
+  await apiDelete(`/api/users/${encodeURIComponent(userId)}`);
 }
 
 export async function getBillingOverview(): Promise<BillingOverview> {
   const [wallet, transactions, packages, usage] = await Promise.all([
     safe(apiGet<unknown>('/api/billing/wallet').then((response) => response.data), {}),
-    safe(apiGet<unknown>('/api/billing/transactions', { params: { limit: 5 } }).then((response) => response.data), {}),
+    safe(apiGet<unknown>('/api/billing/transactions', { params: { limit: 20 } }).then((response) => response.data), {}),
     safe(apiGet<unknown>('/api/wallet/packages').then((response) => response.data), {}),
     safe(apiGet<unknown>('/api/wallet/usage/analytics', { params: { timeRange: '30d' } }).then((response) => response.data), {}),
   ]);

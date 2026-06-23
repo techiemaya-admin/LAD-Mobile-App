@@ -6,36 +6,57 @@ import {
   Animated,
   Easing,
   FlatList,
+  Image,
   ImageBackground,
   KeyboardAvoidingView,
+  Linking,
   Platform,
+  Pressable,
+  BackHandler,
   ScrollView,
   Share,
   StyleSheet,
+  Switch,
   TextInput,
   TouchableOpacity,
   useWindowDimensions,
   View,
+  Keyboard,
 } from 'react-native';
 import FontAwesome5 from '@expo/vector-icons/FontAwesome5';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect, useIsFocused, useNavigation } from '@react-navigation/native';
 import {
   ArrowLeft,
   BarChart3,
+  Ban,
+  Bell,
+  Briefcase,
+  Building2,
   Calendar,
   Camera,
   Check,
   CheckCheck,
   ChevronDown,
+  ChevronRight,
+  ChevronUp,
   CircleCheck,
+  Clock,
+  CreditCard,
   Download,
+  Globe,
+  Heart,
   FileText,
   Image as ImageIcon,
+  Info,
+  Link2,
+  List as ListIcon,
   Lock,
   Mail,
   MapPin,
   MessageCircle,
   MessageSquare,
+  MinusCircle,
   MoreVertical,
   Music,
   Paperclip,
@@ -45,36 +66,68 @@ import {
   RefreshCw,
   Search,
   Send,
+  Shield,
   ShieldOff,
   Smile,
   Star,
   Tag,
+  Target,
+  ThumbsDown,
   Trash2,
   Upload,
   UserRound,
   Users,
+  Video,
   VolumeX,
   X,
+  Mic,
+  PlayCircle,
+  PauseCircle,
+  StopCircle,
 } from 'lucide-react-native';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { Avatar } from '@/components/ui/Avatar';
-import { setBottomTabHidden, useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
+import { setBottomTabHidden, useBottomTabScrollHandler, forceBottomTabHidden } from '@/components/ui/BottomTabSelector';
+import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { SkeletonConversationRow, SkeletonMessageBlock } from '@/components/ui/SkeletonLoader';
 import { LadLogoMark } from '@/components/ui/LadLogoMark';
 import { ChatChannel, ChatMessage, Conversation, useChatStore } from '@/src/store/chatStore';
-import { RESOLVED_API_URL, buildApiUrl, getAuthToken, safeStorage } from '@/src/api';
+import { RESOLVED_API_URL, apiDelete, apiPatch, apiPost, buildApiUrl, getAuthToken, safeStorage } from '@/src/api';
 import useAuthStore from '@/src/store/authStore';
-import { assignConversationHandler } from '@/src/services/conversationService';
+import {
+  assignConversationHandler,
+  assignConversationToTeamMember,
+  createConversationNote,
+  deleteConversationNote,
+  getConversationAssignment,
+  getConversationNotes,
+  getConversationTeamWorkload,
+  getMindBodyPaymentLink,
+  sendMindBodyPaymentLinkMessage,
+  unassignConversationFromTeamMember,
+  updateConversationNote,
+  verifyMindBodyPayment,
+  type ConversationAssignmentHistory,
+  type ConversationNote,
+  type ConversationTeamMember,
+  type MindBodyPaymentLink,
+  type MindBodyPaymentVerification,
+} from '@/src/services/conversationService';
 import { useAppTheme } from '@/src/theme/appTheme';
+import Reanimated, { FadeIn, FadeInDown, FadeInUp } from 'react-native-reanimated';
+import { Audio } from 'expo-av';
 
 const CHAT_LIGHT_BACKGROUND_IMAGE = require('../../../assets/images/whatsappbg-tiled.jpeg');
 const CHAT_DARK_BACKGROUND_IMAGE = require('../../../assets/images/chat-dark-bg.jpeg');
 const WEB_INPUT_RESET = Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
 
-const CHANNELS: { id: 'all' | 'unread' | ChatChannel; label: string; color: string }[] = [
+type ChannelFilterId = 'all' | 'unread' | ChatChannel | 'personal' | 'waba';
+const CHANNELS: { id: ChannelFilterId; label: string; color: string }[] = [
   { id: 'all', label: 'All', color: Theme.colors.primary },
   { id: 'unread', label: 'Unread', color: '#15803D' },
-  { id: 'whatsapp', label: 'WhatsApp', color: '#25D366' },
+  { id: 'personal', label: 'Personal WA', color: '#25D366' },
+  { id: 'waba', label: 'WA Business', color: '#128C7E' },
   { id: 'linkedin', label: 'LinkedIn', color: '#0077B5' },
   { id: 'instagram', label: 'Instagram', color: '#E1306C' },
   { id: 'email', label: 'Email', color: Theme.colors.primary },
@@ -362,6 +415,14 @@ const getConversationSearchLabel = (conversation: Conversation) =>
 const sortNewestConversations = (items: Conversation[]) =>
   [...items].sort((a, b) => Date.parse(b.lastMessageAt ?? '') - Date.parse(a.lastMessageAt ?? ''));
 
+const WHATSAPP_CONTACT_CHANNEL = 'personal';
+
+const withWhatsAppContactChannel = (path: string) =>
+  `${path}${path.includes('?') ? '&' : '?'}channel=${WHATSAPP_CONTACT_CHANNEL}`;
+
+const getActionErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error && error.message ? error.message : fallback;
+
 const postJsonToBackend = async (path: string, body: Record<string, unknown>) => {
   const token = await getAuthToken();
   const response = await fetch(buildApiUrl(path), {
@@ -385,6 +446,20 @@ const postJsonToBackend = async (path: string, body: Record<string, unknown>) =>
 
   return payload;
 };
+
+const patchWhatsAppConversationAction = async (
+  conversationId: string,
+  action: 'favorite' | 'pin' | 'lock' | 'status',
+  body?: Record<string, unknown>,
+) => {
+  const path = withWhatsAppContactChannel(
+    `/api/whatsapp-conversations/conversations/${encodeURIComponent(conversationId)}/${action}`,
+  );
+  return apiPatch(path, body);
+};
+
+const deleteWhatsAppConversationFromBackend = async (conversationId: string) =>
+  apiDelete(withWhatsAppContactChannel(`/api/whatsapp-conversations/conversations/${encodeURIComponent(conversationId)}`));
 
 const getChannelSurface = (channel: ChatChannel) => {
   switch (channel) {
@@ -511,6 +586,157 @@ const getInitials = (name: string) =>
     .slice(0, 2)
     .toUpperCase();
 
+type ChatMediaKind = 'media' | 'doc' | 'link';
+type ChatMediaItem = {
+  id: string;
+  kind: ChatMediaKind;
+  url: string;
+  title: string;
+  createdAt: string;
+  messageId: string;
+  mediaType?: string;
+  caption?: string;
+};
+
+type WhatsAppBusinessProfile = {
+  company_name?: string | null;
+  industry?: string | null;
+  designation?: string | null;
+  services_offered?: string | null;
+  ideal_customer_profile?: string | null;
+  email?: string | null;
+  website_url?: string | null;
+  website_about?: string | null;
+  website_clients?: string | null;
+  website_services?: string | null;
+  icp_top_clients?: string | null;
+  icp_decision_maker?: string | null;
+  icp_ideal_referrals?: string | null;
+  icp_extra?: string | null;
+  kpi_members_met?: number | null;
+  kpi_referrals_given?: number | null;
+  kpi_referrals_received?: number | null;
+  kpi_one_to_ones?: number | null;
+  kpi_visitors_invited?: number | null;
+};
+
+const URL_PATTERN = /\bhttps?:\/\/[^\s<>()]+/gi;
+
+const sanitizeUrl = (value: string) => value.replace(/[),.]+$/g, '');
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const getBackendMediaUrl = (mediaId: string) =>
+  mediaId.startsWith('http')
+    ? mediaId
+    : buildApiUrl(`/api/whatsapp-conversations/conversations/media/${mediaId}`, RESOLVED_API_URL);
+
+const isVideoMediaItem = (item: ChatMediaItem) =>
+  item.mediaType === 'video' || item.mediaType?.startsWith('video/');
+
+const normalizeBusinessProfile = (payload: unknown): WhatsAppBusinessProfile | null => {
+  if (!isPlainRecord(payload)) {
+    return null;
+  }
+
+  const record = isPlainRecord(payload.data)
+    ? payload.data
+    : isPlainRecord(payload.profile)
+      ? payload.profile
+      : payload;
+  const hasProfileValue = Object.values(record).some((value) => value !== null && value !== undefined && String(value).trim() !== '');
+
+  return hasProfileValue ? record as WhatsAppBusinessProfile : null;
+};
+
+const fetchWhatsAppBusinessProfile = async (conversationId: string) => {
+  const token = await getAuthToken();
+  const response = await fetch(
+    buildApiUrl(`/api/whatsapp-conversations/conversations/${encodeURIComponent(conversationId)}/business-profile?channel=personal`, RESOLVED_API_URL),
+    {
+      headers: {
+        Accept: 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Business profile request failed (${response.status})`);
+  }
+
+  return normalizeBusinessProfile(await response.json());
+};
+
+const ensureUrlProtocol = (value: string) =>
+  /^https?:\/\//i.test(value) ? value : `https://${value}`;
+
+const getMediaItemsFromMessages = (messages: ChatMessage[]) => {
+  const seen = new Set<string>();
+  const pushUnique = (items: ChatMediaItem[], item: ChatMediaItem) => {
+    const key = `${item.kind}:${item.url || item.id}`;
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    items.push(item);
+  };
+
+  const items: ChatMediaItem[] = [];
+
+  messages.forEach((message) => {
+    message.attachments?.forEach((attachment, index) => {
+      const kind: ChatMediaKind = attachment.type === 'image' || attachment.type === 'video' ? 'media' : 'doc';
+      pushUnique(items, {
+        id: `${message.id}-attachment-${attachment.id || index}`,
+        kind,
+        url: attachment.url,
+        title: attachment.name || (kind === 'media' ? 'Media' : 'Document'),
+        createdAt: message.createdAt,
+        messageId: message.id,
+        mediaType: attachment.type,
+        caption: message.mediaCaption || message.content,
+      });
+    });
+
+    if (message.mediaId) {
+      const mediaType = message.mediaType || message.mediaMimeType || 'document';
+      const isMedia = mediaType === 'image' || mediaType === 'video' || mediaType.startsWith('image/') || mediaType.startsWith('video/');
+      pushUnique(items, {
+        id: `${message.id}-media-${message.mediaId}`,
+        kind: isMedia ? 'media' : 'doc',
+        url: getBackendMediaUrl(message.mediaId),
+        title: message.mediaFilename || message.mediaCaption || (isMedia ? 'Media' : 'Document'),
+        createdAt: message.createdAt,
+        messageId: message.id,
+        mediaType,
+        caption: message.mediaCaption || (message.content === message.mediaId ? undefined : message.content),
+      });
+    }
+
+    const links = message.content.match(URL_PATTERN) ?? [];
+    links.forEach((rawLink, index) => {
+      const url = sanitizeUrl(rawLink);
+      if (message.mediaId && url === message.mediaId) {
+        return;
+      }
+
+      pushUnique(items, {
+        id: `${message.id}-link-${index}`,
+        kind: 'link',
+        url,
+        title: url.replace(/^https?:\/\//i, ''),
+        createdAt: message.createdAt,
+        messageId: message.id,
+      });
+    });
+  });
+
+  return items.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+};
+
 const MessageStatusIcon = ({ message }: { message: ChatMessage }) => {
   const appTheme = useAppTheme();
 
@@ -543,8 +769,14 @@ const ConversationRow = memo(({
   onPress: () => void;
 }) => {
   const appTheme = useAppTheme();
-  const channelColor = getChannelColor(conversation.channel);
-  const channelLabel = getChannelLabel(conversation.channel);
+  const baseChannelColor = getChannelColor(conversation.channel);
+  const waBackendChannel = conversation.channel === 'whatsapp' ? conversation.waBackendChannel : undefined;
+  const channelColor = waBackendChannel === 'waba' ? '#128C7E' : baseChannelColor;
+  const channelLabel = waBackendChannel === 'personal'
+    ? 'Personal WA'
+    : waBackendChannel === 'waba'
+      ? 'WA Business'
+      : getChannelLabel(conversation.channel);
 
   return (
     <TouchableOpacity
@@ -613,15 +845,22 @@ const ConversationRow = memo(({
 });
 
 ConversationRow.displayName = 'ConversationRow';
-
 const MessageBubble = memo(({
   message,
   channel,
   contactName,
+  contactAvatar,
+  authToken,
+  onPlayAudio,
+  isCurrentlyPlaying,
 }: {
   message: ChatMessage;
   channel: ChatChannel;
   contactName: string;
+  contactAvatar?: string;
+  authToken?: string | null;
+  onPlayAudio?: (id: string, url: string) => void;
+  isCurrentlyPlaying?: boolean;
 }) => {
   const appTheme = useAppTheme();
   const isAgent = message.sender === 'agent';
@@ -638,8 +877,42 @@ const MessageBubble = memo(({
       }
     : basePalette;
   const leadTextColor = appTheme.darkMode ? '#F8FAFC' : appTheme.text;
-  const avatarLabel = isAgent ? 'A' : getInitials(message.senderName || contactName || 'Lead');
+  const leadInitials = getInitials(message.senderName || contactName || 'L');
+  const agentInitials = 'A';
   const emailMetaLabel = isAgent ? `To: ${contactName || 'Recipient'}` : `From: ${message.senderName || contactName || 'Sender'}`;
+
+  // Detect special message types
+  const isLocationMessage = message.content?.startsWith('Location shared');
+  const locationLines = isLocationMessage ? message.content.split('\n') : [];
+  const locationName = locationLines[1] || 'Location';
+  const locationLink = locationLines[2] || '';
+
+  // Check if content is just the media identifier
+  const isContentMediaRef = message.mediaId && (
+    message.content === message.mediaId ||
+    message.content.includes(message.mediaId) ||
+    (message.content.startsWith('http') && message.content === message.mediaId)
+  );
+
+  const displayCaption = message.mediaCaption || (!isContentMediaRef ? message.content : '');
+
+  // Split attachments by type
+  const imageAttachments = message.attachments?.filter((a) => a.type === 'image' || a.type === 'video') ?? [];
+  const docAttachments = message.attachments?.filter((a) => a.type === 'document') ?? [];
+
+  // Media info from direct backend response format
+  const hasMediaId = !!message.mediaId;
+  const isImageMedia = hasMediaId && (message.mediaType === 'image' || (message.mediaMimeType?.startsWith('image/') ?? false));
+  const isVideoMedia = hasMediaId && (message.mediaType === 'video' || (message.mediaMimeType?.startsWith('video/') ?? false));
+  const isAudioMedia = hasMediaId && (message.mediaType === 'audio' || (message.mediaMimeType?.startsWith('audio/') ?? false));
+  const isDocumentMedia = hasMediaId && !isImageMedia && !isVideoMedia && !isAudioMedia;
+  const mediaUrl = hasMediaId ? (
+    message.mediaId!.startsWith('http')
+      ? message.mediaId!
+      : buildApiUrl(`/api/whatsapp-conversations/conversations/media/${message.mediaId}`)
+  ) : null;
+
+  const hasOnlyMedia = (imageAttachments.length > 0 || isImageMedia || isVideoMedia) && !displayCaption && docAttachments.length === 0 && !isDocumentMedia;
 
   return (
     <View
@@ -651,11 +924,13 @@ const MessageBubble = memo(({
       ]}
     >
       {!isAgent && !isEmail && (
-        <View style={[styles.messageAvatar, isLinkedIn && styles.linkedinAvatar]}>
-          <Typography variant="caption" color={appTheme.darkMode ? '#F8FAFC' : isLinkedIn ? '#0A66C2' : Theme.colors.primary} style={styles.messageAvatarText}>
-            {avatarLabel || '?'}
-          </Typography>
-        </View>
+        <Avatar
+          src={contactAvatar}
+          fallback={leadInitials || '?'}
+          size={28}
+          style={isLinkedIn ? { ...styles.messageAvatarImg, ...styles.linkedinAvatar } : styles.messageAvatarImg}
+          authToken={authToken}
+        />
       )}
       <View
         style={[
@@ -665,6 +940,7 @@ const MessageBubble = memo(({
           isAgent ? styles.messageBubbleAgent : styles.messageBubbleLead,
           isEmail && (isAgent ? styles.emailBubbleSent : styles.emailBubbleReceived),
           isLinkedIn && (isAgent ? styles.linkedinBubbleSent : styles.linkedinBubbleReceived),
+          hasOnlyMedia && styles.mediaBubble,
           {
             backgroundColor: isAgent ? palette.outgoing : palette.incoming,
             borderColor: palette.border,
@@ -675,7 +951,7 @@ const MessageBubble = memo(({
           <View style={styles.emailCardHeader}>
             <View style={styles.emailSenderAvatar}>
               <Typography variant="caption" color="#B42318" style={styles.messageAvatarText}>
-                {avatarLabel || 'M'}
+                {isAgent ? agentInitials : (leadInitials || 'M')}
               </Typography>
             </View>
             <View style={styles.emailHeaderText}>
@@ -693,25 +969,135 @@ const MessageBubble = memo(({
             {message.senderName || contactName}
           </Typography>
         )}
-        <Typography
-          variant="body"
-          color={isAgent ? palette.outgoingText : leadTextColor}
-          style={[styles.messageText, isEmail && styles.emailMessageText]}
-        >
-          {message.content}
-        </Typography>
-        {message.attachments?.length ? (
-          <View style={styles.attachments}>
-            {message.attachments.map((attachment) => (
-              <View key={attachment.id} style={[styles.attachmentRow, isEmail && styles.emailAttachmentRow]}>
-                <Paperclip color={appTheme.muted} size={14} />
-                <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={styles.attachmentName}>
-                  {attachment.name}
+        {/* Image attachments */}
+        {imageAttachments.map((attachment) => (
+          <TouchableOpacity
+            key={attachment.id}
+            activeOpacity={0.88}
+            onPress={() => attachment.url && void Linking.openURL(attachment.url)}
+          >
+            <Image
+              source={{
+                uri: attachment.url,
+                headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+              }}
+              style={styles.mediaThumbnail}
+              resizeMode="cover"
+            />
+          </TouchableOpacity>
+        ))}
+
+        {/* MediaId image/video */}
+        {(isImageMedia || isVideoMedia) && mediaUrl && (
+          <TouchableOpacity
+            activeOpacity={0.88}
+            onPress={() => void Linking.openURL(mediaUrl)}
+          >
+            <Image
+              source={{
+                uri: mediaUrl,
+                headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+              }}
+              style={styles.mediaThumbnail}
+              resizeMode="cover"
+            />
+          </TouchableOpacity>
+        )}
+
+        {/* Location card */}
+        {isLocationMessage ? (
+          <TouchableOpacity
+            style={[styles.locationCard, { borderColor: isAgent ? 'rgba(255,255,255,0.24)' : appTheme.border }]}
+            activeOpacity={0.82}
+            onPress={() => locationLink && void Linking.openURL(locationLink)}
+          >
+            <View style={styles.locationCardIcon}>
+              <MapPin color="#05C866" size={20} />
+            </View>
+            <View style={styles.locationCardText}>
+              <Typography variant="bodySmall" color={isAgent ? palette.outgoingText : leadTextColor} style={{ fontWeight: '500' }} numberOfLines={1}>
+                {locationName}
+              </Typography>
+              {locationLink ? (
+                <Typography variant="caption" color={isAgent ? 'rgba(255,255,255,0.65)' : '#2563EB'} numberOfLines={1}>
+                  Tap to open map
                 </Typography>
+              ) : null}
+            </View>
+          </TouchableOpacity>
+        ) : (
+          !hasOnlyMedia && displayCaption ? (
+            <Typography
+              variant="body"
+              color={isAgent ? palette.outgoingText : leadTextColor}
+              style={[styles.messageText, isEmail && styles.emailMessageText]}
+            >
+              {displayCaption}
+            </Typography>
+          ) : null
+        )}
+
+        {/* Document attachments */}
+        {docAttachments.map((attachment) => (
+          <TouchableOpacity
+            key={attachment.id}
+            style={[styles.docCard, { borderColor: isAgent ? 'rgba(255,255,255,0.22)' : appTheme.border, backgroundColor: isAgent ? 'rgba(0,0,0,0.12)' : appTheme.softSurface }]}
+            activeOpacity={0.82}
+            onPress={() => attachment.url && void Linking.openURL(attachment.url)}
+          >
+            <FileText color="#2F83FF" size={20} />
+            <Typography variant="caption" color={isAgent ? palette.outgoingText : leadTextColor} numberOfLines={1} style={styles.docCardName}>
+              {attachment.name}
+            </Typography>
+            <Download color={isAgent ? 'rgba(255,255,255,0.7)' : appTheme.muted} size={16} />
+          </TouchableOpacity>
+        ))}
+
+        {/* MediaId document */}
+        {isAudioMedia && mediaUrl && (
+          <TouchableOpacity
+            style={[styles.audioCard, { borderColor: isAgent ? 'rgba(255,255,255,0.22)' : appTheme.border, backgroundColor: isAgent ? 'rgba(0,0,0,0.12)' : appTheme.softSurface }]}
+            activeOpacity={0.82}
+            onPress={() => onPlayAudio ? onPlayAudio(message.id, mediaUrl) : void Linking.openURL(mediaUrl)}
+          >
+            {isCurrentlyPlaying ? (
+              <PauseCircle color="#FF6908" size={28} />
+            ) : (
+              <PlayCircle color="#FF6908" size={28} />
+            )}
+            <View style={styles.audioCardContent}>
+              <Typography variant="caption" color={isAgent ? palette.outgoingText : leadTextColor} numberOfLines={1} style={styles.audioCardName}>
+                {message.mediaFilename || 'Voice message'}
+              </Typography>
+              <View style={styles.audioWaveformRow}>
+                {[4, 6, 8, 5, 9, 7, 6, 8, 4, 7, 5, 8, 6, 9, 5, 7, 4, 6, 8, 5].map((h, i) => (
+                  <View
+                    key={i}
+                    style={[
+                      styles.audioWaveBar,
+                      { height: h * 2, backgroundColor: isCurrentlyPlaying ? '#FF6908' : (isAgent ? 'rgba(255,255,255,0.5)' : appTheme.disabled) },
+                    ]}
+                  />
+                ))}
               </View>
-            ))}
-          </View>
-        ) : null}
+            </View>
+          </TouchableOpacity>
+        )}
+
+        {isDocumentMedia && mediaUrl && (
+          <TouchableOpacity
+            style={[styles.docCard, { borderColor: isAgent ? 'rgba(255,255,255,0.22)' : appTheme.border, backgroundColor: isAgent ? 'rgba(0,0,0,0.12)' : appTheme.softSurface }]}
+            activeOpacity={0.82}
+            onPress={() => void Linking.openURL(mediaUrl)}
+          >
+            <FileText color="#2F83FF" size={20} />
+            <Typography variant="caption" color={isAgent ? palette.outgoingText : leadTextColor} numberOfLines={1} style={styles.docCardName}>
+              {message.mediaFilename || 'Document'}
+            </Typography>
+            <Download color={isAgent ? 'rgba(255,255,255,0.7)' : appTheme.muted} size={16} />
+          </TouchableOpacity>
+        )}
+
         <View style={[styles.messageMeta, isEmail && styles.emailMessageMeta]}>
           <Typography
             variant="caption"
@@ -723,11 +1109,12 @@ const MessageBubble = memo(({
         </View>
       </View>
       {isAgent && !isEmail && (
-        <View style={[styles.messageAvatar, isLinkedIn && styles.linkedinAgentAvatar]}>
-          <Typography variant="caption" color={isLinkedIn ? '#FFFFFF' : Theme.colors.primary} style={styles.messageAvatarText}>
-            A
-          </Typography>
-        </View>
+        <Avatar
+          fallback={agentInitials}
+          size={28}
+          style={isLinkedIn ? { ...styles.messageAvatarImg, ...styles.linkedinAgentAvatar } : styles.messageAvatarImg}
+          authToken={authToken}
+        />
       )}
     </View>
   );
@@ -798,6 +1185,92 @@ const EMPTY_QUICK_DRAFT: QuickComposerDraft = {
 };
 
 const EMOJI_OPTIONS = ['👍', '🙏', '😊', '✅', '❤️', '🎉', '📞', '📍', '💬', '🔥', '⭐', '🙌'];
+
+type EmojiCategoryDef = { id: string; label: string; icon: string; emojis: string[] };
+const EMOJI_CATEGORIES: EmojiCategoryDef[] = [
+  {
+    id: 'smileys', label: 'Smileys & People', icon: '😊',
+    emojis: [
+      '😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘','😗','😚','😙',
+      '🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬',
+      '🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸',
+      '😎','🤓','🧐','😕','😟','🙁','☹️','😮','😯','😲','😳','🥺','😦','😧','😨','😰','😥','😢','😭','😱',
+      '😖','😣','😞','😓','😩','😫','🥱','😤','😡','😠','🤬','😈','👿','💀','☠️','💩','🤡','👹','👺','👻',
+      '👋','🤚','🖐️','✋','🖖','👌','🤌','🤏','✌️','🤞','🤟','🤘','🤙','👈','👉','👆','👇','☝️','👍',
+      '👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🤝','🙏','✍️','💅','🤳','💪','🦾','🦵','🦶','👂','👃',
+    ],
+  },
+  {
+    id: 'animals', label: 'Animals & Nature', icon: '🐶',
+    emojis: [
+      '🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊',
+      '🐔','🐧','🐦','🐤','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐜',
+      '🦟','🦗','🦂','🐢','🐍','🦎','🦕','🦖','🦏','🦛','🐘','🦒','🦘','🐃','🐂','🐄','🐎','🐖',
+      '🐏','🐑','🦙','🐐','🦌','🐕','🐩','🦮','🐈','🐈‍⬛','🐓','🦃','🦚','🦜','🦢','🦩','🕊️',
+      '🐇','🦝','🦨','🦡','🦦','🦥','🐁','🐀','🐿️','🦔','🐾','🐉','🐲','🌵','🎄','🌲','🌳','🌴',
+      '🌱','🌿','☘️','🍀','🎍','🎋','🍃','🍂','🍁','🍄','🌾','💐','🌷','🌹','🥀','🌺','🌸','🌼','🌻',
+      '🌞','🌝','🌛','🌜','🌚','🌕','🌖','🌗','🌘','🌑','🌒','🌓','🌔','🌙','🌟','⭐','🌠','☁️','⛅',
+    ],
+  },
+  {
+    id: 'food', label: 'Food & Drink', icon: '🍔',
+    emojis: [
+      '🍏','🍎','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🫒','🥑',
+      '🍆','🥔','🥕','🌽','🌶️','🫑','🥒','🥬','🥦','🧄','🧅','🍄','🥜','🍞','🥐','🥖','🫓',
+      '🥨','🥯','🧀','🥚','🍳','🧈','🥞','🧇','🥓','🥩','🍗','🍖','🌭','🍔','🍟','🍕','🌮','🌯',
+      '🥙','🧆','🍱','🍘','🍙','🍚','🍛','🍜','🍝','🍠','🍢','🍣','🍤','🍥','🥮','🍡','🥟','🥠','🥡',
+      '🦀','🦞','🦐','🦑','🦪','🍦','🍧','🍨','🍩','🍪','🎂','🍰','🧁','🥧','🍫','🍬','🍭','🍯',
+      '🍼','🥛','☕','🍵','🧃','🥤','🧋','🍶','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🧉','🍾',
+    ],
+  },
+  {
+    id: 'activities', label: 'Activities', icon: '⚽',
+    emojis: [
+      '⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🪀','🏓','🏸','🏒','🏑','🥍','🏏','🪃','🥅',
+      '⛳','🪁','🏹','🎣','🤿','🎽','🎿','🛷','🥌','🪂','🏋️','🤼','🤸','⛹️','🤺','🏇','🧘','🏄','🏊',
+      '🚣','🧗','🚵','🚴','🏆','🥇','🥈','🥉','🏅','🎖️','🏵️','🎗️','🎫','🎟️','🎪','🤹','🎭','🎨','🎬',
+      '🎤','🎧','🎼','🎹','🥁','🪘','🎷','🎺','🎸','🪕','🎻','🎲','♟️','🎯','🎳','🎰','🎮','🕹️',
+    ],
+  },
+  {
+    id: 'travel', label: 'Travel & Places', icon: '🚗',
+    emojis: [
+      '🚗','🚕','🚙','🚌','🚎','🏎️','🚓','🚑','🚒','🚐','🛻','🚚','🚛','🚜','🏍️','🛵','🚲','🛴',
+      '🚨','🚥','🚦','🛑','🚧','⛽','🚢','✈️','🛩️','🚀','🛸','🚁','🛶','⛵','🚤','🛥️','🛳️','⛴️',
+      '🚞','🚝','🚄','🚅','🚈','🚂','🚃','🚋','🚆','🚇','🚊','🚉','🛫','🛬','🛰️','🌍','🌎','🌏','🗺️',
+      '🏔️','⛰️','🌋','🗻','🏕️','🏖️','🏜️','🏝️','🏞️','🏟️','🏛️','🏗️','🏘️','🏚️','🏠','🏡','🏢','🏣',
+      '🏤','🏥','🏦','🏨','🏩','🏪','🏫','🏬','🏭','🏯','🏰','💒','🗼','🗽','⛪','🕌','🕍',
+    ],
+  },
+  {
+    id: 'objects', label: 'Objects', icon: '💡',
+    emojis: [
+      '⌚','📱','💻','⌨️','🖥️','🖨️','🖱️','💽','💾','💿','📀','📷','📸','📹','🎥','📽️','🎞️','📞',
+      '☎️','📟','📠','📺','📻','🧭','⏱️','⏲️','⏰','🕰️','⌛','⏳','📡','🔋','🔌','💡','🔦','🕯️',
+      '🧯','🛢️','💸','💵','💴','💶','💷','💰','💳','💎','⚖️','🧰','🔧','🔨','⚒️','🛠️','⛏️','🔩','⚙️',
+      '🔗','⛓️','🧲','🔫','💣','🪓','🔪','🛡️','🔮','📿','🧿','💈','⚗️','🔭','🔬','🩺','💊','💉','🧬',
+      '🪤','🧴','🧷','🧹','🧺','🧻','🧼','🫧','🪥','🧽','🛒','🚪','🪞','🪟','🛋️','🪑','🚽','🚿','🛁',
+    ],
+  },
+  {
+    id: 'symbols', label: 'Symbols', icon: '❤️',
+    emojis: [
+      '❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❤️‍🔥','❤️‍🩹','💕','💞','💓','💗','💖','💘','💝','💟',
+      '☮️','✝️','☪️','🕉️','☸️','✡️','🔯','🕎','☯️','☦️','🛐','⛎','♈','♉','♊','♋','♌','♍','♎','♏',
+      '♐','♑','♒','♓','🆔','⚛️','🉑','☢️','☣️','📴','📳','🈶','🈚','🈸','🈺','🈷️','✴️','🆚','💮','🉐',
+      '㊙️','㊗️','🈴','🈵','🈹','🈲','🅰️','🅱️','🆎','🆑','🅾️','🆘','❌','⭕','🛑','⛔','📛','🚫','💯',
+      '💢','♨️','🚷','🚯','🚳','🚱','🔞','📵','🔕','🔇','🔈','🔉','🔊','📣','📢','💬','💭','🗯️',
+      '♠️','♣️','♥️','♦️','🃏','🀄','🎴','🔀','🔁','🔂','▶️','⏩','⏭️','◀️','⏪','⏮️','🔼','⏫','🔽','⏬',
+      '⏸️','⏹️','⏺️','🎦','🔅','🔆','📶','🔱','⚜️','🔰','♻️','✅','❇️','🔴','🟠','🟡','🟢','🔵','🟣',
+    ],
+  },
+];
+
+const formatDuration = (seconds: number): string => {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
 
 const CHAT_UI_STORAGE_KEYS = {
   starred: 'lad.chat.starredIds.v1',
@@ -877,24 +1350,1397 @@ const DetailLine = ({
   );
 };
 
-const ContactDetailsPanel = ({
+const ContactActionButton = ({
+  icon: Icon,
+  label,
+  onPress,
+}: {
+  icon: React.ComponentType<{ color?: string; size?: number }>;
+  label: string;
+  onPress: () => void;
+}) => {
+  const appTheme = useAppTheme();
+
+  return (
+    <TouchableOpacity
+      style={[styles.whatsAppContactAction, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+      activeOpacity={0.76}
+      onPress={onPress}
+    >
+      <View style={styles.whatsAppContactActionIcon}>
+        <Icon color="#00A884" size={21} />
+      </View>
+      <Typography variant="caption" color={appTheme.text} style={styles.whatsAppContactActionLabel}>
+        {label}
+      </Typography>
+    </TouchableOpacity>
+  );
+};
+
+const ContactSwitchRow = ({
+  icon: Icon,
+  title,
+  value,
+  onValueChange,
+}: {
+  icon: React.ComponentType<{ color?: string; size?: number }>;
+  title: string;
+  value: boolean;
+  onValueChange: () => void;
+}) => {
+  const appTheme = useAppTheme();
+
+  return (
+    <TouchableOpacity style={styles.whatsAppInfoRow} activeOpacity={0.76} onPress={onValueChange}>
+      <Icon color={appTheme.muted} size={22} />
+      <Typography variant="body" color={appTheme.text} style={styles.whatsAppSwitchTitle}>
+        {title}
+      </Typography>
+      <Switch
+        value={value}
+        onValueChange={onValueChange}
+        trackColor={{ false: appTheme.border, true: appTheme.successSoft }}
+        thumbColor={value ? '#00A884' : appTheme.disabled}
+      />
+    </TouchableOpacity>
+  );
+};
+
+const ContactInfoRow = ({
+  icon: Icon,
+  title,
+  subtitle,
+  onPress,
+}: {
+  icon: React.ComponentType<{ color?: string; size?: number }>;
+  title: string;
+  subtitle?: string;
+  onPress?: () => void;
+}) => {
+  const appTheme = useAppTheme();
+
+  const content = (
+    <>
+      <Icon color={appTheme.muted} size={22} />
+      <View style={styles.whatsAppInfoText}>
+        <Typography variant="body" color={appTheme.text} style={styles.whatsAppInfoTitle}>
+          {title}
+        </Typography>
+        {subtitle ? (
+          <Typography variant="caption" color={appTheme.muted} numberOfLines={2}>
+            {subtitle}
+          </Typography>
+        ) : null}
+      </View>
+    </>
+  );
+
+  if (onPress) {
+    return (
+      <TouchableOpacity style={styles.whatsAppInfoRow} activeOpacity={0.76} onPress={onPress}>
+        {content}
+      </TouchableOpacity>
+    );
+  }
+
+  return (
+    <View style={styles.whatsAppInfoRow}>
+      {content}
+    </View>
+  );
+};
+
+const ContactDangerRow = ({
+  icon: Icon,
+  title,
+  subtitle,
+  filled = false,
+  onPress,
+}: {
+  icon: React.ComponentType<{ color?: string; size?: number }>;
+  title: string;
+  subtitle?: string;
+  filled?: boolean;
+  onPress: () => void;
+}) => {
+  const appTheme = useAppTheme();
+  return (
+    <TouchableOpacity
+      style={[
+        styles.whatsAppDangerRow,
+        filled && { backgroundColor: appTheme.darkMode ? '#2A171B' : '#FFF1F2' },
+      ]}
+      activeOpacity={0.72}
+      onPress={onPress}
+    >
+      <Icon color="#E11D48" size={22} />
+      <View style={styles.whatsAppDangerText}>
+        <Typography variant="body" color="#E11D48" style={styles.whatsAppDangerTitle}>
+          {title}
+        </Typography>
+        {subtitle ? (
+          <Typography variant="caption" color="#E11D48" style={styles.whatsAppDangerSubtitle} numberOfLines={1}>
+            {subtitle}
+          </Typography>
+        ) : null}
+      </View>
+    </TouchableOpacity>
+  );
+};
+
+const BusinessProfileLine = ({
+  icon: Icon,
+  title,
+  subtitle,
+  onPress,
+}: {
+  icon: React.ComponentType<{ color?: string; size?: number }>;
+  title: string;
+  subtitle?: string | null;
+  onPress?: () => void;
+}) => {
+  const appTheme = useAppTheme();
+  const content = (
+    <>
+      <Icon color={appTheme.muted} size={17} />
+      <View style={styles.businessProfileLineText}>
+        <Typography variant="bodySmall" color={appTheme.text} numberOfLines={2} style={styles.businessProfileLineTitle}>
+          {title}
+        </Typography>
+        {subtitle ? (
+          <Typography variant="caption" color={appTheme.muted} numberOfLines={2}>
+            {subtitle}
+          </Typography>
+        ) : null}
+      </View>
+    </>
+  );
+
+  if (onPress) {
+    return (
+      <TouchableOpacity style={styles.businessProfileLine} activeOpacity={0.74} onPress={onPress}>
+        {content}
+      </TouchableOpacity>
+    );
+  }
+
+  return <View style={styles.businessProfileLine}>{content}</View>;
+};
+
+const BusinessProfileCard = ({
+  profile,
+  loading,
+}: {
+  profile: WhatsAppBusinessProfile | null;
+  loading: boolean;
+}) => {
+  const appTheme = useAppTheme();
+
+  if (loading) {
+    return (
+      <View style={[styles.businessProfileCard, { backgroundColor: appTheme.softSurface }]}>
+        <ActivityIndicator color={appTheme.primaryAccent} />
+      </View>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <View style={[styles.businessProfileCard, { backgroundColor: appTheme.softSurface }]}>
+        <Typography variant="caption" color={appTheme.muted}>
+          No business profile available
+        </Typography>
+      </View>
+    );
+  }
+
+  const metrics = [
+    { label: 'Members Met', value: profile.kpi_members_met },
+    { label: 'Referrals Given', value: profile.kpi_referrals_given },
+    { label: 'Referrals Rcvd', value: profile.kpi_referrals_received },
+    { label: '1-to-1s', value: profile.kpi_one_to_ones },
+  ].filter((metric) => metric.value !== null && metric.value !== undefined);
+
+  const website = profile.website_url?.trim();
+
+  return (
+    <View style={[styles.businessProfileCard, { backgroundColor: appTheme.softSurface }]}>
+      {profile.company_name ? (
+        <BusinessProfileLine icon={Building2} title={profile.company_name} subtitle={profile.industry} />
+      ) : null}
+      {profile.designation ? <BusinessProfileLine icon={Briefcase} title={profile.designation} /> : null}
+      {profile.email ? <BusinessProfileLine icon={Mail} title={profile.email} /> : null}
+      {website ? (
+        <BusinessProfileLine
+          icon={Globe}
+          title={website}
+          onPress={() => void Linking.openURL(ensureUrlProtocol(website)).catch(() => undefined)}
+        />
+      ) : null}
+      {profile.services_offered ? (
+        <BusinessProfileLine icon={Target} title="Services" subtitle={profile.services_offered} />
+      ) : null}
+      {profile.ideal_customer_profile ? (
+        <BusinessProfileLine icon={Users} title="Ideal Customer" subtitle={profile.ideal_customer_profile} />
+      ) : null}
+      {profile.website_about ? (
+        <View style={[styles.businessProfileDivider, { borderTopColor: appTheme.border }]}>
+          <Typography variant="overline" color={appTheme.muted}>About from website</Typography>
+          <Typography variant="caption" color={appTheme.muted} numberOfLines={3}>{profile.website_about}</Typography>
+        </View>
+      ) : null}
+      {profile.website_clients ? (
+        <View style={styles.businessProfileTextBlock}>
+          <Typography variant="overline" color={appTheme.muted}>Clients</Typography>
+          <Typography variant="caption" color={appTheme.muted} numberOfLines={2}>{profile.website_clients}</Typography>
+        </View>
+      ) : null}
+      {profile.website_services ? (
+        <View style={styles.businessProfileTextBlock}>
+          <Typography variant="overline" color={appTheme.muted}>Services from website</Typography>
+          <Typography variant="caption" color={appTheme.muted} numberOfLines={2}>{profile.website_services}</Typography>
+        </View>
+      ) : null}
+      {profile.icp_top_clients || profile.icp_decision_maker || profile.icp_ideal_referrals ? (
+        <View style={[styles.businessProfileDivider, { borderTopColor: appTheme.border }]}>
+          <Typography variant="overline" color={appTheme.muted}>ICP Discovery</Typography>
+          {profile.icp_top_clients ? <Typography variant="caption" color={appTheme.text} numberOfLines={2}>Top Clients: {profile.icp_top_clients}</Typography> : null}
+          {profile.icp_decision_maker ? <Typography variant="caption" color={appTheme.text} numberOfLines={2}>Decision Maker: {profile.icp_decision_maker}</Typography> : null}
+          {profile.icp_ideal_referrals ? <Typography variant="caption" color={appTheme.text} numberOfLines={2}>Ideal Referrals: {profile.icp_ideal_referrals}</Typography> : null}
+        </View>
+      ) : null}
+      {metrics.length ? (
+        <View style={[styles.businessProfileDivider, { borderTopColor: appTheme.border }]}>
+          <Typography variant="overline" color={appTheme.muted}>BNI Metrics</Typography>
+          <View style={styles.businessMetricGrid}>
+            {metrics.map((metric) => (
+              <View key={metric.label} style={[styles.businessMetricTile, { backgroundColor: appTheme.surface }]}>
+                <Typography variant="bodySmall" color={appTheme.text} style={styles.businessMetricValue}>{metric.value}</Typography>
+                <Typography variant="overline" color={appTheme.muted} numberOfLines={1}>{metric.label}</Typography>
+              </View>
+            ))}
+          </View>
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
+const MindBodyPaymentPanel = ({
   conversation,
-  messageCount,
-  resolved,
-  fullPage = false,
+  onMessageSent,
+}: {
+  conversation: Conversation;
+  onMessageSent?: () => void;
+}) => {
+  const appTheme = useAppTheme();
+  const currentUser = useAuthStore((state) => state.user);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [paymentLink, setPaymentLink] = useState<MindBodyPaymentLink | null>(null);
+  const [verification, setVerification] = useState<MindBodyPaymentVerification | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadPaymentLink = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setVerification(null);
+
+    try {
+      setPaymentLink(await getMindBodyPaymentLink());
+    } catch (requestError) {
+      setPaymentLink(null);
+      setError(getActionErrorMessage(requestError, 'Unable to load MindBody payment options.'));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const toggleOpen = useCallback(() => {
+    setOpen((current) => {
+      const next = !current;
+      if (next && !paymentLink && !loading) {
+        void loadPaymentLink();
+      }
+      return next;
+    });
+  }, [loadPaymentLink, loading, paymentLink]);
+
+  const handleSendPaymentLink = useCallback(async () => {
+    if (!paymentLink?.portalUrl) {
+      return;
+    }
+
+    setSending(true);
+    setError(null);
+
+    try {
+      const sender = currentUser
+        ? { id: currentUser.id, name: currentUser.name || currentUser.email || 'Agent' }
+        : undefined;
+      await sendMindBodyPaymentLinkMessage(conversation.id, paymentLink.portalUrl, sender);
+      onMessageSent?.();
+      Alert.alert('Payment link sent', 'The MindBody payment link was sent to this chat.');
+    } catch (requestError) {
+      setError(getActionErrorMessage(requestError, 'Unable to send the payment link.'));
+    } finally {
+      setSending(false);
+    }
+  }, [conversation.id, currentUser, onMessageSent, paymentLink?.portalUrl]);
+
+  const handleVerifyPayment = useCallback(async () => {
+    const phone = conversation.phone?.trim();
+    if (!phone) {
+      setError('This contact does not have a phone number to verify.');
+      return;
+    }
+
+    setVerifying(true);
+    setError(null);
+
+    try {
+      setVerification(await verifyMindBodyPayment(phone));
+    } catch (requestError) {
+      setVerification(null);
+      setError(getActionErrorMessage(requestError, 'Unable to verify MindBody payment.'));
+    } finally {
+      setVerifying(false);
+    }
+  }, [conversation.phone]);
+
+  return (
+    <View style={[styles.paymentPanel, { borderColor: appTheme.border, backgroundColor: appTheme.softSurface }]}>
+      <TouchableOpacity style={styles.paymentPanelHeader} activeOpacity={0.76} onPress={toggleOpen}>
+        <View style={styles.paymentPanelTitleRow}>
+          <CreditCard color={Theme.colors.primary} size={16} />
+          <Typography variant="bodySmall" color={appTheme.text} style={styles.paymentButtonText}>
+            MindBody Payment
+          </Typography>
+        </View>
+        {open ? <ChevronUp color={appTheme.muted} size={17} /> : <ChevronDown color={appTheme.muted} size={17} />}
+      </TouchableOpacity>
+
+      {open ? (
+        <View style={[styles.paymentPanelBody, { borderTopColor: appTheme.border }]}>
+          {error ? (
+            <View style={[styles.contactInlineAlert, { backgroundColor: appTheme.errorSoft, borderColor: Theme.colors.error }]}>
+              <Info color={Theme.colors.error} size={14} />
+              <Typography variant="caption" color={Theme.colors.error} style={styles.contactInlineAlertText}>
+                {error}
+              </Typography>
+            </View>
+          ) : null}
+
+          {loading ? (
+            <View style={styles.contactLoadingRow}>
+              <ActivityIndicator color={Theme.colors.primary} size="small" />
+              <Typography variant="caption" color={appTheme.muted}>
+                Loading pricing options...
+              </Typography>
+            </View>
+          ) : paymentLink ? (
+            <>
+              {paymentLink.options.length ? (
+                <View style={styles.paymentOptionsBlock}>
+                  <Typography variant="overline" color={appTheme.muted} style={styles.paymentBlockTitle}>
+                    Available Plans
+                  </Typography>
+                  {paymentLink.options.slice(0, 5).map((option) => (
+                    <View key={option.id} style={[styles.paymentOptionRow, { backgroundColor: appTheme.surface }]}>
+                      <Typography variant="caption" color={appTheme.text} numberOfLines={1} style={styles.paymentOptionName}>
+                        {option.name}
+                      </Typography>
+                      {option.price ? (
+                        <Typography variant="caption" color={Theme.colors.primary} style={styles.paymentOptionPrice}>
+                          AED {option.price}
+                        </Typography>
+                      ) : null}
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+
+              <View style={styles.paymentOptionsBlock}>
+                <Typography variant="overline" color={appTheme.muted} style={styles.paymentBlockTitle}>
+                  Payment Link
+                </Typography>
+                <Typography variant="caption" color={appTheme.muted} style={styles.paymentLinkText}>
+                  {paymentLink.portalUrl}
+                </Typography>
+              </View>
+
+              <View style={styles.paymentActionRow}>
+                <TouchableOpacity
+                  style={[styles.paymentActionButton, { backgroundColor: Theme.colors.primary }, sending && styles.disabledButton]}
+                  activeOpacity={0.78}
+                  disabled={sending}
+                  onPress={handleSendPaymentLink}
+                >
+                  {sending ? <ActivityIndicator color="#FFFFFF" size="small" /> : <Send color="#FFFFFF" size={15} />}
+                  <Typography variant="caption" color="#FFFFFF" style={styles.paymentActionText}>
+                    Send to Chat
+                  </Typography>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.paymentActionButton, styles.paymentSecondaryButton, { borderColor: appTheme.border }, verifying && styles.disabledButton]}
+                  activeOpacity={0.78}
+                  disabled={verifying}
+                  onPress={handleVerifyPayment}
+                >
+                  {verifying ? <ActivityIndicator color={Theme.colors.primary} size="small" /> : <Shield color={Theme.colors.primary} size={15} />}
+                  <Typography variant="caption" color={Theme.colors.primary} style={styles.paymentActionText}>
+                    Verify
+                  </Typography>
+                </TouchableOpacity>
+              </View>
+
+              {verification ? (
+                <View
+                  style={[
+                    styles.paymentVerificationBox,
+                    verification.paid
+                      ? { backgroundColor: appTheme.successSoft, borderColor: Theme.colors.success }
+                      : { backgroundColor: appTheme.warningSoft, borderColor: Theme.colors.warning },
+                  ]}
+                >
+                  {verification.paid ? (
+                    <CircleCheck color={Theme.colors.success} size={15} />
+                  ) : (
+                    <Info color={Theme.colors.warning} size={15} />
+                  )}
+                  <Typography
+                    variant="caption"
+                    color={verification.paid ? Theme.colors.success : Theme.colors.warning}
+                    style={styles.contactInlineAlertText}
+                  >
+                    {verification.paid
+                      ? `Payment confirmed (${verification.purchases.length} purchase${verification.purchases.length === 1 ? '' : 's'}, ${verification.services.length} service${verification.services.length === 1 ? '' : 's'})`
+                      : 'No payment found in MindBody yet'}
+                  </Typography>
+                </View>
+              ) : null}
+            </>
+          ) : (
+            <TouchableOpacity
+              style={[styles.paymentLoadButton, { borderColor: appTheme.border }]}
+              activeOpacity={0.78}
+              onPress={loadPaymentLink}
+            >
+              <CreditCard color={Theme.colors.primary} size={15} />
+              <Typography variant="caption" color={Theme.colors.primary} style={styles.paymentActionText}>
+                Load Payment Options
+              </Typography>
+            </TouchableOpacity>
+          )}
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
+const AssignmentWorkflowPanel = ({
+  conversation,
+  onAssignmentChanged,
+}: {
+  conversation: Conversation;
+  onAssignmentChanged?: () => void;
+}) => {
+  const appTheme = useAppTheme();
+  const [assignment, setAssignment] = useState<ConversationAssignmentHistory | null>(null);
+  const [members, setMembers] = useState<ConversationTeamMember[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [assigningId, setAssigningId] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const membersById = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
+  const currentAssigneeId = assignment?.current?.assignedToUserId ?? null;
+  const currentAssignee = currentAssigneeId
+    ? membersById.get(currentAssigneeId) ?? { id: currentAssigneeId, name: conversation.owner || 'Team member' }
+    : conversation.owner && !/^ai$/i.test(conversation.owner)
+      ? { id: 'owner', name: conversation.owner }
+      : null;
+
+  const loadAssignment = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const [assignmentResult, membersResult] = await Promise.allSettled([
+        getConversationAssignment(conversation.id),
+        getConversationTeamWorkload(conversation.id),
+      ]);
+
+      if (assignmentResult.status === 'fulfilled') {
+        setAssignment(assignmentResult.value);
+      } else {
+        setAssignment((current) => current ?? { current: null, history: [] });
+        setError(getActionErrorMessage(assignmentResult.reason, 'Assignment history could not be loaded.'));
+      }
+
+      if (membersResult.status === 'fulfilled') {
+        setMembers(membersResult.value);
+      } else if (!members.length) {
+        setError((current) => current ?? getActionErrorMessage(membersResult.reason, 'Team members could not be loaded.'));
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [conversation.id, members.length]);
+
+  useEffect(() => {
+    void loadAssignment();
+  }, [loadAssignment]);
+
+  const handleAssign = useCallback(async (member: ConversationTeamMember | null) => {
+    setAssigningId(member?.id ?? 'unassign');
+    setError(null);
+    setNotice(null);
+
+    try {
+      const nextAssignment = member
+        ? await assignConversationToTeamMember(conversation.id, member.id)
+        : await unassignConversationFromTeamMember(conversation.id);
+      setAssignment(nextAssignment);
+      setPickerOpen(false);
+      setNotice(member ? `Assigned to ${member.name}` : 'Conversation returned to AI');
+      onAssignmentChanged?.();
+      void loadAssignment();
+    } catch (requestError) {
+      setError(getActionErrorMessage(requestError, member ? `Unable to assign ${member.name}.` : 'Unable to unassign conversation.'));
+    } finally {
+      setAssigningId(null);
+    }
+  }, [conversation.id, loadAssignment, onAssignmentChanged]);
+
+  const initials = getInitials(currentAssignee?.name || conversation.owner || 'TE') || 'TE';
+  const recentHistory = assignment?.history?.slice(0, 3) ?? [];
+
+  return (
+    <View style={[styles.assignmentCard, styles.workflowCard, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]}>
+      <View style={styles.assignmentMemberRow}>
+        <View style={[styles.assignmentAvatar, { backgroundColor: appTheme.primarySoft }]}>
+          <Typography variant="caption" color={Theme.colors.primary} style={styles.assignmentAvatarText}>
+            {initials}
+          </Typography>
+        </View>
+        <View style={styles.assignmentMemberText}>
+          <Typography variant="caption" color={appTheme.muted}>
+            Team member
+          </Typography>
+          <Typography variant="bodySmall" color={appTheme.text} style={styles.assignmentMemberName} numberOfLines={1}>
+            {loading && !assignment ? 'Loading...' : currentAssignee?.name || 'Unassigned'}
+          </Typography>
+        </View>
+        <TouchableOpacity
+          style={[styles.reassignButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+          activeOpacity={0.78}
+          onPress={() => setPickerOpen((value) => !value)}
+          disabled={Boolean(assigningId)}
+        >
+          {assigningId ? (
+            <ActivityIndicator color={Theme.colors.primary} size="small" />
+          ) : (
+            <>
+              <Typography variant="caption" color={Theme.colors.primary} style={styles.reassignButtonText}>
+                {currentAssignee ? 'Reassign' : 'Assign'}
+              </Typography>
+              <ChevronDown color={Theme.colors.primary} size={14} />
+            </>
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {notice ? (
+        <View style={[styles.contactInlineAlert, { backgroundColor: appTheme.successSoft, borderColor: Theme.colors.success }]}>
+          <CircleCheck color={Theme.colors.success} size={14} />
+          <Typography variant="caption" color={Theme.colors.success} style={styles.contactInlineAlertText}>
+            {notice}
+          </Typography>
+        </View>
+      ) : null}
+
+      {error ? (
+        <View style={[styles.contactInlineAlert, { backgroundColor: appTheme.warningSoft, borderColor: Theme.colors.warning }]}>
+          <Info color={Theme.colors.warning} size={14} />
+          <Typography variant="caption" color={Theme.colors.warning} style={styles.contactInlineAlertText}>
+            {error}
+          </Typography>
+        </View>
+      ) : null}
+
+      {pickerOpen ? (
+        <View style={[styles.assignmentPicker, { borderColor: appTheme.border, backgroundColor: appTheme.surface }]}>
+          {currentAssignee ? (
+            <TouchableOpacity style={styles.assignmentPickerRow} activeOpacity={0.76} onPress={() => void handleAssign(null)}>
+              <View style={[styles.assignmentPickerAvatar, { borderColor: Theme.colors.error }]}>
+                <X color={Theme.colors.error} size={14} />
+              </View>
+              <Typography variant="bodySmall" color={Theme.colors.error} style={styles.assignmentPickerName}>
+                Unassign
+              </Typography>
+            </TouchableOpacity>
+          ) : null}
+
+          {loading && !members.length ? (
+            <View style={styles.contactLoadingRow}>
+              <ActivityIndicator color={Theme.colors.primary} size="small" />
+              <Typography variant="caption" color={appTheme.muted}>
+                Loading team members...
+              </Typography>
+            </View>
+          ) : members.length ? (
+            members.map((member) => {
+              const isCurrent = currentAssigneeId === member.id;
+              return (
+                <TouchableOpacity
+                  key={member.id}
+                  style={[styles.assignmentPickerRow, isCurrent && { backgroundColor: appTheme.successSoft }]}
+                  activeOpacity={0.76}
+                  disabled={isCurrent || Boolean(assigningId)}
+                  onPress={() => void handleAssign(member)}
+                >
+                  <View style={[styles.assignmentPickerAvatar, { backgroundColor: appTheme.primarySoft }]}>
+                    <Typography variant="caption" color={Theme.colors.primary} style={styles.assignmentAvatarText}>
+                      {getInitials(member.name) || 'TM'}
+                    </Typography>
+                  </View>
+                  <View style={styles.assignmentPickerText}>
+                    <Typography variant="bodySmall" color={appTheme.text} style={styles.assignmentPickerName} numberOfLines={1}>
+                      {member.name}
+                    </Typography>
+                    {member.workload !== undefined ? (
+                      <Typography variant="caption" color={appTheme.muted}>
+                        {member.workload} open chat{member.workload === 1 ? '' : 's'}
+                      </Typography>
+                    ) : member.email ? (
+                      <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
+                        {member.email}
+                      </Typography>
+                    ) : null}
+                  </View>
+                  {isCurrent ? <Check color={Theme.colors.success} size={16} /> : null}
+                </TouchableOpacity>
+              );
+            })
+          ) : (
+            <View style={styles.assignmentEmptyState}>
+              <Users color={appTheme.disabled} size={22} />
+              <Typography variant="caption" color={appTheme.muted}>
+                No team members available
+              </Typography>
+            </View>
+          )}
+        </View>
+      ) : null}
+
+      {recentHistory.length ? (
+        <View style={[styles.assignmentHistory, { borderTopColor: appTheme.border }]}>
+          <Typography variant="overline" color={appTheme.muted}>
+            History
+          </Typography>
+          {recentHistory.map((record) => {
+            const member = record.assignedToUserId ? membersById.get(record.assignedToUserId) : null;
+            return (
+              <View key={record.id} style={styles.assignmentHistoryRow}>
+                <Clock color={appTheme.muted} size={13} />
+                <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={styles.assignmentHistoryText}>
+                  {member?.name || (record.assignedToUserId ? 'Team member' : 'Unassigned')} - {formatTime(record.assignedAt)}
+                </Typography>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  );
+};
+
+const NotesWorkflowPanel = ({
+  conversation,
+  internal = false,
+}: {
+  conversation: Conversation;
+  internal?: boolean;
+}) => {
+  const appTheme = useAppTheme();
+  const currentUser = useAuthStore((state) => state.user);
+  const [notes, setNotes] = useState<ConversationNote[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const loadNotes = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      setNotes(await getConversationNotes(conversation.id));
+    } catch (requestError) {
+      setError(getActionErrorMessage(requestError, 'Unable to load notes.'));
+    } finally {
+      setLoading(false);
+    }
+  }, [conversation.id]);
+
+  useEffect(() => {
+    void loadNotes();
+  }, [loadNotes]);
+
+  const visibleNotes = useMemo(
+    () => notes.filter((note) => Boolean(note.isInternal) === internal),
+    [internal, notes],
+  );
+
+  const handleAddNote = useCallback(async () => {
+    const content = draft.trim();
+    if (!content || saving) {
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      const note = await createConversationNote(conversation.id, content, {
+        authorName: currentUser?.name || currentUser?.email || 'Agent',
+        internal,
+      });
+      setNotes((current) => [note, ...current]);
+      setDraft('');
+    } catch (requestError) {
+      setError(getActionErrorMessage(requestError, internal ? 'Unable to post internal comment.' : 'Unable to add note.'));
+    } finally {
+      setSaving(false);
+    }
+  }, [conversation.id, currentUser?.email, currentUser?.name, draft, internal, saving]);
+
+  const handleSaveEdit = useCallback(async (note: ConversationNote) => {
+    const content = editingContent.trim();
+    if (!content) {
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      const updated = await updateConversationNote(note.id, content, { internal: note.isInternal });
+      setNotes((current) => current.map((item) => (item.id === note.id ? updated : item)));
+      setEditingId(null);
+      setEditingContent('');
+    } catch (requestError) {
+      setError(getActionErrorMessage(requestError, 'Unable to update note.'));
+    } finally {
+      setSaving(false);
+    }
+  }, [editingContent]);
+
+  const handleDeleteNote = useCallback((note: ConversationNote) => {
+    Alert.alert(
+      internal ? 'Delete internal comment?' : 'Delete note?',
+      'This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteConversationNote(note.id);
+              setNotes((current) => current.filter((item) => item.id !== note.id));
+            } catch (requestError) {
+              setError(getActionErrorMessage(requestError, 'Unable to delete note.'));
+            }
+          },
+        },
+      ],
+    );
+  }, [internal]);
+
+  return (
+    <View style={[styles.workflowCard, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]}>
+      <TextInput
+        value={draft}
+        onChangeText={setDraft}
+        placeholder={internal ? 'Add internal comment (not visible to contact)...' : 'Add a note...'}
+        placeholderTextColor={appTheme.disabled}
+        multiline
+        style={[
+          styles.noteInput,
+          {
+            color: appTheme.text,
+            borderColor: appTheme.border,
+            backgroundColor: appTheme.surface,
+          },
+          WEB_INPUT_RESET,
+        ]}
+      />
+      <TouchableOpacity
+        style={[styles.noteSubmitButton, { backgroundColor: Theme.colors.primary }, (!draft.trim() || saving) && styles.disabledButton]}
+        activeOpacity={0.78}
+        disabled={!draft.trim() || saving}
+        onPress={handleAddNote}
+      >
+        {saving ? <ActivityIndicator color="#FFFFFF" size="small" /> : internal ? <Send color="#FFFFFF" size={14} /> : <Plus color="#FFFFFF" size={14} />}
+        <Typography variant="caption" color="#FFFFFF" style={styles.noteSubmitText}>
+          {internal ? 'Post Comment' : 'Add Note'}
+        </Typography>
+      </TouchableOpacity>
+
+      {error ? (
+        <View style={[styles.contactInlineAlert, { backgroundColor: appTheme.errorSoft, borderColor: Theme.colors.error }]}>
+          <Info color={Theme.colors.error} size={14} />
+          <Typography variant="caption" color={Theme.colors.error} style={styles.contactInlineAlertText}>
+            {error}
+          </Typography>
+        </View>
+      ) : null}
+
+      {loading ? (
+        <View style={styles.contactLoadingRow}>
+          <ActivityIndicator color={Theme.colors.primary} size="small" />
+          <Typography variant="caption" color={appTheme.muted}>
+            Loading {internal ? 'internal comments' : 'notes'}...
+          </Typography>
+        </View>
+      ) : visibleNotes.length ? (
+        <View style={styles.notesList}>
+          {visibleNotes.map((note) => (
+            <View key={note.id} style={[styles.noteItem, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
+              {editingId === note.id ? (
+                <>
+                  <TextInput
+                    value={editingContent}
+                    onChangeText={setEditingContent}
+                    multiline
+                    style={[
+                      styles.noteInput,
+                      {
+                        color: appTheme.text,
+                        borderColor: appTheme.border,
+                        backgroundColor: appTheme.input,
+                      },
+                      WEB_INPUT_RESET,
+                    ]}
+                  />
+                  <View style={styles.noteActionRow}>
+                    <TouchableOpacity style={[styles.noteMiniButton, { backgroundColor: Theme.colors.primary }]} activeOpacity={0.76} onPress={() => void handleSaveEdit(note)}>
+                      <Check color="#FFFFFF" size={13} />
+                      <Typography variant="caption" color="#FFFFFF">Save</Typography>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.noteMiniButton, { borderColor: appTheme.border }]} activeOpacity={0.76} onPress={() => setEditingId(null)}>
+                      <Typography variant="caption" color={appTheme.text}>Cancel</Typography>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <View style={styles.noteMetaRow}>
+                    <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={styles.noteMetaText}>
+                      {note.authorName || 'Agent'}{note.createdAt ? ` - ${formatTime(note.createdAt)}` : ''}
+                    </Typography>
+                    <View style={styles.noteActionRow}>
+                      <TouchableOpacity
+                        style={[styles.noteTextButton, { borderColor: appTheme.border }]}
+                        activeOpacity={0.76}
+                        onPress={() => {
+                          setEditingId(note.id);
+                          setEditingContent(note.displayContent);
+                        }}
+                      >
+                        <Typography variant="caption" color={Theme.colors.primary}>Edit</Typography>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.noteTextButton, { borderColor: appTheme.border }]}
+                        activeOpacity={0.76}
+                        onPress={() => handleDeleteNote(note)}
+                      >
+                        <Typography variant="caption" color={Theme.colors.error}>Delete</Typography>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                  <Typography variant="bodySmall" color={appTheme.text} style={styles.noteContent}>
+                    {note.displayContent}
+                  </Typography>
+                </>
+              )}
+            </View>
+          ))}
+        </View>
+      ) : (
+        <View style={styles.assignmentEmptyState}>
+          <MessageSquare color={appTheme.disabled} size={22} />
+          <Typography variant="caption" color={appTheme.muted}>
+            No {internal ? 'internal comments' : 'notes'} yet
+          </Typography>
+        </View>
+      )}
+    </View>
+  );
+};
+
+const ContactWorkflowTabs = ({
+  conversation,
+  onAssignmentChanged,
+}: {
+  conversation: Conversation;
+  onAssignmentChanged?: () => void;
+}) => {
+  const appTheme = useAppTheme();
+  const [activeTab, setActiveTab] = useState<'assignment' | 'notes' | 'internal'>('assignment');
+  const tabs: {
+    id: 'assignment' | 'notes' | 'internal';
+    label: string;
+    icon: React.ComponentType<{ color?: string; size?: number }>;
+  }[] = [
+    { id: 'assignment', label: 'Assignment', icon: UserRound },
+    { id: 'notes', label: 'Notes', icon: Tag },
+    { id: 'internal', label: 'Internal', icon: MessageSquare },
+  ];
+
+  return (
+    <View style={styles.workflowTabsBlock}>
+      <View style={[styles.assignmentTabs, styles.workflowSegmentedTabs, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]}>
+        {tabs.map(({ id, label, icon: Icon }) => {
+          const active = activeTab === id;
+          return (
+            <TouchableOpacity
+              key={id}
+              style={[
+                active ? styles.assignmentTabActive : styles.assignmentTab,
+                active && { backgroundColor: appTheme.surface, borderColor: appTheme.border },
+              ]}
+              activeOpacity={0.78}
+              onPress={() => setActiveTab(id)}
+            >
+              <Icon color={active ? Theme.colors.primary : appTheme.muted} size={15} />
+              <Typography
+                variant="caption"
+                color={active ? Theme.colors.primary : appTheme.muted}
+                style={active ? styles.assignmentTabText : undefined}
+                numberOfLines={1}
+              >
+                {label}
+              </Typography>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      {activeTab === 'assignment' ? (
+        <AssignmentWorkflowPanel conversation={conversation} onAssignmentChanged={onAssignmentChanged} />
+      ) : activeTab === 'notes' ? (
+        <NotesWorkflowPanel conversation={conversation} />
+      ) : (
+        <NotesWorkflowPanel conversation={conversation} internal />
+      )}
+    </View>
+  );
+};
+
+const MediaPreviewTile = ({ item, compact = false }: { item: ChatMediaItem; compact?: boolean }) => {
+  const appTheme = useAppTheme();
+  const authToken = useAuthStore((state) => state.token);
+  const openItem = () => {
+    void Linking.openURL(item.url).catch(() => undefined);
+  };
+
+  if (item.kind === 'doc') {
+    return (
+      <TouchableOpacity
+        style={[compact ? styles.whatsAppMediaPreviewTile : styles.mediaGridDocTile, { backgroundColor: appTheme.softSurface }]}
+        activeOpacity={0.78}
+        onPress={openItem}
+      >
+        <FileText color={appTheme.muted} size={compact ? 22 : 30} />
+        {!compact ? (
+          <Typography variant="caption" color={appTheme.text} numberOfLines={2} style={styles.mediaGridDocTitle}>
+            {item.title}
+          </Typography>
+        ) : null}
+      </TouchableOpacity>
+    );
+  }
+
+  if (item.kind === 'link') {
+    return (
+      <TouchableOpacity
+        style={[compact ? styles.whatsAppMediaPreviewTile : styles.mediaGridDocTile, { backgroundColor: appTheme.softSurface }]}
+        activeOpacity={0.78}
+        onPress={openItem}
+      >
+        <Link2 color={appTheme.muted} size={compact ? 22 : 30} />
+        {!compact ? (
+          <Typography variant="caption" color={appTheme.text} numberOfLines={2} style={styles.mediaGridDocTitle}>
+            {item.title}
+          </Typography>
+        ) : null}
+      </TouchableOpacity>
+    );
+  }
+
+  if (isVideoMediaItem(item)) {
+    return (
+      <TouchableOpacity style={[compact ? styles.whatsAppMediaPreviewTile : styles.mediaGridTile, styles.videoMediaTile]} activeOpacity={0.78} onPress={openItem}>
+        <Video color="#FFFFFF" size={compact ? 24 : 32} />
+      </TouchableOpacity>
+    );
+  }
+
+  return (
+    <TouchableOpacity style={compact ? styles.whatsAppMediaPreviewTile : styles.mediaGridTile} activeOpacity={0.78} onPress={openItem}>
+      <Image
+        source={{
+          uri: item.url,
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+        }}
+        style={styles.mediaGridImage}
+        resizeMode="cover"
+      />
+    </TouchableOpacity>
+  );
+};
+
+const MediaLibraryScreen = ({
+  conversation,
+  items,
+  initialTab,
   onClose,
 }: {
   conversation: Conversation;
+  items: ChatMediaItem[];
+  initialTab: ChatMediaKind;
+  onClose: () => void;
+}) => {
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const appTheme = useAppTheme();
+  const [activeTab, setActiveTab] = useState<ChatMediaKind>(initialTab);
+  const mediaItems = useMemo(() => items.filter((item) => item.kind === activeTab), [activeTab, items]);
+  const columns = width >= 620 ? 4 : 3;
+  const horizontalPadding = width < 360 ? Theme.spacing.md : Theme.spacing.xl;
+  const gap = 6;
+  const tileSize = Math.floor((Math.min(width, 720) - horizontalPadding * 2 - gap * (columns - 1)) / columns);
+
+  const renderTab = (tab: ChatMediaKind, label: string) => (
+    <TouchableOpacity
+      key={tab}
+      style={[styles.mediaLibraryTab, activeTab === tab && styles.mediaLibraryTabActive]}
+      activeOpacity={0.76}
+      onPress={() => setActiveTab(tab)}
+    >
+      <Typography variant="bodySmall" color={activeTab === tab ? '#047857' : appTheme.text} style={styles.mediaLibraryTabText}>
+        {label}
+      </Typography>
+    </TouchableOpacity>
+  );
+
+  return (
+    <View style={[styles.mediaLibraryScreen, { backgroundColor: appTheme.surface }]}>
+      <View style={[styles.mediaLibraryHeader, { paddingTop: Math.max(insets.top, 16), borderBottomColor: appTheme.border }]}>
+        <TouchableOpacity onPress={onClose} style={styles.darkIconButton} activeOpacity={0.72}>
+          <ArrowLeft color={appTheme.text} size={23} />
+        </TouchableOpacity>
+        <Typography variant="h4" color={appTheme.text} numberOfLines={1} style={styles.mediaLibraryTitle}>
+          {conversation.name}
+        </Typography>
+      </View>
+
+      <View style={[styles.mediaLibraryTabs, { borderBottomColor: appTheme.border }]}>
+        {renderTab('media', 'Media')}
+        {renderTab('doc', 'Docs')}
+        {renderTab('link', 'Links')}
+      </View>
+
+      <ScrollView
+        contentContainerStyle={[styles.mediaLibraryContent, { paddingHorizontal: horizontalPadding, paddingBottom: Math.max(insets.bottom, 12) + 64 }]}
+        showsVerticalScrollIndicator={false}
+      >
+        <Typography variant="caption" color={appTheme.text} style={styles.mediaMonthLabel}>
+          THIS MONTH
+        </Typography>
+
+        {mediaItems.length ? (
+          activeTab === 'media' ? (
+            <View style={styles.mediaGrid}>
+              {mediaItems.map((item, index) => (
+                <View
+                  key={item.id}
+                  style={{
+                    width: tileSize,
+                    height: tileSize,
+                    marginRight: (index + 1) % columns === 0 ? 0 : gap,
+                    marginBottom: gap,
+                  }}
+                >
+                  <MediaPreviewTile item={item} />
+                </View>
+              ))}
+            </View>
+          ) : (
+            <View style={styles.mediaList}>
+              {mediaItems.map((item) => (
+                <TouchableOpacity key={item.id} style={[styles.mediaListRow, { borderBottomColor: appTheme.border }]} activeOpacity={0.76} onPress={() => void Linking.openURL(item.url).catch(() => undefined)}>
+                  <View style={[styles.mediaListIcon, { backgroundColor: appTheme.softSurface }]}>
+                    {activeTab === 'doc' ? <FileText color={appTheme.muted} size={22} /> : <Link2 color={appTheme.muted} size={22} />}
+                  </View>
+                  <View style={styles.mediaListText}>
+                    <Typography variant="bodySmall" color={appTheme.text} numberOfLines={1} style={styles.mediaListTitle}>
+                      {item.title}
+                    </Typography>
+                    <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
+                      {formatTime(item.createdAt)}
+                    </Typography>
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )
+        ) : (
+          <View style={[styles.mediaEmptyState, { borderColor: appTheme.border }]}>
+            {activeTab === 'media' ? <ImageIcon color={appTheme.disabled} size={30} /> : activeTab === 'doc' ? <FileText color={appTheme.disabled} size={30} /> : <Link2 color={appTheme.disabled} size={30} />}
+            <Typography variant="bodySmall" color={appTheme.muted} style={styles.mediaEmptyText}>
+              No {activeTab === 'media' ? 'media' : activeTab === 'doc' ? 'documents' : 'links'} found in this chat.
+            </Typography>
+          </View>
+        )}
+      </ScrollView>
+
+      <TouchableOpacity style={[styles.mediaLibraryFooter, { paddingBottom: Math.max(insets.bottom, 12), borderTopColor: appTheme.border, backgroundColor: appTheme.surface }]} activeOpacity={0.78}>
+        <ImageIcon color="#047857" size={18} />
+        <Typography variant="bodySmall" color="#047857" style={styles.mediaLibraryFooterText}>
+          View media from all chats.
+        </Typography>
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+const ContactDetailsPanel = ({
+  conversation,
+  messages,
+  messageCount,
+  resolved,
+  favourite,
+  listed,
+  muted,
+  locked,
+  fullPage = false,
+  onClose,
+  onOpenMedia,
+  onOpenSearch,
+  onOpenStarredMessages,
+  onToggleFavourite,
+  onToggleList,
+  onToggleMute,
+  onTogglePrivacy,
+  onOpenDisappearingMessages,
+  onVerifyEncryption,
+  onClearChat,
+  onBlock,
+  onReport,
+  onDelete,
+  onConversationRefresh,
+}: {
+  conversation: Conversation;
+  messages: ChatMessage[];
   messageCount: number;
   resolved: boolean;
+  favourite: boolean;
+  listed: boolean;
+  muted: boolean;
+  locked: boolean;
   fullPage?: boolean;
   onClose: () => void;
+  onOpenMedia: (tab?: ChatMediaKind) => void;
+  onOpenSearch: () => void;
+  onOpenStarredMessages: () => void;
+  onToggleFavourite: () => void;
+  onToggleList: () => void;
+  onToggleMute: () => void;
+  onTogglePrivacy: () => void;
+  onOpenDisappearingMessages: () => void;
+  onVerifyEncryption: () => void;
+  onClearChat: () => void;
+  onBlock: () => void;
+  onReport: () => void;
+  onDelete: () => void;
+  onConversationRefresh?: () => void;
 }) => {
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const authToken = useAuthStore((state) => state.token);
+  const [businessProfile, setBusinessProfile] = useState<WhatsAppBusinessProfile | null>(null);
+  const [businessProfileLoading, setBusinessProfileLoading] = useState(false);
+  const mediaItems = useMemo(() => getMediaItemsFromMessages(messages), [messages]);
+  const mediaPreviewItems = mediaItems.filter((item) => item.kind === 'media').slice(0, 4);
   const stateLabel = resolved ? 'Resolved' : conversation.conversationState || 'Open';
   const ownerLabel = conversation.owner || 'AI';
   const startedLabel = formatTime(conversation.startedAt || conversation.lastMessageAt);
+  const phoneLabel = conversation.phone || conversation.email || getChannelLabel(conversation.channel);
+  const isWhatsAppContact = isWhatsAppChannel(conversation.channel);
+  const profileAvatarSize = width < 360 ? 124 : width < 390 ? 136 : fullPage ? 148 : 140;
+  const firstName = conversation.name.split(' ').filter(Boolean)[0] || conversation.name;
+
+  useEffect(() => {
+    let mounted = true;
+
+    if (!isWhatsAppContact) {
+      setBusinessProfile(null);
+      setBusinessProfileLoading(false);
+      return () => {
+        mounted = false;
+      };
+    }
+
+    setBusinessProfileLoading(true);
+    void fetchWhatsAppBusinessProfile(conversation.id)
+      .then((profile) => {
+        if (mounted) {
+          setBusinessProfile(profile);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setBusinessProfile(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) {
+          setBusinessProfileLoading(false);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [conversation.id, isWhatsAppContact]);
+
+  if (isWhatsAppContact) {
+    return (
+      <View style={[styles.contactPanel, fullPage && styles.contactPanelFullPage, styles.whatsAppContactPanel, { backgroundColor: appTheme.surface, borderLeftColor: appTheme.border }]}>
+        <View style={[styles.whatsAppContactHeader, { paddingTop: Math.max(insets.top, 14), borderBottomColor: appTheme.border }]}>
+          <TouchableOpacity onPress={onClose} style={styles.darkIconButton} activeOpacity={0.72}>
+            <X color={appTheme.text} size={22} />
+          </TouchableOpacity>
+          <Typography variant="body" color={appTheme.text} style={styles.whatsAppContactHeaderTitle}>
+            Contact info
+          </Typography>
+          <View style={styles.darkIconButton} />
+        </View>
+
+        <ScrollView contentContainerStyle={[styles.whatsAppContactBody, { paddingBottom: Math.max(insets.bottom, 0) + 32 }]} showsVerticalScrollIndicator={false}>
+          <View style={styles.whatsAppContactHero}>
+            <View style={styles.whatsAppProfileAvatarWrap}>
+              <Avatar src={conversation.avatar} fallback={getInitials(conversation.name)} size={profileAvatarSize} authToken={authToken} />
+              <View style={[styles.whatsAppProfileChannelBadge, { backgroundColor: appTheme.surface }]}>
+                <WhatsAppIcon size={18} color="#25D366" />
+              </View>
+            </View>
+            <Typography variant="h3" color={appTheme.text} style={styles.whatsAppContactName} numberOfLines={2}>
+              {conversation.name}
+            </Typography>
+            <Typography variant="body" color={appTheme.muted} style={styles.whatsAppContactPhone} numberOfLines={1}>
+              {phoneLabel}
+            </Typography>
+            <View style={styles.whatsAppContactActions}>
+              <ContactActionButton icon={Search} label="Search" onPress={onOpenSearch} />
+            </View>
+          </View>
+
+          <View style={styles.whatsAppAboutLabel}>
+            <Typography variant="caption" color={appTheme.muted} style={styles.whatsAppAboutText}>About</Typography>
+          </View>
+
+          <View style={[styles.whatsAppSection, styles.whatsAppBusinessAccountSection, { borderTopColor: appTheme.border }]}>
+            <View style={styles.whatsAppBusinessAccountRow}>
+              <Typography variant="bodySmall" color={appTheme.text} style={styles.whatsAppBusinessAccountText}>
+                This is a business account.
+              </Typography>
+              <Info color={appTheme.muted} size={17} />
+            </View>
+          </View>
+
+          <View style={[styles.whatsAppSection, { borderTopColor: appTheme.border }]}>
+            <TouchableOpacity style={styles.whatsAppMediaHeader} activeOpacity={0.76} onPress={() => onOpenMedia('media')}>
+              <ImageIcon color={appTheme.muted} size={22} />
+              <Typography variant="body" color={appTheme.text} style={styles.whatsAppMediaTitle}>
+                Media, links and docs
+              </Typography>
+              <Typography variant="bodySmall" color={appTheme.muted}>{mediaItems.length}</Typography>
+              <ChevronRight color={appTheme.muted} size={19} />
+            </TouchableOpacity>
+            <View style={styles.whatsAppMediaPreviewRow}>
+              {mediaPreviewItems.length ? (
+                mediaPreviewItems.map((item) => (
+                  <MediaPreviewTile key={item.id} item={item} compact />
+                ))
+              ) : (
+                <TouchableOpacity style={[styles.whatsAppMediaEmptyPreview, { borderColor: appTheme.border }]} activeOpacity={0.76} onPress={() => onOpenMedia('media')}>
+                  <ImageIcon color={appTheme.disabled} size={22} />
+                  <Typography variant="caption" color={appTheme.muted}>
+                    No media yet
+                  </Typography>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          <View style={[styles.whatsAppSection, { borderTopColor: appTheme.border }]}>
+            <Typography variant="overline" color={appTheme.muted} style={styles.whatsAppSectionTitle}>Contact Info</Typography>
+            {conversation.company ? <BusinessProfileLine icon={Building2} title={conversation.company} /> : null}
+            {conversation.email ? <BusinessProfileLine icon={Mail} title={conversation.email} /> : null}
+            {conversation.phone ? (
+              <BusinessProfileLine
+                icon={Phone}
+                title={conversation.phone}
+                onPress={() => void Linking.openURL(`tel:${conversation.phone?.replace(/[^\d+]/g, '')}`).catch(() => undefined)}
+              />
+            ) : null}
+            <BusinessProfileLine icon={Clock} title={`Conversation started ${startedLabel}`} />
+          </View>
+
+          <View style={[styles.whatsAppSection, { borderTopColor: appTheme.border }]}>
+            <Typography variant="overline" color={appTheme.muted} style={styles.whatsAppSectionTitle}>Business Profile</Typography>
+            <BusinessProfileCard profile={businessProfile} loading={businessProfileLoading} />
+          </View>
+
+          <View style={[styles.whatsAppSection, { borderTopColor: appTheme.border }]}>
+            <MindBodyPaymentPanel conversation={conversation} onMessageSent={onConversationRefresh} />
+            <ContactWorkflowTabs conversation={conversation} onAssignmentChanged={onConversationRefresh} />
+          </View>
+
+          <View style={[styles.whatsAppSection, { borderTopColor: appTheme.border }]}>
+            <ContactInfoRow icon={Star} title="Starred messages" onPress={onOpenStarredMessages} />
+            <ContactSwitchRow icon={Bell} title="Mute notifications" value={muted} onValueChange={onToggleMute} />
+            <ContactInfoRow icon={Clock} title="Disappearing messages" subtitle="Off" onPress={onOpenDisappearingMessages} />
+            <ContactInfoRow icon={Shield} title="Advanced chat privacy" subtitle={locked ? 'On' : 'Off'} onPress={onTogglePrivacy} />
+            <ContactInfoRow icon={Lock} title="Encryption" subtitle="Messages are end-to-end encrypted. Click to verify." onPress={onVerifyEncryption} />
+          </View>
+
+          <View style={[styles.whatsAppSection, { borderTopColor: appTheme.border }]}>
+            <ContactInfoRow icon={Heart} title={favourite ? 'Remove from favourites' : 'Add to favourites'} onPress={onToggleFavourite} />
+            <ContactInfoRow icon={ListIcon} title={listed ? 'Remove from list' : 'Add to list'} onPress={onToggleList} />
+          </View>
+
+          <View style={[styles.whatsAppActionSection, { borderTopColor: appTheme.border }]}>
+            <ContactDangerRow icon={MinusCircle} title="Clear chat" filled onPress={onClearChat} />
+            <ContactDangerRow icon={Ban} title="Block" subtitle={firstName} onPress={onBlock} />
+            <ContactDangerRow icon={ThumbsDown} title="Report" subtitle={firstName} onPress={onReport} />
+            <ContactDangerRow icon={Trash2} title="Delete chat" onPress={onDelete} />
+          </View>
+        </ScrollView>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.contactPanel, fullPage && styles.contactPanelFullPage, { backgroundColor: appTheme.surface, borderLeftColor: appTheme.border }]}>
@@ -1017,7 +2863,7 @@ export default function ChatsScreen() {
   const appTheme = useAppTheme();
   const handleBottomTabScroll = useBottomTabScrollHandler();
   const currentUser = useAuthStore((state) => state.user);
-  const [activeFilter, setActiveFilter] = useState<'all' | 'unread' | ChatChannel>('all');
+  const [activeFilter, setActiveFilter] = useState<ChannelFilterId>('all');
   const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
   const filterDropdownAnimation = useRef(new Animated.Value(0)).current;
   const [createChatMenuOpen, setCreateChatMenuOpen] = useState(false);
@@ -1028,6 +2874,8 @@ export default function ChatsScreen() {
   const [search, setSearch] = useState('');
   const [draft, setDraft] = useState('');
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
+  const [mediaLibraryInitialTab, setMediaLibraryInitialTab] = useState<ChatMediaKind>('media');
   const [actionsOpen, setActionsOpen] = useState(false);
   const [quickActionsOpen, setQuickActionsOpen] = useState(false);
   const [quickComposer, setQuickComposer] = useState<QuickComposerAction | null>(null);
@@ -1035,6 +2883,19 @@ export default function ChatsScreen() {
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const [threadSearchOpen, setThreadSearchOpen] = useState(false);
   const [threadSearchQuery, setThreadSearchQuery] = useState('');
+  const [threadSearchMatchIndex, setThreadSearchMatchIndex] = useState(0);
+  const [emojiCategory, setEmojiCategory] = useState('smileys');
+  const [emojiSearch, setEmojiSearch] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; durationSec: number } | null>(null);
+  const [pendingVoiceNotePlaying, setPendingVoiceNotePlaying] = useState(false);
+  const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
+  const messageListRef = useRef<FlatList<MessageListItem>>(null);
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeSoundRef = useRef<Audio.Sound | null>(null);
+  const pendingVoiceNoteSoundRef = useRef<Audio.Sound | null>(null);
   const [chatUiStateLoaded, setChatUiStateLoaded] = useState(false);
   const [templateMenuOpen, setTemplateMenuOpen] = useState(false);
   const [templatesLoading, setTemplatesLoading] = useState(false);
@@ -1051,6 +2912,16 @@ export default function ChatsScreen() {
   const [lockedIds, setLockedIds] = useState<Set<string>>(() => new Set());
   const [blockedIds, setBlockedIds] = useState<Set<string>>(() => new Set());
   const [deletedIds, setDeletedIds] = useState<Set<string>>(() => new Set());
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () => setIsKeyboardVisible(true));
+    const hideSub = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setIsKeyboardVisible(false));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   const {
     conversations,
@@ -1060,6 +2931,7 @@ export default function ChatsScreen() {
     isLoadingMoreConversations,
     isLoadingMessages,
     isLoadingOlderMessages,
+    hasOlderMessages,
     isSending,
     isUploadingAttachment,
     isSyncing,
@@ -1077,10 +2949,31 @@ export default function ChatsScreen() {
     sendMessage,
     sendAttachment,
     emitTypingState,
+    clearConversationMessages,
     clearActiveConversation,
     disposeRealtime,
+    connectedIntegrations,
+    fetchConnectedIntegrations,
+    isLoadingIntegrations,
   } = useChatStore();
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const navigation = useNavigation();
+  const isChatFocused = useIsFocused();
+  const authToken = useAuthStore((state) => state.token);
+
+  useEffect(() => {
+    navigation.getParent()?.setOptions({
+      tabBarStyle: {
+        display: activeConversationId && isChatFocused ? 'none' : 'flex',
+      },
+    });
+    return () => {
+      navigation.getParent()?.setOptions({
+        tabBarStyle: undefined,
+      });
+    };
+  }, [navigation, activeConversationId, isChatFocused]);
 
   useEffect(() => {
     if (!filterDropdownOpen) {
@@ -1112,6 +3005,10 @@ export default function ChatsScreen() {
     stopConversationAutoSync,
     syncConversations,
   ]);
+
+  useEffect(() => {
+    void fetchConnectedIntegrations();
+  }, [fetchConnectedIntegrations]);
 
   useEffect(() => {
     let mounted = true;
@@ -1193,11 +3090,11 @@ export default function ChatsScreen() {
   }, [activeConversation]);
 
   useEffect(() => {
-    setBottomTabHidden(Boolean(activeConversationId));
+    forceBottomTabHidden(Boolean(activeConversationId && isChatFocused));
     return () => {
-      setBottomTabHidden(false);
+      forceBottomTabHidden(false);
     };
-  }, [activeConversationId]);
+  }, [activeConversationId, isChatFocused]);
   const filteredConversations = useMemo(() => {
     const query = search.trim().toLowerCase();
     return conversations
@@ -1223,6 +3120,8 @@ export default function ChatsScreen() {
         const matchesFilter =
           activeFilter === 'all' ||
           (activeFilter === 'unread' && conversation.unreadCount > 0) ||
+          (activeFilter === 'personal' && conversation.channel === 'whatsapp' && conversation.waBackendChannel === 'personal') ||
+          (activeFilter === 'waba' && conversation.channel === 'whatsapp' && conversation.waBackendChannel === 'waba') ||
           conversation.channel === activeFilter ||
           (activeFilter === 'email' && conversation.channel === 'gmail');
 
@@ -1291,6 +3190,10 @@ export default function ChatsScreen() {
     ));
   }, [messageListData, threadSearchQuery]);
   const threadSearchMatchCount = threadSearchQuery.trim() ? visibleMessageListData.length : activeMessages.length;
+  const threadSearchTotalMatches = visibleMessageListData.filter((item) => item.type === 'message').length;
+  const highlightedSearchMessageId = threadSearchQuery.trim() && threadSearchTotalMatches > 0
+    ? (visibleMessageListData[Math.min(threadSearchMatchIndex, threadSearchTotalMatches - 1)]?.id ?? null)
+    : null;
   const activeTyping = Boolean(activeConversationId && typingConversationIds[activeConversationId]);
   const activePalette = useMemo(() => {
     const basePalette = getChannelSurface(activeConversation?.channel ?? 'unknown');
@@ -1307,7 +3210,55 @@ export default function ChatsScreen() {
       outgoingText: basePalette.outgoingText === '#FFFFFF' ? '#FFFFFF' : appTheme.text,
     };
   }, [activeConversation?.channel, appTheme]);
+  const activeMediaItems = useMemo(() => getMediaItemsFromMessages(activeMessages), [activeMessages]);
   const lastSyncedLabel = lastSyncedAt ? `Synced ${formatTime(lastSyncedAt)}` : 'Ready to sync';
+  const visibleChannels = useMemo(() => {
+    const hasPersonalConversation = conversations.some(
+      (c) => c.channel === 'whatsapp' && c.waBackendChannel === 'personal',
+    );
+    const hasWabaConversation = conversations.some(
+      (c) => c.channel === 'whatsapp' && c.waBackendChannel === 'waba',
+    );
+    const hasLinkedInConversation = conversations.some((c) => c.channel === 'linkedin');
+    const hasInstagramConversation = conversations.some((c) => c.channel === 'instagram');
+    const hasEmailConversation = conversations.some((c) => c.channel === 'email');
+
+    if (!connectedIntegrations.length) {
+      return CHANNELS.filter((ch) => {
+        if (ch.id === 'all' || ch.id === 'unread') return true;
+        if (ch.id === 'personal') return hasPersonalConversation;
+        if (ch.id === 'waba') return hasWabaConversation;
+        if (ch.id === 'linkedin') return hasLinkedInConversation;
+        if (ch.id === 'instagram') return hasInstagramConversation;
+        if (ch.id === 'email') return hasEmailConversation;
+        return true;
+      });
+    }
+    const personalConnected =
+      connectedIntegrations.some((i) => i.label === 'WhatsApp Personal' && i.connected) ||
+      hasPersonalConversation;
+    const wabaConnected =
+      connectedIntegrations.some((i) => i.label === 'WhatsApp API Agent' && i.connected) ||
+      hasWabaConversation;
+    const linkedInConnected =
+      connectedIntegrations.some((i) => i.channel === 'linkedin' && i.connected) ||
+      hasLinkedInConversation;
+    const instagramConnected =
+      connectedIntegrations.some((i) => i.channel === 'instagram' && i.connected) ||
+      hasInstagramConversation;
+    const emailConnected =
+      connectedIntegrations.some((i) => i.channel === 'email' && i.connected) ||
+      hasEmailConversation;
+    return CHANNELS.filter((ch) => {
+      if (ch.id === 'all' || ch.id === 'unread') return true;
+      if (ch.id === 'personal') return personalConnected;
+      if (ch.id === 'waba') return wabaConnected;
+      if (ch.id === 'linkedin') return linkedInConnected;
+      if (ch.id === 'instagram') return instagramConnected;
+      if (ch.id === 'email') return emailConnected;
+      return true;
+    });
+  }, [connectedIntegrations, conversations]);
   const activeFilterOption = CHANNELS.find((channel) => channel.id === activeFilter) ?? CHANNELS[0];
   const activeFilterLabel = activeFilterOption.label;
   const filteredTemplates = useMemo(() => {
@@ -1327,6 +3278,16 @@ export default function ChatsScreen() {
   const emptyConversationMessage = conversations.length
     ? `No matches in ${activeFilterLabel}. ${conversations.length} total conversations loaded.`
     : syncError || 'No backend conversations found';
+
+  const [pendingAttachment, setPendingAttachment] = useState<any>(null);
+
+  const handleScroll = useCallback((event: any) => {
+    const { layoutMeasurement, contentOffset, contentSize } = event.nativeEvent;
+    const isCloseToTop = contentOffset.y <= 100;
+    if (isCloseToTop && hasOlderMessages && !isLoadingOlderMessages) {
+      getOlderMessages();
+    }
+  }, [hasOlderMessages, isLoadingOlderMessages, getOlderMessages]);
 
   const handleSend = useCallback(() => {
     const message = draft.trim();
@@ -1386,12 +3347,32 @@ export default function ChatsScreen() {
     }
 
     const asset = result.assets[0];
+    const isImageOrVideo = asset.mimeType?.startsWith('image/') || asset.mimeType?.startsWith('video/');
+    if (isImageOrVideo && Platform.OS !== 'web') {
+      setPendingAttachment(asset);
+    } else {
+      await sendAttachment({
+        uri: asset.uri,
+        name: asset.name,
+        mimeType: asset.mimeType,
+      });
+    }
+  }, [isUploadingAttachment, sendAttachment]);
+
+  const confirmPendingAttachment = useCallback(async () => {
+    if (!pendingAttachment) return;
+    const asset = pendingAttachment;
+    setPendingAttachment(null);
+    const caption = draft.trim();
+    if (caption) {
+      setDraft('');
+    }
     await sendAttachment({
       uri: asset.uri,
       name: asset.name,
       mimeType: asset.mimeType,
-    });
-  }, [isUploadingAttachment, sendAttachment]);
+    }, caption || undefined);
+  }, [pendingAttachment, sendAttachment, draft]);
 
   const loadTemplates = useCallback(async (channel: ChatChannel) => {
     const endpoint = getTemplateEndpoint(channel);
@@ -1460,31 +3441,44 @@ export default function ChatsScreen() {
   }, [activeConversation?.email, activeConversation?.name, activeConversation?.phone]);
 
   const fillCurrentLocation = useCallback(() => {
-    if (Platform.OS !== 'web' || typeof navigator === 'undefined' || !navigator.geolocation) {
+    const onSuccess = (latitude: number, longitude: number) => {
+      setQuickDraft((current) => ({
+        ...current,
+        locationName: current.locationName || 'Current location',
+        locationLink: `https://maps.google.com/?q=${latitude},${longitude}`,
+      }));
+    };
+    const onError = () => {
       setQuickDraft((current) => ({
         ...current,
         locationName: current.locationName || 'Current location',
       }));
-      return;
-    }
+    };
 
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const { latitude, longitude } = position.coords;
-        setQuickDraft((current) => ({
-          ...current,
-          locationName: current.locationName || 'Current location',
-          locationLink: `https://maps.google.com/?q=${latitude},${longitude}`,
-        }));
-      },
-      () => {
-        setQuickDraft((current) => ({
-          ...current,
-          locationName: current.locationName || 'Location',
-        }));
-      },
-      { enableHighAccuracy: true, timeout: 8000 },
-    );
+    if (Platform.OS === 'web') {
+      if (typeof navigator !== 'undefined' && navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => onSuccess(position.coords.latitude, position.coords.longitude),
+          onError,
+          { enableHighAccuracy: true, timeout: 8000 },
+        );
+      } else {
+        onError();
+      }
+    } else {
+      // Native: use RN's built-in Geolocation (works on Android & iOS)
+      const RNGeolocation = require('react-native').Geolocation;
+      if (RNGeolocation && typeof RNGeolocation.getCurrentPosition === 'function') {
+        RNGeolocation.getCurrentPosition(
+          (position: { coords: { latitude: number; longitude: number } }) =>
+            onSuccess(position.coords.latitude, position.coords.longitude),
+          onError,
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 },
+        );
+      } else {
+        onError();
+      }
+    }
   }, []);
 
   const sendQuickComposerMessage = useCallback(async () => {
@@ -1607,7 +3601,7 @@ export default function ChatsScreen() {
 
       const count = result.assets.length;
       setCreateChatNotice(`${count} lead file${count === 1 ? '' : 's'} selected. Sync will refresh contacts from the backend.`);
-      await syncConversations({ silent: true });
+      await syncConversations({ silent: true, force: true });
     } catch (err) {
       setCreateChatNotice(err instanceof Error && err.message ? err.message : 'Unable to open the lead importer.');
     }
@@ -1623,7 +3617,7 @@ export default function ChatsScreen() {
     }
 
     setCreateChatMode(action);
-    await syncConversations({ silent: true });
+    await syncConversations({ silent: true, force: true });
   }, [handleImportLeadsAction, syncConversations]);
 
   const openCreateChatConversation = useCallback(async (conversation: Conversation) => {
@@ -1695,7 +3689,7 @@ export default function ChatsScreen() {
       setCreateChatSearch('');
       setCreateChatSelectedIds(new Set());
       setCreateChatNotice(`${groupName} created with ${selectedIds.length} contact${selectedIds.length === 1 ? '' : 's'}.`);
-      await syncConversations({ silent: true });
+      await syncConversations({ silent: true, force: true });
     } catch (err) {
       setCreateChatNotice(err instanceof Error && err.message ? err.message : 'Unable to create the group.');
     }
@@ -1708,6 +3702,22 @@ export default function ChatsScreen() {
         next.delete(id);
       } else {
         next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const setIdSetValue = useCallback((
+    setter: React.Dispatch<React.SetStateAction<Set<string>>>,
+    id: string,
+    enabled: boolean,
+  ) => {
+    setter((current) => {
+      const next = new Set(current);
+      if (enabled) {
+        next.add(id);
+      } else {
+        next.delete(id);
       }
       return next;
     });
@@ -1784,6 +3794,192 @@ export default function ChatsScreen() {
     setActionsOpen(false);
   }, [activeConversation, clearActiveConversation, exportActiveConversation, toggleSetValue]);
 
+  const openContactMediaLibrary = useCallback((tab: ChatMediaKind = 'media') => {
+    setMediaLibraryInitialTab(tab);
+    setMediaLibraryOpen(true);
+    setActionsOpen(false);
+  }, []);
+
+  const openContactSearch = useCallback(() => {
+    setDetailsOpen(false);
+    setMediaLibraryOpen(false);
+    setActionsOpen(false);
+    setThreadSearchOpen(true);
+  }, []);
+
+  const handleOpenStarredMessages = useCallback(() => {
+    if (!activeConversation) return;
+    Alert.alert(
+      'Starred messages',
+      starredIds.has(activeConversation.id)
+        ? 'This conversation is saved in favourites. Message-level starred items are not available from the mobile backend yet.'
+        : 'No starred messages are available for this chat yet.',
+    );
+  }, [activeConversation, starredIds]);
+
+  const handleToggleFavourite = useCallback(() => {
+    if (!activeConversation) return;
+    const { id } = activeConversation;
+    const nextFavourite = !starredIds.has(id);
+    setIdSetValue(setStarredIds, id, nextFavourite);
+    void patchWhatsAppConversationAction(id, 'favorite')
+      .then(() => syncConversations({ silent: true, force: true }))
+      .catch((error) => {
+        setIdSetValue(setStarredIds, id, !nextFavourite);
+        Alert.alert('Favourite not updated', getActionErrorMessage(error, 'Unable to update favourite status.'));
+      });
+  }, [activeConversation, setIdSetValue, starredIds, syncConversations]);
+
+  const handleToggleList = useCallback(() => {
+    if (!activeConversation) return;
+    const { id } = activeConversation;
+    const nextListed = !pinnedIds.has(id);
+    setIdSetValue(setPinnedIds, id, nextListed);
+    void patchWhatsAppConversationAction(id, 'pin')
+      .then(() => syncConversations({ silent: true, force: true }))
+      .catch((error) => {
+        setIdSetValue(setPinnedIds, id, !nextListed);
+        Alert.alert('List not updated', getActionErrorMessage(error, 'Unable to update list status.'));
+      });
+  }, [activeConversation, pinnedIds, setIdSetValue, syncConversations]);
+
+  const handleToggleMute = useCallback(() => {
+    if (!activeConversation) return;
+    toggleSetValue(setMutedIds, activeConversation.id);
+  }, [activeConversation, toggleSetValue]);
+
+  const handleTogglePrivacy = useCallback(() => {
+    if (!activeConversation) return;
+    const { id } = activeConversation;
+    const nextLocked = !lockedIds.has(id);
+    setIdSetValue(setLockedIds, id, nextLocked);
+    void patchWhatsAppConversationAction(id, 'lock')
+      .then(() => syncConversations({ silent: true, force: true }))
+      .catch((error) => {
+        setIdSetValue(setLockedIds, id, !nextLocked);
+        Alert.alert('Privacy not updated', getActionErrorMessage(error, 'Unable to update chat privacy.'));
+      });
+  }, [activeConversation, lockedIds, setIdSetValue, syncConversations]);
+
+  const handleOpenDisappearingMessages = useCallback(() => {
+    Alert.alert('Disappearing messages', 'Disappearing messages are currently off for LAD WhatsApp chats.');
+  }, []);
+
+  const handleVerifyEncryption = useCallback(() => {
+    if (!activeConversation) return;
+    Alert.alert(
+      'Encryption',
+      `${activeConversation.name} messages are protected by the WhatsApp/LAD backend transport. Verification details are managed by the backend contact profile.`,
+    );
+  }, [activeConversation]);
+
+  const handleClearChat = useCallback(() => {
+    if (!activeConversation) return;
+    const { id, name } = activeConversation;
+    Alert.alert(
+      'Clear chat?',
+      `Clear visible messages with ${name}? Backend history can be loaded again with refresh.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            clearConversationMessages(id);
+            setDetailsOpen(false);
+          },
+        },
+      ],
+    );
+  }, [activeConversation, clearConversationMessages]);
+
+  const handleBlockContact = useCallback(() => {
+    if (!activeConversation) return;
+    const { id, name } = activeConversation;
+    Alert.alert(
+      'Block contact?',
+      `Block ${name} and hide this chat from the list?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await patchWhatsAppConversationAction(id, 'status', { status: 'resolved' });
+              setBlockedIds((current) => new Set(current).add(id));
+              clearActiveConversation();
+              setDetailsOpen(false);
+            } catch (error) {
+              Alert.alert('Block failed', getActionErrorMessage(error, 'Unable to block this contact.'));
+            }
+          },
+        },
+      ],
+    );
+  }, [activeConversation, clearActiveConversation]);
+
+  const handleReportContact = useCallback(() => {
+    if (!activeConversation) return;
+    Alert.alert(
+      'Report contact?',
+      `Send ${activeConversation.name} to LAD support for review?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Report',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await apiPost('/api/contact', {
+                name: currentUser?.name || 'LAD mobile app user',
+                email: currentUser?.email || 'support@techiemaya.com',
+                subject: `Reported WhatsApp chat: ${activeConversation.name}`,
+                message: [
+                  `Conversation ID: ${activeConversation.id}`,
+                  `Contact: ${activeConversation.name}`,
+                  activeConversation.phone ? `Phone: ${activeConversation.phone}` : '',
+                  activeConversation.email ? `Email: ${activeConversation.email}` : '',
+                  `Channel: ${activeConversation.channel}`,
+                ].filter(Boolean).join('\n'),
+                source: 'lad-app-whatsapp-contact-info',
+              });
+              Alert.alert('Report sent', 'LAD support has received this chat report.');
+            } catch (error) {
+              Alert.alert('Report failed', getActionErrorMessage(error, 'Unable to send this report right now.'));
+            }
+          },
+        },
+      ],
+    );
+  }, [activeConversation, currentUser?.email, currentUser?.name]);
+
+  const handleDeleteChat = useCallback(() => {
+    if (!activeConversation) return;
+    const { id, name } = activeConversation;
+    Alert.alert(
+      'Delete chat?',
+      `Delete ${name} from this chat list?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteWhatsAppConversationFromBackend(id);
+              setDeletedIds((current) => new Set(current).add(id));
+              clearActiveConversation();
+              setDetailsOpen(false);
+            } catch (error) {
+              Alert.alert('Delete failed', getActionErrorMessage(error, 'Unable to delete this chat.'));
+            }
+          },
+        },
+      ],
+    );
+  }, [activeConversation, clearActiveConversation]);
+
   const switchAgentMode = useCallback(async (mode: AgentMode) => {
     if (!activeConversation || agentModeUpdating || mode === agentMode) {
       return;
@@ -1807,7 +4003,7 @@ export default function ChatsScreen() {
         humanAgentId: mode === 'human' ? currentUser?.id ?? null : null,
       });
       setAgentMode(mode);
-      await setActiveConversation(activeConversation.id);
+      await setActiveConversation(activeConversation.id, { force: true });
       setCreateChatNotice(
         mode === 'human'
           ? 'Human agent mode is active. The AI will stay paused until you switch back.'
@@ -1821,6 +4017,9 @@ export default function ChatsScreen() {
   }, [activeConversation, agentMode, agentModeUpdating, currentUser?.id, setActiveConversation]);
 
   useEffect(() => {
+    setDetailsOpen(false);
+    setMediaLibraryOpen(false);
+    setMediaLibraryInitialTab('media');
     setActionsOpen(false);
     setCreateChatMenuOpen(false);
     setCreateChatNotice(null);
@@ -1835,6 +4034,266 @@ export default function ChatsScreen() {
     setThreadSearchOpen(false);
     setThreadSearchQuery('');
   }, [activeConversationId]);
+
+  const closeCreateChatMenu = useCallback(() => {
+    setCreateChatMenuOpen(false);
+    setCreateChatMode(null);
+    setCreateChatSearch('');
+    setCreateChatSelectedIds(new Set());
+  }, []);
+
+  const closeConversationListPopups = useCallback(() => {
+    setFilterDropdownOpen(false);
+    closeCreateChatMenu();
+  }, [closeCreateChatMenu]);
+
+  const closeComposerPopups = useCallback(() => {
+    setAgentMenuOpen(false);
+    setQuickActionsOpen(false);
+    setTemplateMenuOpen(false);
+    setQuickComposer(null);
+    setEmojiPickerOpen(false);
+  }, []);
+
+  const closeThreadSearch = useCallback(() => {
+    setThreadSearchOpen(false);
+    setThreadSearchQuery('');
+    setThreadSearchMatchIndex(0);
+  }, []);
+
+  const closeThreadPopups = useCallback(() => {
+    setActionsOpen(false);
+    closeThreadSearch();
+    closeComposerPopups();
+  }, [closeComposerPopups, closeThreadSearch]);
+
+  const navigateSearchMatch = useCallback((direction: 'up' | 'down') => {
+    const total = visibleMessageListData.filter((item) => item.type === 'message').length;
+    if (!total) return;
+    setThreadSearchMatchIndex((prev) => {
+      const next = direction === 'down'
+        ? (prev + 1) % total
+        : (prev - 1 + total) % total;
+      messageListRef.current?.scrollToIndex({ index: next, animated: true, viewPosition: 0.5 });
+      return next;
+    });
+  }, [visibleMessageListData]);
+
+  const startVoiceRecording = useCallback(async () => {
+    try {
+      const { status } = await Audio.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission required', 'Microphone access is needed to record voice messages.');
+        return;
+      }
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      recordingRef.current = recording;
+      setIsRecording(true);
+      setRecordingDuration(0);
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration((prev) => prev + 1);
+      }, 1000);
+    } catch {
+      Alert.alert('Error', 'Could not start recording. Please try again.');
+    }
+  }, []);
+
+  const stopVoiceRecording = useCallback(async (discard = false) => {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    setIsRecording(false);
+    const rec = recordingRef.current;
+    recordingRef.current = null;
+    if (!rec) return;
+    try {
+      await rec.stopAndUnloadAsync();
+    } catch { /* already stopped */ }
+    if (discard) {
+      setRecordingDuration(0);
+      return;
+    }
+    const uri = rec.getURI();
+    if (!uri) return;
+    setPendingVoiceNote({ uri, durationSec: recordingDuration });
+    setRecordingDuration(0);
+  }, [recordingDuration]);
+
+  const sendVoiceNote = useCallback(async () => {
+    if (!pendingVoiceNote) return;
+    const { uri } = pendingVoiceNote;
+    setPendingVoiceNote(null);
+    setPendingVoiceNotePlaying(false);
+    if (pendingVoiceNoteSoundRef.current) {
+      await pendingVoiceNoteSoundRef.current.stopAsync().catch(() => undefined);
+      await pendingVoiceNoteSoundRef.current.unloadAsync().catch(() => undefined);
+      pendingVoiceNoteSoundRef.current = null;
+    }
+    await sendAttachment({ uri, name: `voice_${Date.now()}.m4a`, mimeType: 'audio/m4a' });
+  }, [pendingVoiceNote, sendAttachment]);
+
+  const togglePendingVoiceNotePlayback = useCallback(async () => {
+    if (!pendingVoiceNote) return;
+    if (pendingVoiceNotePlaying) {
+      await pendingVoiceNoteSoundRef.current?.pauseAsync().catch(() => undefined);
+      setPendingVoiceNotePlaying(false);
+      return;
+    }
+    if (!pendingVoiceNoteSoundRef.current) {
+      try {
+        await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+        const { sound } = await Audio.Sound.createAsync({ uri: pendingVoiceNote.uri });
+        pendingVoiceNoteSoundRef.current = sound;
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            setPendingVoiceNotePlaying(false);
+            pendingVoiceNoteSoundRef.current = null;
+          }
+        });
+      } catch {
+        return;
+      }
+    }
+    await pendingVoiceNoteSoundRef.current?.playAsync().catch(() => undefined);
+    setPendingVoiceNotePlaying(true);
+  }, [pendingVoiceNote, pendingVoiceNotePlaying]);
+
+  const toggleMessagePlayback = useCallback(async (messageId: string, audioUrl: string) => {
+    if (playingMessageId === messageId) {
+      await activeSoundRef.current?.pauseAsync().catch(() => undefined);
+      setPlayingMessageId(null);
+      return;
+    }
+    if (activeSoundRef.current) {
+      await activeSoundRef.current.stopAsync().catch(() => undefined);
+      await activeSoundRef.current.unloadAsync().catch(() => undefined);
+      activeSoundRef.current = null;
+    }
+    setPlayingMessageId(messageId);
+    try {
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      const { sound } = await Audio.Sound.createAsync({ uri: audioUrl });
+      activeSoundRef.current = sound;
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          setPlayingMessageId(null);
+          activeSoundRef.current = null;
+        }
+      });
+      await sound.playAsync();
+    } catch {
+      setPlayingMessageId(null);
+    }
+  }, [playingMessageId]);
+
+  const showBottomTabs = useCallback(() => {
+    forceBottomTabHidden(false);
+    setBottomTabHidden(false);
+  }, []);
+
+  const closeActiveChatSession = useCallback(() => {
+    setDetailsOpen(false);
+    setMediaLibraryOpen(false);
+    setPendingAttachment(null);
+    closeThreadPopups();
+    clearActiveConversation();
+    showBottomTabs();
+  }, [clearActiveConversation, closeThreadPopups, showBottomTabs]);
+
+  const handleChatsBackRequest = useCallback(() => {
+    if (!isChatFocused) {
+      return false;
+    }
+
+    if (mediaLibraryOpen) {
+      setMediaLibraryOpen(false);
+      return true;
+    }
+
+    if (detailsOpen) {
+      setDetailsOpen(false);
+      return true;
+    }
+
+    if (pendingAttachment) {
+      setPendingAttachment(null);
+      return true;
+    }
+
+    if (
+      actionsOpen ||
+      threadSearchOpen ||
+      agentMenuOpen ||
+      quickActionsOpen ||
+      templateMenuOpen ||
+      quickComposer ||
+      emojiPickerOpen
+    ) {
+      closeThreadPopups();
+      return true;
+    }
+
+    if (activeConversationId) {
+      closeActiveChatSession();
+      return true;
+    }
+
+    if (filterDropdownOpen) {
+      setFilterDropdownOpen(false);
+      return true;
+    }
+
+    if (createChatMenuOpen || createChatMode) {
+      closeCreateChatMenu();
+      return true;
+    }
+
+    return false;
+  }, [
+    activeConversationId,
+    actionsOpen,
+    agentMenuOpen,
+    closeActiveChatSession,
+    closeCreateChatMenu,
+    closeThreadPopups,
+    createChatMenuOpen,
+    createChatMode,
+    detailsOpen,
+    emojiPickerOpen,
+    filterDropdownOpen,
+    isChatFocused,
+    mediaLibraryOpen,
+    pendingAttachment,
+    quickActionsOpen,
+    quickComposer,
+    templateMenuOpen,
+    threadSearchOpen,
+  ]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const subscription = BackHandler.addEventListener('hardwareBackPress', handleChatsBackRequest);
+      return () => subscription.remove();
+    }, [handleChatsBackRequest]),
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      void fetchConnectedIntegrations();
+    }, [fetchConnectedIntegrations]),
+  );
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('beforeRemove', (event) => {
+      if (handleChatsBackRequest()) {
+        event.preventDefault();
+      }
+    });
+
+    return unsubscribe;
+  }, [handleChatsBackRequest, navigation]);
 
   const renderMessage = useCallback(({ item }: { item: MessageListItem }) => {
     if (item.type === 'date') {
@@ -1864,9 +4323,13 @@ export default function ChatsScreen() {
         message={item.message}
         channel={activeConversation?.channel ?? item.message.channel}
         contactName={activeConversation?.name ?? 'Lead'}
+        contactAvatar={activeConversation?.avatar}
+        authToken={authToken}
+        onPlayAudio={toggleMessagePlayback}
+        isCurrentlyPlaying={playingMessageId === item.message.id}
       />
     );
-  }, [activeConversation?.channel, activeConversation?.name, appTheme.darkMode]);
+  }, [activeConversation?.avatar, activeConversation?.channel, activeConversation?.name, appTheme.darkMode, authToken, playingMessageId, toggleMessagePlayback]);
 
   const renderConversation = useCallback(({ item }: { item: Conversation }) => (
     <ConversationRow
@@ -1888,8 +4351,9 @@ export default function ChatsScreen() {
     const isLinkedInThread = isLinkedInChannel(activeConversation.channel);
     const isEmailThread = isEmailChannel(activeConversation.channel);
     const isWhatsAppThread = isWhatsAppChannel(activeConversation.channel);
-    const composerBottomPadding = Math.max(insets.bottom, Theme.spacing.sm);
-    const floatingMenuBottom = composerBottomPadding + 56;
+    const composerBottomPadding = isKeyboardVisible ? 12 : Math.max(insets.bottom, 12);
+    const floatingMenuBottom = composerBottomPadding + 62;
+    const composerPopupOpen = agentMenuOpen || quickActionsOpen || templateMenuOpen || Boolean(quickComposer) || emojiPickerOpen;
     const ThreadSurface = (isWhatsAppThread ? ImageBackground : View) as React.ComponentType<any>;
     const threadSurfaceProps = isWhatsAppThread
       ? {
@@ -1899,16 +4363,18 @@ export default function ChatsScreen() {
         }
       : {};
 
+    const KeyboardContainer = Platform.OS === 'ios' ? KeyboardAvoidingView : View;
+    const keyboardProps = Platform.OS === 'ios' ? { behavior: 'padding' as const, keyboardVerticalOffset: 0 } : {};
+
     return (
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={0}
-        style={[styles.container, { paddingTop: insets.top, backgroundColor: activePalette.screen }]}
+      <KeyboardContainer
+        {...keyboardProps}
+        style={[styles.container, { backgroundColor: activePalette.screen }]}
       >
-        <View style={styles.threadLayout}>
+        <Reanimated.View entering={FadeIn.duration(220)} style={styles.threadLayout}>
           <View style={styles.threadMain}>
-            <View style={[styles.threadHeaderDark, { backgroundColor: appTheme.surface, borderBottomColor: appTheme.border }]}>
-              <TouchableOpacity onPress={clearActiveConversation} style={styles.darkIconButton} activeOpacity={0.7}>
+            <View style={[styles.threadHeaderDark, { paddingTop: insets.top, backgroundColor: appTheme.surface, borderBottomColor: appTheme.border }]}>
+              <TouchableOpacity onPress={closeActiveChatSession} style={styles.darkIconButton} activeOpacity={0.7}>
                 <ArrowLeft color={appTheme.text} size={22} />
               </TouchableOpacity>
 
@@ -1918,9 +4384,9 @@ export default function ChatsScreen() {
                 activeOpacity={0.78}
               >
                 <View style={styles.threadAvatarWrap}>
-                  <Avatar src={activeConversation.avatar} fallback={getInitials(activeConversation.name)} size="sm" />
+                  <Avatar src={activeConversation.avatar} fallback={getInitials(activeConversation.name)} size={32} />
                   <View style={styles.threadChannelDot}>
-                    <ChannelGlyph channel={activeConversation.channel} size={13} color={getChannelColor(activeConversation.channel)} />
+                    <ChannelGlyph channel={activeConversation.channel} size={6} color={getChannelColor(activeConversation.channel)} />
                   </View>
                 </View>
                 <View style={styles.threadTitleBlock}>
@@ -1952,6 +4418,7 @@ export default function ChatsScreen() {
                   style={[styles.darkIconButton, threadSearchOpen && { backgroundColor: appTheme.infoSoft }]}
                   activeOpacity={0.75}
                   onPress={() => {
+                    closeComposerPopups();
                     setActionsOpen(false);
                     setThreadSearchOpen((value) => !value);
                   }}
@@ -1961,15 +4428,26 @@ export default function ChatsScreen() {
                 <TouchableOpacity onPress={() => setDetailsOpen((value) => !value)} style={styles.darkIconButton} activeOpacity={0.75}>
                   <Users color={appTheme.muted} size={20} />
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => void setActiveConversation(activeConversation.id)} style={styles.darkIconButton} activeOpacity={0.75}>
+                <TouchableOpacity onPress={() => void setActiveConversation(activeConversation.id, { force: true })} style={styles.darkIconButton} activeOpacity={0.75}>
                   <RefreshCw color={appTheme.muted} size={19} />
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => setActionsOpen((value) => !value)} style={styles.darkIconButton} activeOpacity={0.75}>
+                <TouchableOpacity
+                  onPress={() => {
+                    closeComposerPopups();
+                    closeThreadSearch();
+                    setActionsOpen((value) => !value);
+                  }}
+                  style={styles.darkIconButton}
+                  activeOpacity={0.75}
+                >
                   <MoreVertical color={appTheme.muted} size={20} />
                 </TouchableOpacity>
               </View>
             </View>
 
+            {actionsOpen ? (
+              <Pressable style={styles.threadDismissLayer} onPress={() => setActionsOpen(false)} />
+            ) : null}
             {actionsOpen && (
               <View style={[styles.actionMenu, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
                 <ActionMenuItem
@@ -2004,10 +4482,10 @@ export default function ChatsScreen() {
               </View>
             )}
 
-            {error && (
+            {error && error !== 'Feature not found' && (
               <View style={styles.errorStrip}>
                 <Typography variant="bodySmall" color={Theme.colors.error}>
-                  {error}
+                  {error.includes('Personal WhatsApp') ? 'Service unavailable. Please try again.' : error.length > 80 ? 'An unexpected error occurred. Please try again.' : error}
                 </Typography>
               </View>
             )}
@@ -2018,20 +4496,46 @@ export default function ChatsScreen() {
                   <Search color={appTheme.disabled} size={17} />
                   <TextInput
                     value={threadSearchQuery}
-                    onChangeText={setThreadSearchQuery}
+                    onChangeText={(text) => {
+                      setThreadSearchQuery(text);
+                      setThreadSearchMatchIndex(0);
+                    }}
                     placeholder="Search in conversation"
                     placeholderTextColor={appTheme.disabled}
                     style={[styles.threadSearchInput, WEB_INPUT_RESET, { color: appTheme.text }]}
-                    autoFocus={Platform.OS === 'web'}
+                    autoFocus
                   />
-                  <Typography variant="caption" color={appTheme.muted}>
-                    {threadSearchMatchCount}
-                  </Typography>
+                  {threadSearchQuery.trim() ? (
+                    <Typography variant="caption" color={appTheme.muted} style={styles.threadSearchCounter}>
+                      {threadSearchTotalMatches === 0 ? '0/0' : `${Math.min(threadSearchMatchIndex + 1, threadSearchTotalMatches)}/${threadSearchTotalMatches}`}
+                    </Typography>
+                  ) : (
+                    <Typography variant="caption" color={appTheme.muted} style={styles.threadSearchCounter}>
+                      {threadSearchMatchCount}
+                    </Typography>
+                  )}
+                  {threadSearchQuery.trim() ? (
+                    <>
+                      <TouchableOpacity
+                        onPress={() => navigateSearchMatch('up')}
+                        style={styles.threadSearchNav}
+                        disabled={threadSearchTotalMatches === 0}
+                        activeOpacity={0.7}
+                      >
+                        <ChevronUp color={threadSearchTotalMatches > 0 ? appTheme.text : appTheme.disabled} size={20} />
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        onPress={() => navigateSearchMatch('down')}
+                        style={styles.threadSearchNav}
+                        disabled={threadSearchTotalMatches === 0}
+                        activeOpacity={0.7}
+                      >
+                        <ChevronDown color={threadSearchTotalMatches > 0 ? appTheme.text : appTheme.disabled} size={20} />
+                      </TouchableOpacity>
+                    </>
+                  ) : null}
                   <TouchableOpacity
-                    onPress={() => {
-                      setThreadSearchQuery('');
-                      setThreadSearchOpen(false);
-                    }}
+                    onPress={closeThreadSearch}
                     style={styles.threadSearchClose}
                     activeOpacity={0.7}
                   >
@@ -2064,6 +4568,7 @@ export default function ChatsScreen() {
                 </View>
               )}
               <FlatList
+                ref={messageListRef}
                 data={visibleMessageListData}
                 keyExtractor={(item) => item.id}
                 renderItem={renderMessage}
@@ -2072,6 +4577,9 @@ export default function ChatsScreen() {
                 onEndReachedThreshold={0.25}
                 style={styles.messageListSurface}
                 scrollEventThrottle={16}
+                onScrollToIndexFailed={() => undefined}
+                keyboardDismissMode="interactive"
+                keyboardShouldPersistTaps="handled"
                 contentContainerStyle={[
                   styles.messageListDark,
                   isLinkedInThread && styles.linkedinMessageList,
@@ -2085,7 +4593,13 @@ export default function ChatsScreen() {
                 ListEmptyComponent={
                   <View style={styles.emptyThread}>
                     {isLoadingMessages ? (
-                      <ActivityIndicator color={appTheme.primaryAccent} />
+                      <Reanimated.View entering={FadeIn.duration(300)} style={{ width: '100%', padding: 16 }}>
+                        <SkeletonMessageBlock />
+                        <SkeletonMessageBlock isSender />
+                        <SkeletonMessageBlock />
+                        <SkeletonMessageBlock isSender />
+                        <SkeletonMessageBlock />
+                      </Reanimated.View>
                     ) : (
                       <Typography variant="body" color={appTheme.disabled}>
                         No messages yet
@@ -2099,6 +4613,10 @@ export default function ChatsScreen() {
                 removeClippedSubviews={Platform.OS !== 'web'}
               />
 
+              {threadSearchOpen ? (
+                <Pressable style={styles.threadSearchDismissLayer} onPress={closeThreadSearch} />
+              ) : null}
+
               {activeTyping && (
                 <View style={styles.typingPillDark}>
                   <View style={[styles.typingDot, { backgroundColor: getChannelColor(activeConversation.channel) }]} />
@@ -2109,12 +4627,16 @@ export default function ChatsScreen() {
               )}
             </ThreadSurface>
 
+            {composerPopupOpen ? (
+              <Pressable style={styles.threadComposerDismissLayer} onPress={closeComposerPopups} />
+            ) : null}
+
             <View
               style={[
                 styles.composerShellDark,
                 isLinkedInThread && styles.linkedinComposerShell,
                 isEmailThread && styles.emailComposerShell,
-                { paddingBottom: composerBottomPadding, backgroundColor: activePalette.composer, borderTopColor: activePalette.border },
+                { paddingBottom: composerBottomPadding + 8, backgroundColor: activePalette.composer, borderTopColor: activePalette.border },
               ]}
             >
               {agentMenuOpen && (
@@ -2383,17 +4905,58 @@ export default function ChatsScreen() {
               )}
 
               {emojiPickerOpen && (
-                <View style={[styles.emojiMenu, { bottom: floatingMenuBottom, backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
-                  {EMOJI_OPTIONS.map((emoji) => (
-                    <TouchableOpacity
-                      key={emoji}
-                      style={[styles.emojiButton, { backgroundColor: appTheme.input }]}
-                      onPress={() => setDraft((value) => `${value}${emoji}`)}
-                      activeOpacity={0.7}
-                    >
-                      <Typography variant="h3" color={appTheme.text}>{emoji}</Typography>
-                    </TouchableOpacity>
-                  ))}
+                <View style={[styles.emojiPickerPanel, { bottom: floatingMenuBottom, backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
+                  {/* Search bar */}
+                  <View style={[styles.emojiSearchBar, { backgroundColor: appTheme.input, borderColor: appTheme.border }]}>
+                    <Search color={appTheme.disabled} size={14} />
+                    <TextInput
+                      value={emojiSearch}
+                      onChangeText={setEmojiSearch}
+                      placeholder="Search emoji"
+                      placeholderTextColor={appTheme.disabled}
+                      style={[styles.emojiSearchInput, WEB_INPUT_RESET, { color: appTheme.text }]}
+                    />
+                    {emojiSearch ? (
+                      <TouchableOpacity onPress={() => setEmojiSearch('')} activeOpacity={0.7}>
+                        <X color={appTheme.disabled} size={14} />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+
+                  {/* Category tabs */}
+                  {!emojiSearch ? (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.emojiCategoryRow} contentContainerStyle={styles.emojiCategoryRowContent}>
+                      {EMOJI_CATEGORIES.map((cat) => (
+                        <TouchableOpacity
+                          key={cat.id}
+                          onPress={() => setEmojiCategory(cat.id)}
+                          style={[styles.emojiCategoryTab, emojiCategory === cat.id && { borderBottomColor: '#00A884', borderBottomWidth: 2 }]}
+                          activeOpacity={0.7}
+                        >
+                          <Typography style={styles.emojiCategoryIcon}>{cat.icon}</Typography>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  ) : null}
+
+                  {/* Emoji grid */}
+                  <ScrollView showsVerticalScrollIndicator={false} style={styles.emojiGridScroll} nestedScrollEnabled>
+                    <View style={styles.emojiGrid}>
+                      {(emojiSearch
+                        ? EMOJI_CATEGORIES.flatMap((c) => c.emojis).filter((_, i, arr) => arr.indexOf(_) === i).slice(0, 120)
+                        : EMOJI_CATEGORIES.find((c) => c.id === emojiCategory)?.emojis ?? EMOJI_CATEGORIES[0].emojis
+                      ).map((emoji, idx) => (
+                        <TouchableOpacity
+                          key={`${emojiCategory}-${idx}`}
+                          style={[styles.emojiButton, { backgroundColor: appTheme.input }]}
+                          onPress={() => setDraft((value) => `${value}${emoji}`)}
+                          activeOpacity={0.7}
+                        >
+                          <Typography style={styles.emojiButtonText}>{emoji}</Typography>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </ScrollView>
                 </View>
               )}
 
@@ -2408,6 +4971,8 @@ export default function ChatsScreen() {
                 activeOpacity={0.75}
                 disabled={agentModeUpdating}
                 onPress={() => {
+                  setActionsOpen(false);
+                  closeThreadSearch();
                   setTemplateMenuOpen(false);
                   setQuickComposer(null);
                   setEmojiPickerOpen(false);
@@ -2427,6 +4992,8 @@ export default function ChatsScreen() {
                 style={styles.composerToolButton}
                 activeOpacity={0.75}
                 onPress={() => {
+                  setActionsOpen(false);
+                  closeThreadSearch();
                   setAgentMenuOpen(false);
                   setTemplateMenuOpen(false);
                   setQuickComposer(null);
@@ -2436,96 +5003,262 @@ export default function ChatsScreen() {
               >
                 <Plus color={appTheme.muted} size={22} />
               </TouchableOpacity>
-              <TextInput
-                placeholder={
-                  isLocked
-                    ? 'Conversation is locked'
-                    : activeConversation.channel === 'linkedin'
-                    ? 'Write a message...'
-                    : activeConversation.channel === 'email' || activeConversation.channel === 'gmail'
-                      ? 'Compose your email reply...'
-                      : 'Type a message...'
-                }
-                placeholderTextColor={appTheme.disabled}
-                value={draft}
-                onChangeText={handleDraftChange}
-                style={[
-                  styles.composerInputDark,
-                  isLinkedInThread && styles.linkedinComposerInput,
-                  isEmailThread && styles.emailComposerInput,
-                  WEB_INPUT_RESET,
-                  { backgroundColor: appTheme.input, color: appTheme.text },
-                ]}
-                multiline
-                editable={!isLocked}
-              />
-              <TouchableOpacity
-                style={styles.composerToolButton}
-                activeOpacity={0.75}
-                onPress={() => {
-                  setAgentMenuOpen(false);
-                  setTemplateMenuOpen(false);
-                  setQuickComposer(null);
-                  setQuickActionsOpen(false);
-                  setEmojiPickerOpen((value) => !value);
-                }}
-              >
-                <Smile color={appTheme.muted} size={20} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={handleSend}
-                activeOpacity={0.8}
-                disabled={!draft.trim() || isSending || isLocked}
-                style={[
-                  styles.sendButtonDark,
-                  isLinkedInThread && styles.linkedinSendButton,
-                  isEmailThread && styles.emailSendButton,
-                  (!draft.trim() || isSending || isLocked) && styles.sendButtonDisabled,
-                ]}
-              >
-                {isSending ? (
-                  <ActivityIndicator color={Theme.colors.surface} size="small" />
-                ) : (
-                  <Send color={Theme.colors.surface} size={20} />
-                )}
-              </TouchableOpacity>
+              {!isRecording && !pendingVoiceNote ? (
+                <TextInput
+                  placeholder={
+                    isLocked
+                      ? 'Conversation is locked'
+                      : activeConversation.channel === 'linkedin'
+                      ? 'Write a message...'
+                      : activeConversation.channel === 'email' || activeConversation.channel === 'gmail'
+                        ? 'Compose your email reply...'
+                        : 'Type a message...'
+                  }
+                  placeholderTextColor={appTheme.disabled}
+                  value={draft}
+                  onChangeText={handleDraftChange}
+                  style={[
+                    styles.composerInputDark,
+                    isLinkedInThread && styles.linkedinComposerInput,
+                    isEmailThread && styles.emailComposerInput,
+                    WEB_INPUT_RESET,
+                    { backgroundColor: appTheme.input, color: appTheme.text },
+                  ]}
+                  onFocus={closeThreadPopups}
+                  multiline
+                  editable={!isLocked}
+                />
+              ) : null}
+              {!isRecording && !pendingVoiceNote ? (
+                <TouchableOpacity
+                  style={styles.composerToolButton}
+                  activeOpacity={0.75}
+                  onPress={() => {
+                    setActionsOpen(false);
+                    closeThreadSearch();
+                    setAgentMenuOpen(false);
+                    setTemplateMenuOpen(false);
+                    setQuickComposer(null);
+                    setQuickActionsOpen(false);
+                    setEmojiSearch('');
+                    setEmojiPickerOpen((value) => !value);
+                  }}
+                >
+                  <Smile color={appTheme.muted} size={20} />
+                </TouchableOpacity>
+              ) : null}
+
+              {draft.trim() && !isRecording && !pendingVoiceNote ? (
+                <TouchableOpacity
+                  onPress={handleSend}
+                  activeOpacity={0.8}
+                  disabled={isSending || isLocked}
+                  style={[
+                    styles.sendButtonDark,
+                    isLinkedInThread && styles.linkedinSendButton,
+                    isEmailThread && styles.emailSendButton,
+                    (isSending || isLocked) && styles.sendButtonDisabled,
+                  ]}
+                >
+                  {isSending ? (
+                    <ActivityIndicator color={Theme.colors.surface} size="small" />
+                  ) : (
+                    <Send color={Theme.colors.surface} size={20} />
+                  )}
+                </TouchableOpacity>
+              ) : !isRecording && !pendingVoiceNote ? (
+                <TouchableOpacity
+                  onPress={startVoiceRecording}
+                  activeOpacity={0.8}
+                  disabled={isLocked}
+                  style={[
+                    styles.sendButtonDark,
+                    isLinkedInThread && styles.linkedinSendButton,
+                    isEmailThread && styles.emailSendButton,
+                    isLocked && styles.sendButtonDisabled,
+                  ]}
+                >
+                  <Mic color={Theme.colors.surface} size={20} />
+                </TouchableOpacity>
+              ) : null}
+
+              {isRecording ? (
+                <View style={styles.recordingBar}>
+                  <TouchableOpacity onPress={() => void stopVoiceRecording(true)} style={styles.recordingCancelButton} activeOpacity={0.7}>
+                    <Trash2 color="#EF4444" size={20} />
+                  </TouchableOpacity>
+                  <View style={styles.recordingIndicator}>
+                    <View style={styles.recordingDot} />
+                    <Typography variant="bodySmall" color={appTheme.text} style={styles.recordingTimer}>
+                      {formatDuration(recordingDuration)}
+                    </Typography>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => void stopVoiceRecording(false)}
+                    style={[styles.sendButtonDark, isLinkedInThread && styles.linkedinSendButton, isEmailThread && styles.emailSendButton]}
+                    activeOpacity={0.8}
+                  >
+                    <StopCircle color={Theme.colors.surface} size={20} />
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+
+              {pendingVoiceNote ? (
+                <View style={styles.voicePreviewBar}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setPendingVoiceNote(null);
+                      setPendingVoiceNotePlaying(false);
+                      pendingVoiceNoteSoundRef.current?.stopAsync().catch(() => undefined);
+                      pendingVoiceNoteSoundRef.current?.unloadAsync().catch(() => undefined);
+                      pendingVoiceNoteSoundRef.current = null;
+                    }}
+                    style={styles.recordingCancelButton}
+                    activeOpacity={0.7}
+                  >
+                    <Trash2 color="#EF4444" size={20} />
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => void togglePendingVoiceNotePlayback()} style={styles.voicePreviewPlay} activeOpacity={0.7}>
+                    {pendingVoiceNotePlaying ? (
+                      <PauseCircle color="#00A884" size={28} />
+                    ) : (
+                      <PlayCircle color="#00A884" size={28} />
+                    )}
+                  </TouchableOpacity>
+                  <View style={styles.voicePreviewWave}>
+                    {[4, 6, 8, 5, 9, 7, 6, 8, 4, 7, 5, 8, 6, 9, 5].map((h, i) => (
+                      <View key={i} style={[styles.audioWaveBar, { height: h * 2, backgroundColor: pendingVoiceNotePlaying ? '#00A884' : appTheme.disabled }]} />
+                    ))}
+                  </View>
+                  <Typography variant="caption" color={appTheme.muted} style={styles.voicePreviewDuration}>
+                    {formatDuration(pendingVoiceNote.durationSec)}
+                  </Typography>
+                  <TouchableOpacity
+                    onPress={() => void sendVoiceNote()}
+                    style={[styles.sendButtonDark, isLinkedInThread && styles.linkedinSendButton, isEmailThread && styles.emailSendButton, isSending && styles.sendButtonDisabled]}
+                    disabled={isSending}
+                    activeOpacity={0.8}
+                  >
+                    {isSending ? <ActivityIndicator color={Theme.colors.surface} size="small" /> : <Send color={Theme.colors.surface} size={20} />}
+                  </TouchableOpacity>
+                </View>
+              ) : null}
             </View>
+
+            {pendingAttachment && (
+              <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000', zIndex: 1000 }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', padding: 16, paddingTop: insets.top + 16 }}>
+                  <TouchableOpacity onPress={() => setPendingAttachment(null)} style={{ padding: 8 }}>
+                    <X color="#FFF" size={28} />
+                  </TouchableOpacity>
+                </View>
+                <Image
+                  source={{ uri: pendingAttachment.uri }}
+                  style={{ flex: 1 }}
+                  resizeMode="contain"
+                />
+                <View style={{ flexDirection: 'row', alignItems: 'center', padding: 16, paddingBottom: (isKeyboardVisible ? 0 : insets.bottom) + 16, backgroundColor: 'rgba(0,0,0,0.5)' }}>
+                  <TextInput
+                    placeholder="Add a caption..."
+                    placeholderTextColor="rgba(255,255,255,0.6)"
+                    value={draft}
+                    onChangeText={setDraft}
+                    style={{ flex: 1, color: '#FFF', fontSize: 16, padding: 12, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 20, marginRight: 12 }}
+                  />
+                  <TouchableOpacity
+                    onPress={confirmPendingAttachment}
+                    style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: '#00a884', alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    <Send color="#FFF" size={20} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
           </View>
 
           {showSideDetails && (
             <ContactDetailsPanel
               conversation={activeConversation}
+              messages={activeMessages}
               messageCount={activeMessages.length}
               resolved={isResolved}
+              favourite={isStarred}
+              listed={isPinned}
+              muted={isMuted}
+              locked={isLocked}
               onClose={() => setDetailsOpen(false)}
+              onOpenMedia={openContactMediaLibrary}
+              onOpenSearch={openContactSearch}
+              onOpenStarredMessages={handleOpenStarredMessages}
+              onToggleFavourite={handleToggleFavourite}
+              onToggleList={handleToggleList}
+              onToggleMute={handleToggleMute}
+              onTogglePrivacy={handleTogglePrivacy}
+              onOpenDisappearingMessages={handleOpenDisappearingMessages}
+              onVerifyEncryption={handleVerifyEncryption}
+              onClearChat={handleClearChat}
+              onBlock={handleBlockContact}
+              onReport={handleReportContact}
+              onDelete={handleDeleteChat}
+              onConversationRefresh={() => void setActiveConversation(activeConversation.id, { force: true })}
             />
           )}
-        </View>
+        </Reanimated.View>
 
         {showOverlayDetails && (
           <View style={styles.contactPanelOverlay}>
             <ContactDetailsPanel
               conversation={activeConversation}
+              messages={activeMessages}
               messageCount={activeMessages.length}
               resolved={isResolved}
+              favourite={isStarred}
+              listed={isPinned}
+              muted={isMuted}
+              locked={isLocked}
               fullPage
               onClose={() => setDetailsOpen(false)}
+              onOpenMedia={openContactMediaLibrary}
+              onOpenSearch={openContactSearch}
+              onOpenStarredMessages={handleOpenStarredMessages}
+              onToggleFavourite={handleToggleFavourite}
+              onToggleList={handleToggleList}
+              onToggleMute={handleToggleMute}
+              onTogglePrivacy={handleTogglePrivacy}
+              onOpenDisappearingMessages={handleOpenDisappearingMessages}
+              onVerifyEncryption={handleVerifyEncryption}
+              onClearChat={handleClearChat}
+              onBlock={handleBlockContact}
+              onReport={handleReportContact}
+              onDelete={handleDeleteChat}
+              onConversationRefresh={() => void setActiveConversation(activeConversation.id, { force: true })}
             />
           </View>
         )}
-      </KeyboardAvoidingView>
+
+        {mediaLibraryOpen ? (
+          <View style={styles.mediaLibraryOverlay}>
+            <MediaLibraryScreen
+              conversation={activeConversation}
+              items={activeMediaItems}
+              initialTab={mediaLibraryInitialTab}
+              onClose={() => setMediaLibraryOpen(false)}
+            />
+          </View>
+        ) : null}
+      </KeyboardContainer>
     );
   }
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top, backgroundColor: appTheme.background }]}>
-      <View style={styles.header}>
+    <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
+      <View style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 16 }]}>
         <View style={styles.headerTopRow}>
           <View style={styles.titleArea}>
             <Typography variant="h1" color={appTheme.text}>Chats</Typography>
           </View>
           <View style={styles.headerActionGroup}>
-            <TouchableOpacity style={styles.refreshButton} onPress={() => void syncConversations()} activeOpacity={0.75}>
+            <TouchableOpacity style={styles.refreshButton} onPress={() => void syncConversations({ force: true })} activeOpacity={0.75}>
               {isLoadingConversations || isSyncing ? (
                 <ActivityIndicator color={Theme.colors.surface} size="small" />
               ) : (
@@ -2539,6 +5272,7 @@ export default function ChatsScreen() {
               style={[styles.createChatButton, { backgroundColor: appTheme.surface, borderColor: appTheme.borderSoft }]}
               onPress={() => {
                 setCreateChatNotice(null);
+                setFilterDropdownOpen(false);
                 setCreateChatMenuOpen((value) => {
                   const next = !value;
                   if (!next) {
@@ -2561,6 +5295,9 @@ export default function ChatsScreen() {
       </View>
 
       <View style={styles.content}>
+        {createChatMenuOpen || filterDropdownOpen ? (
+          <Pressable style={styles.listDismissLayer} onPress={closeConversationListPopups} />
+        ) : null}
         {createChatMenuOpen && (
           <View style={[styles.createChatPanel, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
             <View style={styles.createChatPanelHeader}>
@@ -2573,12 +5310,7 @@ export default function ChatsScreen() {
                 </Typography>
               </View>
               <TouchableOpacity
-                onPress={() => {
-                  setCreateChatMenuOpen(false);
-                  setCreateChatMode(null);
-                  setCreateChatSearch('');
-                  setCreateChatSelectedIds(new Set());
-                }}
+                onPress={closeCreateChatMenu}
                 style={[styles.createChatCloseButton, { backgroundColor: appTheme.softSurface }]}
                 activeOpacity={0.72}
               >
@@ -2720,7 +5452,10 @@ export default function ChatsScreen() {
           <View style={styles.filterDropdownWrap}>
             <TouchableOpacity
               style={[styles.filterDropdownButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
-              onPress={() => setFilterDropdownOpen((value) => !value)}
+              onPress={() => {
+                closeCreateChatMenu();
+                setFilterDropdownOpen((value) => !value);
+              }}
               activeOpacity={0.78}
             >
               <View style={[styles.filterSelectedDot, { backgroundColor: activeFilterOption.color }]} />
@@ -2763,7 +5498,7 @@ export default function ChatsScreen() {
                   },
                 ]}
               >
-                {CHANNELS.filter((channel) => channel.id !== activeFilter).map((channel) => (
+                {visibleChannels.filter((channel) => channel.id !== activeFilter).map((channel) => (
                   <TouchableOpacity
                     key={channel.id}
                     style={styles.filterDropdownItem}
@@ -2808,7 +5543,7 @@ export default function ChatsScreen() {
           keyExtractor={(item) => item.id}
           renderItem={renderConversation}
           refreshing={isLoadingConversations}
-          onRefresh={() => void syncConversations()}
+          onRefresh={() => void syncConversations({ force: true })}
           onEndReached={() => void fetchMoreConversations()}
           onEndReachedThreshold={0.35}
           contentContainerStyle={[styles.conversationList, { paddingBottom: insets.bottom + 100 }]}
@@ -2826,8 +5561,14 @@ export default function ChatsScreen() {
           }
           ListEmptyComponent={
             <View style={styles.emptyList}>
-              {isLoadingConversations ? (
-                <ActivityIndicator color={appTheme.primaryAccent} />
+              {isLoadingConversations || isSyncing ? (
+                <Reanimated.View entering={FadeIn.duration(350)} style={{ width: '100%', gap: 16 }}>
+                  <SkeletonConversationRow />
+                  <SkeletonConversationRow />
+                  <SkeletonConversationRow />
+                  <SkeletonConversationRow />
+                  <SkeletonConversationRow />
+                </Reanimated.View>
               ) : (
                 <>
                   <MessageSquare color={appTheme.disabled} size={28} />
@@ -2840,7 +5581,7 @@ export default function ChatsScreen() {
           }
         />
       </View>
-    </View>
+    </AnimatedScreen>
   );
 }
 
@@ -2848,16 +5589,16 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Theme.colors.background },
   header: {
     paddingHorizontal: Theme.spacing.xl,
-    paddingTop: Theme.spacing.md,
     paddingBottom: Theme.spacing.md,
   },
   headerTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    flexWrap: 'wrap',
     gap: Theme.spacing.md,
   },
-  titleArea: { flex: 1 },
+  titleArea: { flex: 1, minWidth: 150 },
   headerMeta: {
     marginTop: 2,
     maxWidth: '100%',
@@ -2865,6 +5606,7 @@ const styles = StyleSheet.create({
   headerActionGroup: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
     gap: Theme.spacing.sm,
   },
   refreshButton: {
@@ -2886,6 +5628,8 @@ const styles = StyleSheet.create({
     ...Theme.shadows.small,
   },
   createChatPanel: {
+    position: 'relative',
+    zIndex: 110,
     borderRadius: 18,
     borderWidth: 1,
     padding: Theme.spacing.md,
@@ -2901,7 +5645,7 @@ const styles = StyleSheet.create({
   },
   createChatMenuTitle: {
     paddingBottom: Theme.spacing.xs,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   createChatCloseButton: {
     width: 30,
@@ -2934,7 +5678,7 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   createChatMenuLabel: {
-    fontWeight: '800',
+    fontWeight: '600',
   },
   createChatNotice: {
     borderRadius: 12,
@@ -2998,10 +5742,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   createChatCommitText: {
-    fontWeight: '800',
+    fontWeight: '600',
   },
   refreshText: { color: Theme.colors.surface, fontWeight: '600' },
-  content: { flex: 1, paddingHorizontal: Theme.spacing.xl },
+  content: { flex: 1, paddingHorizontal: Theme.spacing.xl, position: 'relative' },
+  listDismissLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 80,
+    elevation: 8,
+  },
   filterRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -3044,7 +5793,7 @@ const styles = StyleSheet.create({
   },
   filterSelectedText: {
     flex: 1,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   filterChevronOpen: {
     transform: [{ rotate: '180deg' }],
@@ -3153,7 +5902,7 @@ const styles = StyleSheet.create({
   },
   conversationName: {
     fontSize: 17,
-    fontWeight: '800',
+    fontWeight: '600',
     flex: 1,
     letterSpacing: 0,
   },
@@ -3165,7 +5914,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   timeText: {
-    fontWeight: '700',
+    fontWeight: '500',
   },
   conversationBottomLine: {
     flexDirection: 'row',
@@ -3186,7 +5935,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  unreadText: { fontWeight: '800' },
+  unreadText: { fontWeight: '600' },
   conversationMetaLine: {
     marginTop: Theme.spacing.xs,
     flexDirection: 'row',
@@ -3203,7 +5952,7 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   channelPillText: {
-    fontWeight: '800',
+    fontWeight: '600',
     fontSize: 11,
   },
   companyText: {
@@ -3235,7 +5984,7 @@ const styles = StyleSheet.create({
   emailSubject: {
     marginVertical: 4,
     color: '#1F2937',
-    fontWeight: '800',
+    fontWeight: '600',
   },
   threadLayout: {
     flex: 1,
@@ -3248,21 +5997,36 @@ const styles = StyleSheet.create({
     backgroundColor: '#F3EEE6',
     position: 'relative',
   },
+  threadDismissLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 30,
+    elevation: 30,
+  },
+  threadSearchDismissLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 8,
+    elevation: 8,
+  },
+  threadComposerDismissLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 18,
+    elevation: 18,
+  },
   threadHeaderDark: {
-    minHeight: 76,
+    minHeight: 58,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Theme.spacing.lg,
-    paddingVertical: Theme.spacing.sm,
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: Theme.spacing.xs,
     borderBottomWidth: 1,
     borderBottomColor: Theme.colors.border,
     backgroundColor: Theme.colors.surface,
     zIndex: 12,
   },
   darkIconButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -3271,15 +6035,15 @@ const styles = StyleSheet.create({
   },
   threadChannelDot: {
     position: 'absolute',
-    right: -3,
-    bottom: -3,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    right: -1,
+    bottom: -1,
+    width: 11,
+    height: 11,
+    borderRadius: 6,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: Theme.colors.surface,
-    borderWidth: 2,
+    borderWidth: 1.5,
     borderColor: Theme.colors.surface,
   },
   threadTitleLine: {
@@ -3360,6 +6124,7 @@ const styles = StyleSheet.create({
     width: '100%',
     minWidth: 0,
     backgroundColor: '#F3EEE6',
+    position: 'relative',
   },
   threadBackgroundImage: {
     width: '100%',
@@ -3375,8 +6140,8 @@ const styles = StyleSheet.create({
   messageListDark: {
     flexGrow: 1,
     width: '100%',
-    paddingHorizontal: Theme.spacing.lg,
-    paddingVertical: Theme.spacing.xl,
+    paddingHorizontal: 8,
+    paddingVertical: Theme.spacing.md,
   },
   linkedinThreadBackground: {
     backgroundColor: '#F3F2EF',
@@ -3419,7 +6184,7 @@ const styles = StyleSheet.create({
     marginVertical: Theme.spacing.lg,
   },
   dateSeparatorText: {
-    fontWeight: '700',
+    fontWeight: '500',
   },
   typingPillDark: {
     alignSelf: 'flex-start',
@@ -3439,12 +6204,13 @@ const styles = StyleSheet.create({
     position: 'relative',
     flexDirection: 'row',
     alignItems: 'flex-end',
-    paddingHorizontal: Theme.spacing.lg,
-    paddingTop: Theme.spacing.sm,
+    paddingHorizontal: 6,
+    paddingTop: 8,
+    paddingBottom: 8,
     borderTopWidth: 1,
     borderTopColor: '#DCE2EA',
     backgroundColor: '#FFFFFF',
-    gap: Theme.spacing.sm,
+    gap: 6,
     zIndex: 20,
   },
   linkedinComposerShell: {
@@ -3558,7 +6324,7 @@ const styles = StyleSheet.create({
     ...Theme.shadows.large,
   },
   quickActionTitle: {
-    fontWeight: '800',
+    fontWeight: '600',
     marginBottom: Theme.spacing.md,
   },
   quickActionGrid: {
@@ -3627,7 +6393,7 @@ const styles = StyleSheet.create({
     marginTop: Theme.spacing.xs,
   },
   quickComposerSendText: {
-    fontWeight: '800',
+    fontWeight: '600',
   },
   emojiMenu: {
     position: 'absolute',
@@ -3644,13 +6410,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: Theme.spacing.sm,
     ...Theme.shadows.large,
-  },
-  emojiButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   templateMenuHeader: {
     flexDirection: 'row',
@@ -3709,7 +6468,7 @@ const styles = StyleSheet.create({
   },
   templateName: {
     flex: 1,
-    fontWeight: '800',
+    fontWeight: '600',
     color: Theme.colors.text,
   },
   templateBadge: {
@@ -3721,7 +6480,7 @@ const styles = StyleSheet.create({
   },
   templateBadgeText: {
     color: '#0A66C2',
-    fontWeight: '800',
+    fontWeight: '600',
   },
   templateEmptyText: {
     paddingVertical: Theme.spacing.lg,
@@ -3773,6 +6532,373 @@ const styles = StyleSheet.create({
   contactPanelFullPage: {
     width: '100%',
     borderLeftWidth: 0,
+  },
+  mediaLibraryOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 90,
+    elevation: 90,
+  },
+  whatsAppContactPanel: {
+    borderLeftWidth: 0,
+  },
+  whatsAppContactHeader: {
+    minHeight: 62,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Theme.spacing.sm,
+    paddingBottom: Theme.spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  whatsAppContactHeaderTitle: {
+    flex: 1,
+    marginLeft: Theme.spacing.sm,
+    fontWeight: '600',
+  },
+  whatsAppContactBody: {
+    paddingHorizontal: Theme.spacing.xl,
+  },
+  whatsAppContactHero: {
+    alignItems: 'center',
+    paddingTop: Theme.spacing.lg,
+    paddingBottom: Theme.spacing.md,
+  },
+  whatsAppProfileAvatarWrap: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  whatsAppProfileChannelBadge: {
+    position: 'absolute',
+    right: 4,
+    bottom: 4,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    ...Theme.shadows.small,
+  },
+  whatsAppContactName: {
+    marginTop: Theme.spacing.lg,
+    textAlign: 'center',
+  },
+  whatsAppContactPhone: {
+    marginTop: Theme.spacing.xs,
+    textAlign: 'center',
+  },
+  whatsAppContactActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    gap: Theme.spacing.md,
+    marginTop: Theme.spacing.md,
+    marginBottom: Theme.spacing.xs,
+  },
+  whatsAppContactAction: {
+    width: 100,
+    minHeight: 72,
+    borderRadius: 16,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  whatsAppContactActionIcon: {
+    width: 28,
+    height: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  whatsAppContactActionLabel: {
+    marginTop: Theme.spacing.xs,
+    textAlign: 'center',
+  },
+  whatsAppAboutLabel: {
+    paddingTop: Theme.spacing.sm,
+    paddingBottom: Theme.spacing.md,
+  },
+  whatsAppAboutText: {
+    fontWeight: '600',
+  },
+  whatsAppSection: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingVertical: Theme.spacing.lg,
+  },
+  whatsAppBusinessAccountSection: {
+    gap: Theme.spacing.md,
+  },
+  whatsAppBusinessAccountRow: {
+    minHeight: 26,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Theme.spacing.md,
+  },
+  whatsAppBusinessAccountText: {
+    flex: 1,
+  },
+  whatsAppBusinessHoursRow: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Theme.spacing.md,
+  },
+  whatsAppBusinessDay: {
+    fontWeight: '500',
+  },
+  whatsAppSectionTitle: {
+    marginBottom: Theme.spacing.sm,
+    fontWeight: '600',
+  },
+  whatsAppMediaHeader: {
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.md,
+  },
+  whatsAppMediaTitle: {
+    flex: 1,
+  },
+  whatsAppMediaPreviewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+    marginTop: Theme.spacing.lg,
+  },
+  whatsAppMediaPreviewTile: {
+    flex: 1,
+    maxWidth: 82,
+    aspectRatio: 1,
+    minWidth: 0,
+    borderRadius: 6,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  whatsAppMediaEmptyPreview: {
+    flex: 1,
+    minHeight: 82,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Theme.spacing.xs,
+  },
+  whatsAppInfoRow: {
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.lg,
+  },
+  whatsAppInfoText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  whatsAppInfoTitle: {
+    fontWeight: '500',
+  },
+  whatsAppSwitchTitle: {
+    flex: 1,
+    fontWeight: '500',
+  },
+  whatsAppActionSection: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingVertical: Theme.spacing.md,
+    gap: Theme.spacing.xs,
+  },
+  whatsAppDangerRow: {
+    minHeight: 54,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.md,
+    borderRadius: 16,
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: Theme.spacing.sm,
+  },
+  whatsAppDangerText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  whatsAppDangerTitle: {
+    fontWeight: '500',
+  },
+  whatsAppDangerSubtitle: {
+    opacity: 0.82,
+    marginTop: 1,
+  },
+  businessProfileCard: {
+    borderRadius: 10,
+    padding: Theme.spacing.md,
+    gap: Theme.spacing.sm,
+    minHeight: 42,
+  },
+  businessProfileLine: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Theme.spacing.sm,
+    minHeight: 28,
+  },
+  businessProfileLineText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  businessProfileLineTitle: {
+    fontWeight: '600',
+  },
+  businessProfileTextBlock: {
+    gap: 3,
+  },
+  businessProfileDivider: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Theme.spacing.sm,
+    gap: 4,
+  },
+  businessMetricGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Theme.spacing.sm,
+    marginTop: Theme.spacing.xs,
+  },
+  businessMetricTile: {
+    flexGrow: 1,
+    flexBasis: '46%',
+    borderRadius: 8,
+    paddingVertical: Theme.spacing.sm,
+    paddingHorizontal: Theme.spacing.xs,
+    alignItems: 'center',
+  },
+  businessMetricValue: {
+    fontWeight: '600',
+  },
+  mediaLibraryScreen: {
+    flex: 1,
+  },
+  mediaLibraryHeader: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Theme.spacing.sm,
+    paddingBottom: Theme.spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  mediaLibraryTitle: {
+    flex: 1,
+    marginLeft: Theme.spacing.xs,
+  },
+  mediaLibraryTabs: {
+    minHeight: 52,
+    flexDirection: 'row',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  mediaLibraryTab: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  },
+  mediaLibraryTabActive: {
+    borderBottomColor: '#22C55E',
+  },
+  mediaLibraryTabText: {
+    fontWeight: '600',
+  },
+  mediaLibraryContent: {
+    paddingTop: Theme.spacing.xl,
+  },
+  mediaMonthLabel: {
+    marginBottom: Theme.spacing.sm,
+    fontWeight: '500',
+  },
+  mediaGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  mediaGridTile: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 5,
+    overflow: 'hidden',
+    backgroundColor: '#E5E7EB',
+  },
+  mediaGridImage: {
+    width: '100%',
+    height: '100%',
+  },
+  videoMediaTile: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#111827',
+  },
+  mediaGridDocTile: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 8,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: Theme.spacing.sm,
+  },
+  mediaGridDocTitle: {
+    marginTop: Theme.spacing.sm,
+    textAlign: 'center',
+  },
+  mediaList: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(148, 163, 184, 0.25)',
+  },
+  mediaListRow: {
+    minHeight: 64,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  mediaListIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mediaListText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  mediaListTitle: {
+    fontWeight: '500',
+  },
+  mediaEmptyState: {
+    minHeight: 180,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: Theme.spacing.xl,
+  },
+  mediaEmptyText: {
+    marginTop: Theme.spacing.sm,
+    textAlign: 'center',
+  },
+  mediaLibraryFooter: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Theme.spacing.sm,
+    paddingTop: Theme.spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  mediaLibraryFooterText: {
+    fontWeight: '500',
   },
   contactPanelHeader: {
     height: 70,
@@ -3832,7 +6958,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   detailSectionTitle: {
-    fontWeight: '800',
+    fontWeight: '600',
   },
   detailLine: {
     flexDirection: 'row',
@@ -3860,7 +6986,7 @@ const styles = StyleSheet.create({
   metaValue: {
     flex: 1,
     textAlign: 'right',
-    fontWeight: '700',
+    fontWeight: '500',
   },
   paymentButton: {
     marginTop: Theme.spacing.xl,
@@ -3875,7 +7001,121 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   paymentButtonText: {
+    fontWeight: '500',
+  },
+  paymentPanel: {
+    borderRadius: 8,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  paymentPanelHeader: {
+    minHeight: 44,
+    paddingHorizontal: Theme.spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Theme.spacing.sm,
+  },
+  paymentPanelTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+    flex: 1,
+  },
+  paymentPanelBody: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    padding: Theme.spacing.md,
+    gap: Theme.spacing.md,
+  },
+  paymentOptionsBlock: {
+    gap: 6,
+  },
+  paymentBlockTitle: {
     fontWeight: '700',
+  },
+  paymentOptionRow: {
+    minHeight: 34,
+    borderRadius: 8,
+    paddingHorizontal: Theme.spacing.sm,
+    paddingVertical: Theme.spacing.xs,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Theme.spacing.sm,
+  },
+  paymentOptionName: {
+    flex: 1,
+    fontWeight: '500',
+  },
+  paymentOptionPrice: {
+    fontWeight: '700',
+  },
+  paymentLinkText: {
+    lineHeight: 17,
+  },
+  paymentActionRow: {
+    flexDirection: 'row',
+    gap: Theme.spacing.sm,
+  },
+  paymentActionButton: {
+    flex: 1,
+    minHeight: 36,
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Theme.spacing.xs,
+    paddingHorizontal: Theme.spacing.sm,
+  },
+  paymentSecondaryButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+  },
+  paymentActionText: {
+    fontWeight: '700',
+  },
+  paymentLoadButton: {
+    minHeight: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Theme.spacing.xs,
+  },
+  paymentVerificationBox: {
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.sm,
+    paddingVertical: Theme.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Theme.spacing.xs,
+  },
+  contactInlineAlert: {
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: Theme.spacing.sm,
+    paddingVertical: Theme.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Theme.spacing.xs,
+  },
+  contactInlineAlertText: {
+    flex: 1,
+    fontWeight: '500',
+  },
+  contactLoadingRow: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+  },
+  workflowTabsBlock: {
+    marginTop: Theme.spacing.lg,
+  },
+  workflowSegmentedTabs: {
+    marginTop: 0,
   },
   assignmentTabs: {
     marginTop: Theme.spacing.xl,
@@ -3890,24 +7130,28 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   assignmentTabActive: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     minHeight: 34,
     borderRadius: 17,
     borderWidth: 1,
     borderColor: Theme.colors.primary,
   },
   assignmentTab: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     minHeight: 34,
   },
   assignmentTabText: {
-    fontWeight: '700',
+    fontWeight: '500',
   },
   assignmentCard: {
     marginTop: Theme.spacing.md,
@@ -3917,6 +7161,96 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Theme.colors.border,
     padding: Theme.spacing.lg,
+  },
+  workflowCard: {
+    alignItems: 'stretch',
+    padding: Theme.spacing.md,
+    gap: Theme.spacing.md,
+  },
+  assignmentMemberRow: {
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.md,
+  },
+  assignmentAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  assignmentAvatarText: {
+    fontWeight: '700',
+  },
+  assignmentMemberText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  assignmentMemberName: {
+    marginTop: 1,
+    fontWeight: '700',
+  },
+  reassignButton: {
+    minHeight: 34,
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  reassignButtonText: {
+    fontWeight: '700',
+  },
+  assignmentPicker: {
+    borderWidth: 1,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  assignmentPickerRow: {
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+    paddingHorizontal: Theme.spacing.sm,
+    paddingVertical: Theme.spacing.xs,
+  },
+  assignmentPickerAvatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  assignmentPickerText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  assignmentPickerName: {
+    flex: 1,
+    fontWeight: '700',
+  },
+  assignmentEmptyState: {
+    minHeight: 72,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Theme.spacing.xs,
+  },
+  assignmentHistory: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Theme.spacing.sm,
+    gap: Theme.spacing.xs,
+  },
+  assignmentHistoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.xs,
+  },
+  assignmentHistoryText: {
+    flex: 1,
   },
   assignmentTitle: {
     marginTop: Theme.spacing.sm,
@@ -3939,7 +7273,76 @@ const styles = StyleSheet.create({
     alignSelf: 'stretch',
   },
   assignButtonText: {
-    fontWeight: '800',
+    fontWeight: '600',
+  },
+  noteInput: {
+    minHeight: 70,
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: Theme.spacing.sm,
+    textAlignVertical: 'top',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  noteSubmitButton: {
+    alignSelf: 'center',
+    minHeight: 34,
+    borderRadius: 17,
+    paddingHorizontal: Theme.spacing.xl,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Theme.spacing.xs,
+  },
+  noteSubmitText: {
+    fontWeight: '700',
+  },
+  notesList: {
+    gap: Theme.spacing.sm,
+  },
+  noteItem: {
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: Theme.spacing.sm,
+    gap: Theme.spacing.xs,
+  },
+  noteMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+  },
+  noteMetaText: {
+    flex: 1,
+  },
+  noteContent: {
+    lineHeight: 19,
+  },
+  noteActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.xs,
+  },
+  noteTextButton: {
+    minHeight: 26,
+    borderRadius: 13,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  noteMiniButton: {
+    minHeight: 28,
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  disabledButton: {
+    opacity: 0.55,
   },
   threadHeader: {
     flexDirection: 'row',
@@ -3964,7 +7367,7 @@ const styles = StyleSheet.create({
     marginHorizontal: Theme.spacing.sm,
   },
   threadTitleBlock: { flex: 1, marginLeft: Theme.spacing.sm },
-  threadTitle: { fontSize: 17, fontWeight: '700' },
+  threadTitle: { fontSize: 17, fontWeight: '500' },
   threadSubtitle: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3979,8 +7382,8 @@ const styles = StyleSheet.create({
   messageRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginBottom: Theme.spacing.sm,
-    gap: Theme.spacing.sm,
+    marginBottom: 2,
+    gap: 6,
   },
   messageRowAgent: { justifyContent: 'flex-end' },
   messageRowLead: { justifyContent: 'flex-start' },
@@ -4002,7 +7405,7 @@ const styles = StyleSheet.create({
     borderColor: '#E0E7FF',
   },
   messageAvatarText: {
-    fontWeight: '800',
+    fontWeight: '600',
   },
   messageBubble: {
     maxWidth: '76%',
@@ -4028,7 +7431,7 @@ const styles = StyleSheet.create({
   },
   linkedinSenderName: {
     marginBottom: 4,
-    fontWeight: '700',
+    fontWeight: '500',
   },
   linkedinAvatar: {
     backgroundColor: '#E8F2FF',
@@ -4094,7 +7497,7 @@ const styles = StyleSheet.create({
   },
   emailMeta: {
     marginBottom: 6,
-    fontWeight: '700',
+    fontWeight: '500',
   },
   attachments: {
     marginTop: Theme.spacing.sm,
@@ -4195,12 +7598,226 @@ const styles = StyleSheet.create({
     height: 7,
     borderRadius: 4,
   },
+  // Avatar image style for message bubbles
+  messageAvatarImg: {
+    alignSelf: 'flex-end',
+    marginBottom: 2,
+  },
+  // Media bubble (image-only, no padding)
+  mediaBubble: {
+    padding: 3,
+    overflow: 'hidden',
+  },
+  // Image thumbnail inside bubble
+  mediaThumbnail: {
+    width: 220,
+    height: 160,
+    borderRadius: 12,
+    marginBottom: 2,
+  },
+  // Location card inside bubble
+  locationCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    marginBottom: 4,
+    gap: 10,
+  },
+  locationCardIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#ECFDF5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  locationCardText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  // Document card inside bubble
+  docCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    marginBottom: 4,
+    gap: 8,
+  },
+  docCardName: {
+    flex: 1,
+    fontWeight: '600',
+  },
+  // Audio card inside bubble
+  audioCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 4,
+    gap: 10,
+    minWidth: 180,
+  },
+  audioCardContent: {
+    flex: 1,
+    minWidth: 0,
+  },
+  audioCardName: {
+    fontWeight: '500',
+    marginBottom: 4,
+  },
+  audioWaveformRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    height: 20,
+  },
+  audioWaveBar: {
+    width: 2.5,
+    borderRadius: 2,
+  },
+  // Emoji picker panel
+  emojiPickerPanel: {
+    position: 'absolute',
+    right: 4,
+    left: 4,
+    maxHeight: 320,
+    borderRadius: 16,
+    borderWidth: 1,
+    zIndex: 38,
+    overflow: 'hidden',
+    ...Theme.shadows.large,
+  },
+  emojiSearchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.md,
+    marginHorizontal: Theme.spacing.md,
+    marginVertical: 8,
+    gap: 6,
+  },
+  emojiSearchInput: {
+    flex: 1,
+    fontSize: 13,
+  },
+  emojiCategoryRow: {
+    maxHeight: 40,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0,0,0,0.08)',
+  },
+  emojiCategoryRowContent: {
+    paddingHorizontal: 8,
+    gap: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  emojiCategoryTab: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+  },
+  emojiCategoryIcon: {
+    fontSize: 18,
+  },
+  emojiGridScroll: {
+    maxHeight: 200,
+  },
+  emojiGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    padding: 8,
+    gap: 2,
+  },
+  emojiButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emojiButtonText: {
+    fontSize: 22,
+  },
+  // Search navigation
+  threadSearchCounter: {
+    minWidth: 34,
+    textAlign: 'center',
+  },
+  threadSearchNav: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Voice recording bar
+  recordingBar: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  recordingCancelButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recordingIndicator: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(239,68,68,0.08)',
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#EF4444',
+  },
+  recordingTimer: {
+    fontWeight: '600',
+    color: '#EF4444',
+  },
+  // Voice note preview bar
+  voicePreviewBar: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  voicePreviewPlay: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voicePreviewWave: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    height: 20,
+  },
+  voicePreviewDuration: {
+    minWidth: 36,
+    textAlign: 'right',
+  },
 });
-
-
-
-
-
-
-
-

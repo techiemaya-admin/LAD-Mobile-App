@@ -7,15 +7,15 @@ import {
   Switch,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import {
   AlertCircle,
   BarChart3,
   ChevronRight,
-  CreditCard,
-  HelpCircle,
-  LogOut,
+  Target,
+  Link,
   Megaphone,
   RefreshCw,
   Users,
@@ -28,11 +28,14 @@ import { Badge } from '@/components/ui/Badge';
 import { BottomTabSelector, useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { AIVoiceCallingSettings } from '@/components/features/AIVoiceCallingSettings';
 import { fetchSettingsHubData, SettingsHubData } from '@/src/services/settingsHub';
-import useAuthStore from '@/src/store/authStore';
+
 import useAppPreferencesStore from '@/src/store/appPreferencesStore';
+import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
 const formatPercent = (value: number) => `${Math.round((value || 0) * 10) / 10}%`;
+const SETTINGS_CACHE_KEY = 'drawer.settings.hub';
 
 const lightPalette = {
   background: Theme.colors.background,
@@ -68,18 +71,36 @@ const darkPalette = {
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const logout = useAuthStore((state) => state.logout);
-  const darkMode = useAppPreferencesStore((state) => state.darkMode);
-  const setDarkMode = useAppPreferencesStore((state) => state.setDarkMode);
+  const insets = useSafeAreaInsets();
+
+  const globalDarkMode = useAppPreferencesStore((state) => state.darkMode);
+  const setGlobalDarkMode = useAppPreferencesStore((state) => state.setDarkMode);
+  const { width } = useWindowDimensions();
+  const isTablet = width >= 768;
+  
+  const [localDarkMode, setLocalDarkMode] = useState(globalDarkMode);
   const [notifications, setNotifications] = useState(true);
-  const [marketing, setMarketing] = useState(false);
-  const [hubData, setHubData] = useState<SettingsHubData | null>(null);
-  const [loading, setLoading] = useState(true);
+
+  const [hubData, setHubData] = useState<SettingsHubData | null>(() => readScreenCache<SettingsHubData>(SETTINGS_CACHE_KEY)?.value ?? null);
+  const [loading, setLoading] = useState(() => !readScreenCache<SettingsHubData>(SETTINGS_CACHE_KEY));
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const handleBottomTabScroll = useBottomTabScrollHandler();
 
-  const palette = darkMode ? darkPalette : lightPalette;
+  // Keep local in sync if changed elsewhere
+  useEffect(() => {
+    setLocalDarkMode(globalDarkMode);
+  }, [globalDarkMode]);
+
+  const handleToggleTheme = useCallback((val: boolean) => {
+    setLocalDarkMode(val);
+    // Allow the native Switch animation to glide smoothly before locking the main thread
+    setTimeout(() => {
+      setGlobalDarkMode(val);
+    }, 200);
+  }, [setGlobalDarkMode]);
+
+  const palette = localDarkMode ? darkPalette : lightPalette;
   const themedCard = {
     backgroundColor: palette.surface,
     borderColor: palette.border,
@@ -96,6 +117,7 @@ export default function SettingsScreen() {
     try {
       const data = await fetchSettingsHubData();
       setHubData(data);
+      writeScreenCache(SETTINGS_CACHE_KEY, data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load backend settings data.');
     } finally {
@@ -105,8 +127,10 @@ export default function SettingsScreen() {
   }, []);
 
   useEffect(() => {
-    loadHubData();
-  }, [loadHubData]);
+    if (!hubData) {
+      loadHubData();
+    }
+  }, [hubData, loadHubData]);
 
   const featureCards = useMemo(() => {
     const stats = hubData?.campaigns.stats;
@@ -128,7 +152,7 @@ export default function SettingsScreen() {
         value: formatPercent(stats?.avgConnectionRate || 0),
         badge: 'Performance',
         route: '/(drawer)/analytics',
-        icon: <BarChart3 color={darkMode ? '#93C5FD' : Theme.colors.info} size={22} />,
+        icon: <BarChart3 color={localDarkMode ? '#93C5FD' : Theme.colors.info} size={22} />,
       },
       {
         title: 'Team Management',
@@ -139,33 +163,30 @@ export default function SettingsScreen() {
         icon: <Users color={Theme.colors.success} size={22} />,
       },
       {
-        title: 'Billing & Plans',
-        detail: `${billing?.status || 'unknown'} wallet, ${formatNumber(billing?.transactions.length || 0)} recent transactions`,
-        value: `${formatNumber(billing?.availableBalance || 0)} ${billing?.currency || 'credits'}`,
-        badge: billing?.planTier || 'plan',
-        route: '/(drawer)/billing',
-        icon: <CreditCard color={Theme.colors.warning} size={22} />,
+        title: 'Business Profile',
+        detail: 'Company basics, ICP target, and settings',
+        value: 'Settings',
+        badge: 'ICP Target',
+        route: '/(drawer)/business-profile',
+        icon: <Target color={Theme.colors.warning} size={22} />,
       },
       {
-        title: 'Help & Support',
-        detail: hubData?.support.responseTime || 'Support form and email fallback ready',
-        value: hubData?.support.statusLabel || 'Support ready',
-        badge: hubData?.support.backendStatus === 'online' ? 'Online' : 'Fallback',
-        route: '/(drawer)/support',
-        icon: <HelpCircle color={palette.primary} size={22} />,
+        title: 'Integrations',
+        detail: 'Connect WhatsApp, LinkedIn, email, and social apps',
+        value: 'Connections',
+        badge: 'Apps',
+        route: '/(drawer)/integrations',
+        icon: <Link color={palette.primary} size={22} />,
       },
     ];
-  }, [darkMode, hubData, palette.primary]);
+  }, [localDarkMode, hubData, palette.primary]);
 
-  const handleLogout = async () => {
-    await logout();
-    router.replace('/(auth)/login' as never);
-  };
+
 
   return (
     <View style={[styles.container, { backgroundColor: palette.background }]}>
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingTop: Math.max(insets.top, 12) + 12 }]}
         showsVerticalScrollIndicator={false}
         onScroll={handleBottomTabScroll}
         scrollEventThrottle={16}
@@ -179,8 +200,8 @@ export default function SettingsScreen() {
       >
         <View style={styles.headerRow}>
           <View style={styles.headerText}>
-            <Typography variant="h2" color={palette.text}>Settings</Typography>
-            <Typography variant="bodySmall" color={palette.muted}>Real backend data from LAD services</Typography>
+            <Typography variant="h2" color={palette.text} numberOfLines={2}>Settings</Typography>
+            <Typography variant="bodySmall" color={palette.muted} numberOfLines={2}>Manage your workspace and profile settings</Typography>
           </View>
           <TouchableOpacity
             style={[styles.refreshButton, themedCard]}
@@ -205,7 +226,7 @@ export default function SettingsScreen() {
         <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>Workspace Features</Typography>
         <View style={styles.featureGrid}>
           {featureCards.map((feature) => (
-            <TouchableOpacity key={feature.title} activeOpacity={0.78} onPress={() => router.push(feature.route as never)}>
+            <TouchableOpacity key={feature.title} activeOpacity={0.78} onPress={() => router.push(feature.route as never)} style={{ width: isTablet ? '48%' : '100%' }}>
               <GlassCard style={[styles.featureCard, themedCard]}>
                 <View style={styles.featureTop}>
                   <View style={[styles.featureIcon, { backgroundColor: palette.primarySoft }]}>{feature.icon}</View>
@@ -242,43 +263,20 @@ export default function SettingsScreen() {
               <Typography variant="caption" color={palette.muted}>Switch to dark theme</Typography>
             </View>
             <Switch
-              value={darkMode}
-              onValueChange={setDarkMode}
+              value={localDarkMode}
+              onValueChange={handleToggleTheme}
               trackColor={{ false: palette.switchOff, true: Theme.colors.primary }}
-              thumbColor={darkMode ? Theme.colors.surface : palette.disabled}
+              thumbColor={localDarkMode ? Theme.colors.surface : palette.disabled}
             />
           </View>
         </GlassCard>
 
         <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>AI Voice Calling</Typography>
-        <View style={darkMode ? styles.darkEmbeddedPanel : undefined}>
-          <AIVoiceCallingSettings darkMode={darkMode} />
+        <View style={localDarkMode ? styles.darkEmbeddedPanel : undefined}>
+          <AIVoiceCallingSettings darkMode={localDarkMode} />
         </View>
 
-        <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>Account</Typography>
-        <GlassCard style={[styles.card, themedCard]}>
-          <View style={styles.settingRow}>
-            <View style={styles.settingText}>
-              <Typography variant="bodyLarge" color={palette.text} style={styles.rowTitle}>Marketing Emails</Typography>
-              <Typography variant="caption" color={palette.muted}>Receive product updates</Typography>
-            </View>
-            <Switch
-              value={marketing}
-              onValueChange={setMarketing}
-              trackColor={{ false: palette.switchOff, true: Theme.colors.primary }}
-              thumbColor={marketing ? Theme.colors.surface : palette.disabled}
-            />
-          </View>
-        </GlassCard>
 
-        <TouchableOpacity
-          activeOpacity={0.82}
-          style={[styles.logoutButton, { backgroundColor: palette.logoutBg, borderColor: darkMode ? 'rgba(239, 68, 68, 0.36)' : Theme.colors.errorLight }]}
-          onPress={handleLogout}
-        >
-          <LogOut color={Theme.colors.error} size={22} />
-          <Typography variant="bodyLarge" color={Theme.colors.error} style={styles.logoutText}>Log Out</Typography>
-        </TouchableOpacity>
 
         <View style={styles.footerLogo}>
           <Logo variant="code" width={150} height={50} />
@@ -310,6 +308,7 @@ const styles = StyleSheet.create({
   },
   headerText: {
     flex: 1,
+    minWidth: 0,
   },
   refreshButton: {
     width: 42,
@@ -334,6 +333,9 @@ const styles = StyleSheet.create({
     marginTop: Theme.spacing.lg,
   },
   featureGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
     gap: Theme.spacing.md,
   },
   featureCard: {

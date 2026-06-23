@@ -1,6 +1,6 @@
 export type Channel = 'whatsapp' | 'linkedin' | 'instagram' | 'gmail';
 export type ChatChannel = Channel | 'email' | 'web' | 'unknown';
-export type IntegrationChannel = 'whatsapp' | 'linkedin' | 'email';
+export type IntegrationChannel = 'whatsapp' | 'linkedin' | 'email' | 'instagram' | 'gohighlevel' | string;
 export type ConversationStatus = 'open' | 'resolved' | 'muted';
 export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
 export type IntegrationStatus = 'connected' | 'disconnected' | 'connecting' | 'checkpoint' | 'error' | 'unknown';
@@ -142,6 +142,15 @@ export interface ChatMessage {
   humanAgentId?: string;
   senderName?: string;
   attachments?: Attachment[];
+  mediaId?: string;
+  mediaType?: string;
+  mediaMimeType?: string;
+  mediaFilename?: string;
+  mediaCaption?: string;
+  latitude?: number;
+  longitude?: number;
+  locationName?: string;
+  locationAddress?: string;
 }
 
 export interface ChatConversation {
@@ -164,6 +173,7 @@ export interface ChatConversation {
   ownerType?: 'AI' | 'human_agent';
   conversationState?: string;
   messageCount?: number;
+  waBackendChannel?: 'personal' | 'waba';
 }
 
 export interface ConnectedIntegration {
@@ -220,6 +230,11 @@ export interface SendMessageParams {
   humanAgentId?: string;
   currentUser?: CurrentUser;
   role?: string;
+  type?: string;
+  mediaId?: string;
+  mediaType?: string;
+  mediaFilename?: string;
+  mediaCaption?: string;
 }
 
 export interface CurrentUser {

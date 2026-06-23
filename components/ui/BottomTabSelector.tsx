@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import { Typography } from '@/components/ui/Typography';
+import { useAppTheme } from '@/src/theme/appTheme';
+import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
+import { BlurView } from 'expo-blur';
+import { usePathname, useRouter } from 'expo-router';
+import { BriefcaseBusiness, CircleUserRound, House, MessageCircle, Phone } from 'lucide-react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   Easing,
@@ -10,13 +16,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
-import { usePathname, useRouter } from 'expo-router';
-import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
-import { BriefcaseBusiness, CircleUserRound, House, MessageCircle, Phone } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Typography } from '@/components/ui/Typography';
-import { useAppTheme } from '@/src/theme/appTheme';
 
 type TabKey = 'home' | 'crm' | 'chats' | 'calls' | 'profile';
 
@@ -31,12 +31,12 @@ const tabs: {
   routeName: string;
   icon: typeof House;
 }[] = [
-  { key: 'home', label: 'Home', route: '/(tabs)', routeName: 'index', icon: House },
-  { key: 'crm', label: 'CRM', route: '/(tabs)/crm', routeName: 'crm', icon: BriefcaseBusiness },
-  { key: 'chats', label: 'Chats', route: '/(tabs)/chats', routeName: 'chats/index', icon: MessageCircle },
-  { key: 'calls', label: 'Calls', route: '/(tabs)/calls', routeName: 'calls', icon: Phone },
-  { key: 'profile', label: 'Profile', route: '/(tabs)/profile', routeName: 'profile', icon: CircleUserRound },
-];
+    { key: 'home', label: 'Home', route: '/(tabs)', routeName: 'index', icon: House },
+    { key: 'crm', label: 'CRM', route: '/(tabs)/crm', routeName: 'crm', icon: BriefcaseBusiness },
+    { key: 'chats', label: 'Chats', route: '/(tabs)/chats', routeName: 'chats/index', icon: MessageCircle },
+    { key: 'calls', label: 'Calls', route: '/(tabs)/calls', routeName: 'calls', icon: Phone },
+    { key: 'profile', label: 'Profile', route: '/(tabs)/profile', routeName: 'profile', icon: CircleUserRound },
+  ];
 
 const hiddenTabBarRouteNames = new Set([
   'ai-assistant/index',
@@ -52,14 +52,34 @@ const getActiveRoute = (pathname: string): TabKey => {
 
 const scrollListeners = new Set<(hidden: boolean) => void>();
 let bottomTabHidden = false;
+let bottomTabForcedHidden = false;
+
+export function forceBottomTabHidden(hidden: boolean) {
+  bottomTabForcedHidden = hidden;
+  emitBottomTabHidden(hidden);
+}
 
 function emitBottomTabHidden(hidden: boolean) {
+  if (bottomTabForcedHidden && !hidden) return;
   bottomTabHidden = hidden;
   scrollListeners.forEach((listener) => listener(hidden));
 }
 
 export function setBottomTabHidden(hidden: boolean) {
   emitBottomTabHidden(hidden);
+}
+
+export function useBottomTabHidden() {
+  const [hidden, setHidden] = useState(bottomTabHidden);
+
+  useEffect(() => {
+    scrollListeners.add(setHidden);
+    return () => {
+      scrollListeners.delete(setHidden);
+    };
+  }, []);
+
+  return hidden;
 }
 
 export function useBottomTabScrollHandler(onHiddenChange?: (hidden: boolean) => void) {
@@ -102,9 +122,9 @@ function AnimatedArtBar({
   const progress = useRef(new Animated.Value(activeIndex)).current;
   const visibility = useRef(new Animated.Value(bottomTabHidden ? 0 : 1)).current;
   const hiddenState = useRef(bottomTabHidden);
-  const maxWidth = width >= 560 ? 430 : Math.min(430, width - 20);
+  const maxWidth = width >= 560 ? 420 : Math.min(408, width - 24);
   const tabWidth = maxWidth / tabs.length;
-  const activeBubbleWidth = Math.min(70, tabWidth - 10);
+  const activeBubbleWidth = 56;
   const activeBubbleOffset = (tabWidth - activeBubbleWidth) / 2;
   const darkMode = appTheme.darkMode;
 
@@ -170,13 +190,21 @@ function AnimatedArtBar({
   });
   const hideTranslateY = visibility.interpolate({
     inputRange: [0, 1],
-    outputRange: [112, 0],
+    outputRange: [104, 0],
   });
-  const shellBackground = darkMode ? 'rgba(15, 23, 42, 0.72)' : 'rgba(255, 255, 255, 0.78)';
-  const activeBackground = darkMode ? '#304CFF' : appTheme.primary;
-  const activeTextColor = darkMode ? '#FFFFFF' : '#FFFFFF';
+  const shellBackground = darkMode ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.94)';
+  const activeBackground = darkMode ? '#243BFF' : appTheme.primary;
+  const activeIconColor = '#FFFFFF';
+  const activeLabelColor = '#FFFFFF';
   const inactiveTextColor = darkMode ? '#B8C4D7' : '#64748B';
   const inactiveIconColor = darkMode ? '#CBD5E1' : '#475569';
+  const shellBorderColor = darkMode ? 'rgba(226,232,240,0.16)' : 'rgba(203,213,225,0.86)';
+
+  useEffect(() => {
+    if (!bottomTabForcedHidden) {
+      emitBottomTabHidden(false);
+    }
+  }, [current]);
 
   return (
     <Animated.View
@@ -184,14 +212,14 @@ function AnimatedArtBar({
       style={[
         styles.fixedLayer,
         {
-          paddingBottom: Math.max(insets.bottom, 10),
+          paddingBottom: Math.max(insets.bottom, 8),
           opacity: visibility,
           transform: [{ translateY: hideTranslateY }],
         },
       ]}
     >
-      <View style={[styles.shell, { width: maxWidth, backgroundColor: shellBackground, borderColor: darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.82)' }]}>
-        <BlurView intensity={darkMode ? 34 : 48} tint={darkMode ? 'dark' : 'light'} style={StyleSheet.absoluteFill} />
+      <View style={[styles.shell, { width: maxWidth, backgroundColor: shellBackground, borderColor: shellBorderColor }]}>
+        <BlurView intensity={darkMode ? 44 : 58} tint={darkMode ? 'dark' : 'light'} style={StyleSheet.absoluteFill} />
         <View style={[StyleSheet.absoluteFill, { backgroundColor: shellBackground }]} pointerEvents="none" />
         <Animated.View
           pointerEvents="none"
@@ -205,7 +233,6 @@ function AnimatedArtBar({
             },
           ]}
         />
-        <View style={[styles.innerHighlight, { backgroundColor: darkMode ? 'rgba(255,255,255,0.11)' : 'rgba(255,255,255,0.72)' }]} pointerEvents="none" />
         {tabs.map((tab, index) => {
           const Icon = tab.icon;
           const active = current === tab.key;
@@ -220,14 +247,17 @@ function AnimatedArtBar({
           });
           const iconLift = distance.interpolate({
             inputRange: [0, 1],
-            outputRange: [2, -2],
+            outputRange: [0, 0],
           });
-          const iconColor = active ? activeTextColor : inactiveIconColor;
-          const labelColor = active ? activeTextColor : inactiveTextColor;
+          const iconColor = active ? activeIconColor : inactiveIconColor;
+          const labelColor = active ? activeLabelColor : inactiveTextColor;
 
           return (
             <Pressable
               key={tab.key}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              hitSlop={8}
               style={[styles.tab, { width: tabWidth }]}
               onPress={() => onSelect(tab)}
             >
@@ -244,7 +274,7 @@ function AnimatedArtBar({
                   },
                 ]}
               >
-                <Icon color={iconColor} size={active ? 25 : 22} strokeWidth={active ? 2.7 : 2.1} />
+                <Icon color={iconColor} size={active ? 23 : 21} strokeWidth={active ? 2.6 : 2.1} />
               </Animated.View>
               <Typography variant="caption" color={labelColor} style={[styles.label, active && styles.labelActive]} numberOfLines={1}>
                 {tab.label}
@@ -307,54 +337,45 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     alignItems: 'center',
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     zIndex: 60,
   },
   shell: {
-    height: 68,
-    borderRadius: 34,
+    height: 64,
+    borderRadius: 30,
     borderWidth: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 3,
     overflow: 'hidden',
     shadowColor: '#000000',
-    shadowOpacity: 0.34,
+    shadowOpacity: 0.2,
     shadowRadius: 18,
-    shadowOffset: { width: 0, height: 9 },
-    elevation: 14,
-  },
-  innerHighlight: {
-    position: 'absolute',
-    left: 10,
-    right: 10,
-    top: 5,
-    height: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
   },
   activeIsland: {
     position: 'absolute',
     left: 0,
-    top: 5,
-    bottom: 5,
-    borderRadius: 30,
-    borderWidth: 1,
+    top: 4,
+    height: 56,
+    borderRadius: 28,
+    borderWidth: 0,
     shadowColor: '#0B1957',
-    shadowOpacity: 0.3,
+    shadowOpacity: 0.32,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 5 },
     elevation: 8,
   },
   tab: {
-    height: 62,
+    height: 58,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 1,
+    gap: 2,
   },
   iconHalo: {
-    width: 36,
-    height: 32,
-    borderRadius: 16,
+    width: 32,
+    height: 29,
+    borderRadius: 15,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -364,13 +385,13 @@ const styles = StyleSheet.create({
   label: {
     width: '100%',
     textAlign: 'center',
-    fontSize: 9.5,
-    lineHeight: 12,
+    fontSize: 8.8,
+    lineHeight: 11,
     fontWeight: '800',
   },
   labelActive: {
-    fontSize: 10.5,
-    lineHeight: 13,
+    fontSize: 9.6,
+    lineHeight: 12,
     fontWeight: '900',
   },
 });
