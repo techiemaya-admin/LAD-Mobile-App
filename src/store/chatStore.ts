@@ -82,6 +82,9 @@ const CONVERSATION_PAGE_SIZE = 25;
 let listenersAttached = false;
 let activeMessageRequest = 0;
 let conversationSyncTimer: ReturnType<typeof setInterval> | null = null;
+// Conversations the user has marked read locally; used to preserve read state across force syncs
+// until the backend confirms the update. Cleared when a new incoming message arrives for that conversation.
+const localReadOverrides = new Set<string>();
 
 const sortMessages = (messages: ChatMessage[]) =>
   [...messages].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
@@ -333,6 +336,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const rawMessage = payload.message && typeof payload.message === 'object' ? payload.message as RawRecord : payload;
       const isOwnMessage = isMessageFromCurrentAgent(message, rawMessage);
 
+      // New incoming message invalidates the local read override so fresh unread counts show
+      if (!isOwnMessage) {
+        localReadOverrides.delete(conversationId);
+      }
+
       set((state) => {
         const hasMessage = state.activeMessages.some((item) => item.id === message.id);
         const shouldIncrementUnread = state.activeConversationId !== conversationId && !isOwnMessage;
@@ -373,6 +381,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const message = normalizeMessage(payload, activeConversationId ?? '');
       if (!message.conversationId) {
         return;
+      }
+
+      if (message.sender === 'lead' && activeConversationId !== message.conversationId) {
+        localReadOverrides.delete(message.conversationId);
       }
 
       set((state) => {
@@ -524,18 +536,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const conversations = await loadAllConversationPages();
 
-      set((state) => ({
-        conversations: conversations.length ? conversations : state.conversations,
-        connectedIntegrations: state.connectedIntegrations,
-        conversationPage: 1,
-        hasMoreConversations: false,
-        isSyncing: false,
-        isLoadingConversations: false,
-        syncError: conversations.length || state.conversations.length
-          ? null
-          : 'Backend returned 0 live conversations for this account.',
-        lastSyncedAt: new Date().toISOString(),
-      }));
+      set((state) => {
+        const mergedConversations = conversations.length
+          ? conversations.map((conv) =>
+              localReadOverrides.has(conv.id) ? { ...conv, unreadCount: 0 } : conv
+            )
+          : state.conversations;
+
+        return {
+          conversations: mergedConversations,
+          connectedIntegrations: state.connectedIntegrations,
+          conversationPage: 1,
+          hasMoreConversations: false,
+          isSyncing: false,
+          isLoadingConversations: false,
+          syncError: conversations.length || state.conversations.length
+            ? null
+            : 'Backend returned 0 live conversations for this account.',
+          lastSyncedAt: new Date().toISOString(),
+        };
+      });
     } catch (error) {
       if (isFeatureUnavailableError(error)) {
         set({
@@ -885,10 +905,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   markConversationRead: (conversationId) => {
+    localReadOverrides.add(conversationId);
     set((state) => ({
       conversations: markConversationReadLocally(state.conversations, conversationId),
     }));
-    void markConversationReadRequest(conversationId).catch(() => undefined);
+    void markConversationReadRequest(conversationId)
+      .then(() => { localReadOverrides.delete(conversationId); })
+      .catch(() => undefined);
   },
 
   disposeRealtime: () => {

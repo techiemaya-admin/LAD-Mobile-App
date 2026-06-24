@@ -287,9 +287,13 @@ export default function AIAssistantScreen() {
             borderColor: isUser ? appTheme.primaryAccent : appTheme.border,
           },
         ]}>
-          <Typography variant="bodySmall" color={isUser ? Theme.colors.surface : appTheme.text} style={styles.messageText}>
-            {item.text}
-          </Typography>
+          {isUser ? (
+            <Typography variant="bodySmall" color={Theme.colors.surface} style={styles.messageText}>
+              {item.text}
+            </Typography>
+          ) : (
+            <MarkdownText text={item.text} textColor={appTheme.text} />
+          )}
           {item.options?.length ? (
             <View style={styles.optionWrap}>
               {item.options.map((option) => (
@@ -310,6 +314,61 @@ export default function AIAssistantScreen() {
             </View>
           ) : null}
         </View>
+      </View>
+    );
+  };
+
+  // Markdown text renderer: handles **bold**, bullet lines, and line breaks
+  const MarkdownText = ({ text, textColor }: { text: string; textColor: string }) => {
+    const lines = text.split('\n');
+    return (
+      <View style={{ gap: 3 }}>
+        {lines.map((line, lineIndex) => {
+          const trimmed = line.trim();
+          const isBullet = /^[-•*]\s+/.test(trimmed);
+          const content = isBullet ? trimmed.replace(/^[-•*]\s+/, '') : line;
+
+          // Split line into bold/normal segments
+          const segments: { text: string; bold: boolean }[] = [];
+          const boldRegex = /\*\*(.+?)\*\*/g;
+          let lastIndex = 0;
+          let match;
+          while ((match = boldRegex.exec(content)) !== null) {
+            if (match.index > lastIndex) {
+              segments.push({ text: content.slice(lastIndex, match.index), bold: false });
+            }
+            segments.push({ text: match[1], bold: true });
+            lastIndex = match.index + match[0].length;
+          }
+          if (lastIndex < content.length) {
+            segments.push({ text: content.slice(lastIndex), bold: false });
+          }
+          if (segments.length === 0) segments.push({ text: content, bold: false });
+
+          if (!trimmed) {
+            return <View key={lineIndex} style={{ height: 4 }} />;
+          }
+
+          return (
+            <View key={lineIndex} style={isBullet ? { flexDirection: 'row', alignItems: 'flex-start', gap: 6 } : undefined}>
+              {isBullet && (
+                <Typography variant="bodySmall" color={textColor} style={{ lineHeight: 20, marginTop: 1 }}>{'•'}</Typography>
+              )}
+              <Typography variant="bodySmall" color={textColor} style={[styles.messageText, { flexShrink: 1, lineHeight: 20 }]}>
+                {segments.map((seg, segIndex) => (
+                  <Typography
+                    key={segIndex}
+                    variant="bodySmall"
+                    color={textColor}
+                    style={seg.bold ? { fontWeight: '700', lineHeight: 20 } : { lineHeight: 20 }}
+                  >
+                    {seg.text}
+                  </Typography>
+                ))}
+              </Typography>
+            </View>
+          );
+        })}
       </View>
     );
   };
