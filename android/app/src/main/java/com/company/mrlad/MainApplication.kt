@@ -1,4 +1,4 @@
-package com.anonymous.ladapp
+package com.company.mrlad
 
 import android.app.Application
 import android.content.res.Configuration

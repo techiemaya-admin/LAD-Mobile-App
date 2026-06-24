@@ -1,4 +1,4 @@
-package com.anonymous.ladapp
+package com.company.mrlad
 import expo.modules.splashscreen.SplashScreenManager
 
 import android.os.Build

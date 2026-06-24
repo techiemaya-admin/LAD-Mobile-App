@@ -26,6 +26,7 @@ import {
 import FontAwesome5 from '@expo/vector-icons/FontAwesome5';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useIsFocused, useNavigation } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 import {
   ArrowLeft,
   BarChart3,
@@ -2959,6 +2960,7 @@ export default function ChatsScreen() {
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const navigation = useNavigation();
+  const router = useRouter();
   const isChatFocused = useIsFocused();
   const authToken = useAuthStore((state) => state.token);
 
@@ -3097,10 +3099,26 @@ export default function ChatsScreen() {
   }, [activeConversationId, isChatFocused]);
   const filteredConversations = useMemo(() => {
     const query = search.trim().toLowerCase();
+
+    // Pre-compute disconnected third-party channels so we can exclude their conversations
+    // from the "all" filter. WhatsApp (personal/waba) is intentionally excluded from this
+    // check because WAPA session status can be unreliable across environments.
+    const integrationsLoaded = !isLoadingIntegrations && connectedIntegrations.length > 0;
+    const linkedInOff = integrationsLoaded && !connectedIntegrations.some((i) => i.channel === 'linkedin' && i.connected);
+    const instagramOff = integrationsLoaded && !connectedIntegrations.some((i) => i.channel === 'instagram' && i.connected);
+    const emailOff = integrationsLoaded && !connectedIntegrations.some((i) => i.channel === 'email' && i.connected);
+
     return conversations
       .filter((conversation) => {
         if (deletedIds.has(conversation.id) || blockedIds.has(conversation.id)) {
           return false;
+        }
+
+        // Hide conversations from disconnected third-party channels in the "all" view.
+        if (activeFilter === 'all') {
+          if (linkedInOff && conversation.channel === 'linkedin') return false;
+          if (instagramOff && conversation.channel === 'instagram') return false;
+          if (emailOff && (conversation.channel === 'email' || conversation.channel === 'gmail')) return false;
         }
 
         const searchable = [
@@ -3135,7 +3153,7 @@ export default function ChatsScreen() {
 
         return Date.parse(b.lastMessageAt ?? '') - Date.parse(a.lastMessageAt ?? '');
       });
-  }, [activeFilter, blockedIds, conversations, deletedIds, pinnedIds, search]);
+  }, [activeFilter, blockedIds, connectedIntegrations, conversations, deletedIds, isLoadingIntegrations, pinnedIds, search]);
 
   const createChatContacts = useMemo(() => {
     const query = createChatSearch.trim().toLowerCase();
@@ -3223,7 +3241,9 @@ export default function ChatsScreen() {
     const hasInstagramConversation = conversations.some((c) => c.channel === 'instagram');
     const hasEmailConversation = conversations.some((c) => c.channel === 'email');
 
-    if (!connectedIntegrations.length) {
+    // While integrations are still loading (or haven't been fetched yet), fall back to showing
+    // tabs for channels that already have conversations so the list isn't suddenly empty.
+    if (isLoadingIntegrations || !connectedIntegrations.length) {
       return CHANNELS.filter((ch) => {
         if (ch.id === 'all' || ch.id === 'unread') return true;
         if (ch.id === 'personal') return hasPersonalConversation;
@@ -3234,21 +3254,19 @@ export default function ChatsScreen() {
         return true;
       });
     }
+    // Integrations loaded — for WhatsApp (personal + WABA), keep the conversation-based fallback
+    // because the WAPA service can be temporarily unreachable or return a non-matching status even
+    // when the session is actually live. For third-party channels (LinkedIn, Instagram, Email) we
+    // trust the API status directly: those are clean OAuth connections with no ambiguity.
     const personalConnected =
       connectedIntegrations.some((i) => i.label === 'WhatsApp Personal' && i.connected) ||
       hasPersonalConversation;
     const wabaConnected =
       connectedIntegrations.some((i) => i.label === 'WhatsApp API Agent' && i.connected) ||
       hasWabaConversation;
-    const linkedInConnected =
-      connectedIntegrations.some((i) => i.channel === 'linkedin' && i.connected) ||
-      hasLinkedInConversation;
-    const instagramConnected =
-      connectedIntegrations.some((i) => i.channel === 'instagram' && i.connected) ||
-      hasInstagramConversation;
-    const emailConnected =
-      connectedIntegrations.some((i) => i.channel === 'email' && i.connected) ||
-      hasEmailConversation;
+    const linkedInConnected = connectedIntegrations.some((i) => i.channel === 'linkedin' && i.connected);
+    const instagramConnected = connectedIntegrations.some((i) => i.channel === 'instagram' && i.connected);
+    const emailConnected = connectedIntegrations.some((i) => i.channel === 'email' && i.connected);
     return CHANNELS.filter((ch) => {
       if (ch.id === 'all' || ch.id === 'unread') return true;
       if (ch.id === 'personal') return personalConnected;
@@ -3258,9 +3276,19 @@ export default function ChatsScreen() {
       if (ch.id === 'email') return emailConnected;
       return true;
     });
-  }, [connectedIntegrations, conversations]);
+  }, [connectedIntegrations, isLoadingIntegrations, conversations]);
   const activeFilterOption = CHANNELS.find((channel) => channel.id === activeFilter) ?? CHANNELS[0];
   const activeFilterLabel = activeFilterOption.label;
+
+  // When integrations load and the currently selected channel tab is no longer available
+  // (because the integration is disconnected), fall back to 'all'.
+  useEffect(() => {
+    if (!isLoadingIntegrations && connectedIntegrations.length > 0) {
+      if (!visibleChannels.some((ch) => ch.id === activeFilter)) {
+        setActiveFilter('all');
+      }
+    }
+  }, [visibleChannels, activeFilter, isLoadingIntegrations, connectedIntegrations]);
   const filteredTemplates = useMemo(() => {
     const query = templateSearch.trim().toLowerCase();
     if (!query) {
@@ -5569,6 +5597,27 @@ export default function ChatsScreen() {
                   <SkeletonConversationRow />
                   <SkeletonConversationRow />
                 </Reanimated.View>
+              ) : !isLoadingIntegrations && connectedIntegrations.length > 0 && !connectedIntegrations.some((i) => i.connected) ? (
+                <Reanimated.View entering={FadeInDown.duration(350)} style={styles.connectPrompt}>
+                  <View style={[styles.connectPromptIcon, { backgroundColor: appTheme.primarySoft }]}>
+                    <Link2 color={appTheme.primaryAccent} size={28} />
+                  </View>
+                  <Typography variant="h4" color={appTheme.text} style={styles.connectPromptTitle}>
+                    No Applications Connected
+                  </Typography>
+                  <Typography variant="bodySmall" color={appTheme.muted} style={styles.connectPromptBody}>
+                    Connect WhatsApp, LinkedIn, Instagram, or Email to start receiving and managing conversations here.
+                  </Typography>
+                  <TouchableOpacity
+                    style={[styles.connectPromptButton, { backgroundColor: appTheme.primaryAccent }]}
+                    onPress={() => router.push('/(drawer)/integrations' as any)}
+                    activeOpacity={0.8}
+                  >
+                    <Typography variant="bodySmall" color={appTheme.darkMode ? '#0F172A' : '#FFFFFF'} style={{ fontWeight: '600' }}>
+                      Connect an Application
+                    </Typography>
+                  </TouchableOpacity>
+                </Reanimated.View>
               ) : (
                 <>
                   <MessageSquare color={appTheme.disabled} size={28} />
@@ -5965,6 +6014,33 @@ const styles = StyleSheet.create({
     paddingTop: 80,
   },
   emptyText: { marginTop: Theme.spacing.sm },
+  connectPrompt: {
+    alignItems: 'center',
+    paddingHorizontal: Theme.spacing.xl,
+    gap: Theme.spacing.md,
+  },
+  connectPromptIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Theme.spacing.xs,
+  },
+  connectPromptTitle: {
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  connectPromptBody: {
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  connectPromptButton: {
+    marginTop: Theme.spacing.xs,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+  },
   errorStrip: {
     backgroundColor: Theme.colors.errorLight,
     borderRadius: 8,

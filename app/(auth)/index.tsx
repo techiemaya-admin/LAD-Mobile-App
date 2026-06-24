@@ -237,7 +237,7 @@ export default function OnboardingScreen() {
           <TouchableOpacity
             activeOpacity={0.84}
             style={[styles.primaryButton, isTiny && styles.buttonTiny, { minHeight: buttonHeight }]}
-            onPress={() => router.push('/signup')}
+            onPress={() => router.push('/login')}
             accessibilityRole="button"
           >
             <Typography
@@ -266,12 +266,12 @@ export default function OnboardingScreen() {
 
       <View style={[styles.footer, isPhone && styles.footerPhone, isTiny && styles.footerTiny, { width: contentWidth }]}>
         <View style={styles.footerLinks}>
-          <TouchableOpacity activeOpacity={0.7}>
+          <TouchableOpacity activeOpacity={0.7} onPress={() => router.push('/(auth)/privacy-policy')}>
             <Typography variant="body" style={[styles.footerLink, isTiny && styles.footerLinkTiny]}>
               Privacy Policy
             </Typography>
           </TouchableOpacity>
-          <TouchableOpacity activeOpacity={0.7}>
+          <TouchableOpacity activeOpacity={0.7} onPress={() => router.push('/(auth)/terms-of-service')}>
             <Typography variant="body" style={[styles.footerLink, isTiny && styles.footerLinkTiny]}>
               Terms
             </Typography>

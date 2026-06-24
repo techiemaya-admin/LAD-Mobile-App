@@ -1188,9 +1188,10 @@ function WhatsAppPersonalDetailView({ onBack }: { onBack: () => void }) {
     try {
       // Get WAPA status config
       const statusRes = await apiGet<any>('/api/personal-whatsapp/accounts');
-      const accountsList = Array.isArray(statusRes.data?.accounts) ? statusRes.data.accounts : (Array.isArray(statusRes.data) ? statusRes.data : []);
-      const CONNECTED_STATUSES = ['connected', 'open', 'active', 'READY', 'ready'];
-      const connectedAccount = accountsList.find((acc: any) => CONNECTED_STATUSES.includes(acc.status));
+      const rawList = statusRes.data?.accounts ?? statusRes.data?.result ?? statusRes.data?.sessions ?? statusRes.data;
+      const accountsList = Array.isArray(rawList) ? rawList : [];
+      const CONNECTED_STATUSES = new Set(['connected', 'open', 'active', 'READY', 'ready', 'CONNECTED', 'authenticated', 'online']);
+      const connectedAccount = accountsList.find((acc: any) => CONNECTED_STATUSES.has(String(acc.status ?? acc.state ?? '')));
       if (connectedAccount) {
         setAccount(connectedAccount);
         setStatus('connected');
@@ -1257,8 +1258,8 @@ function WhatsAppPersonalDetailView({ onBack }: { onBack: () => void }) {
           const statusRes = await apiGet<any>(`/api/personal-whatsapp/accounts/${result.id}`);
           if (statusRes.data) {
             const statusResult = statusRes.data;
-            const CONNECTED_STATUSES = ['connected', 'open', 'active', 'READY', 'ready'];
-            if (CONNECTED_STATUSES.includes(statusResult.status)) {
+            const CONNECTED_STATUSES = new Set(['connected', 'open', 'active', 'READY', 'ready', 'CONNECTED', 'authenticated', 'online']);
+            if (CONNECTED_STATUSES.has(String(statusResult.status ?? statusResult.state ?? ''))) {
               cleanup();
               setAccount(statusResult);
               setQrCode(null);

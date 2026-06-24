@@ -1967,11 +1967,9 @@ class ChatService {
 
   async markAsRead(conversationId: string) {
     if (bniConversationIds.has(conversationId)) {
-      return bniRequest('GET', `/api/conversations/${conversationId}`, undefined, {
-        backendChannel: bniChannelByConversation.get(conversationId),
-      });
+      const backendChannel = bniChannelByConversation.get(conversationId);
+      await bniRequest('POST', `/api/conversations/${conversationId}/read`, undefined, { backendChannel });
     }
-
     const response = await apiPost(`/api/conversations/${conversationId}/read`, {});
     return response.data;
   }

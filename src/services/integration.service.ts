@@ -198,11 +198,10 @@ export async function getWhatsAppIntegrations(): Promise<ConnectedIntegration[]>
   // WhatsApp Personal
   try {
     const response = await apiGet(CHAT_SYNC_ENDPOINTS.whatsappPersonalAccounts);
-    const accounts = firstArray(response.data, ['accounts', 'data']);
+    const accounts = firstArray(response.data, ['accounts', 'data', 'result', 'sessions']);
+    const PERSONAL_CONNECTED = new Set(['connected', 'open', 'active', 'ready', 'READY', 'CONNECTED', 'authenticated', 'online']);
     const connected = accounts.some(
-      (a: RawRecord) =>
-        a.status === 'connected' || a.status === 'open' || a.status === 'active' ||
-        a.status === 'READY' || a.status === 'ready',
+      (a: RawRecord) => PERSONAL_CONNECTED.has(String(a.status ?? a.state ?? '')),
     );
     integrations.push(blankIntegration('whatsapp', 'WhatsApp Personal', connected ? 'connected' : 'disconnected'));
   } catch (error) {
