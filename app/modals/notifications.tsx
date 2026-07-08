@@ -8,6 +8,7 @@ import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { useChatStore, type ChatChannel, type Conversation } from '@/src/store/chatStore';
+import { getFriendlyError } from '@/src/utils/errors';
 
 type NotificationItem = {
   id: string;
@@ -64,6 +65,7 @@ export default function NotificationsModal() {
   const stopConversationAutoSync = useChatStore((state) => state.stopConversationAutoSync);
   const markConversationRead = useChatStore((state) => state.markConversationRead);
   const [refreshing, setRefreshing] = useState(false);
+  const [highlightedUnread, setHighlightedUnread] = useState<Record<string, number>>({});
 
   useEffect(() => {
     try {
@@ -79,15 +81,38 @@ export default function NotificationsModal() {
   }, [fetchConversations, initializeRealtime, startConversationAutoSync, stopConversationAutoSync]);
 
   const notifications = useMemo(() => {
-    const ordered = [...conversations]
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    return [...conversations]
+      .filter((c) => {
+        const t = Date.parse(c.lastMessageAt || '');
+        return !Number.isNaN(t) && t >= cutoff;
+      })
       .sort((a, b) => Date.parse(b.lastMessageAt || '') - Date.parse(a.lastMessageAt || ''))
       .map(toNotification);
-    const unread = ordered.filter((item) => !item.read);
-    const recentRead = ordered.filter((item) => item.read).slice(0, Math.max(0, 12 - unread.length));
-    return [...unread, ...recentRead];
   }, [conversations]);
 
-  const unreadTotal = notifications.reduce((sum, item) => sum + item.unreadCount, 0);
+  // Mark all unread conversations as read when this screen is opened,
+  // but keep track of them locally so they stay visually highlighted until closed.
+  useEffect(() => {
+    let changed = false;
+    const updates: Record<string, number> = {};
+    const idsToMark: string[] = [];
+
+    notifications.forEach((n) => {
+      if (!n.read && !highlightedUnread[n.conversationId]) {
+        updates[n.conversationId] = n.unreadCount;
+        idsToMark.push(n.conversationId);
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      setHighlightedUnread((prev) => ({ ...prev, ...updates }));
+      idsToMark.forEach((id) => markConversationRead(id));
+    }
+  }, [notifications, highlightedUnread, markConversationRead]);
+
+  const unreadTotal = notifications.reduce((sum, item) => sum + Math.max(item.unreadCount, highlightedUnread[item.conversationId] || 0), 0);
   const loading = isLoadingConversations && !notifications.length;
 
   const refresh = async () => {
@@ -158,7 +183,7 @@ export default function NotificationsModal() {
         ) : error ? (
           <View style={[styles.errorState, { borderColor: appTheme.darkMode ? 'rgba(248, 113, 113, 0.38)' : Theme.colors.errorLight }]}>
             <Typography variant="bodySmall" color={appTheme.darkMode ? '#FCA5A5' : Theme.colors.error}>
-              {error}
+              {getFriendlyError(error)}
             </Typography>
           </View>
         ) : null}
@@ -173,40 +198,46 @@ export default function NotificationsModal() {
           </View>
         ) : null}
 
-        {notifications.map((notif) => (
-          <TouchableOpacity key={notif.id} activeOpacity={0.84} onPress={() => openNotification(notif)}>
-            <GlassCard
-              style={[
-                styles.notificationCard,
-                {
-                  backgroundColor: appTheme.surface,
-                  borderColor: notif.read ? appTheme.border : appTheme.primaryAccent,
-                },
-              ]}
-            >
-              <View style={[styles.iconContainer, { backgroundColor: appTheme.softSurface }]}>
-                {getIcon(notif.channel)}
-              </View>
-              <View style={styles.notifContent}>
-                <View style={styles.notifHeader}>
-                  <Typography variant="bodyLarge" color={appTheme.text} style={{ fontWeight: notif.read ? '500' : '700', flex: 1 }} numberOfLines={1}>
-                    {notif.title}
-                  </Typography>
-                  <Typography variant="caption" color={appTheme.muted}>{rel(notif.timestamp)}</Typography>
+        {notifications.map((notif) => {
+          const overrideUnreadCount = highlightedUnread[notif.conversationId] || 0;
+          const isUnread = !notif.read || overrideUnreadCount > 0;
+          const displayUnreadCount = Math.max(notif.unreadCount, overrideUnreadCount);
+
+          return (
+            <TouchableOpacity key={notif.id} activeOpacity={0.84} onPress={() => openNotification(notif)}>
+              <GlassCard
+                style={[
+                  styles.notificationCard,
+                  {
+                    backgroundColor: !isUnread ? appTheme.surface : (appTheme.darkMode ? 'rgba(129, 140, 248, 0.12)' : 'rgba(129, 140, 248, 0.08)'),
+                    borderColor: !isUnread ? appTheme.border : appTheme.primaryAccent,
+                  },
+                ]}
+              >
+                <View style={[styles.iconContainer, { backgroundColor: appTheme.softSurface }]}>
+                  {getIcon(notif.channel)}
                 </View>
-                <Typography variant="bodySmall" color={appTheme.muted} style={{ marginTop: 4 }} numberOfLines={2}>
-                  {notif.description}
-                </Typography>
-                {notif.unreadCount > 1 ? (
-                  <Typography variant="caption" color={appTheme.primaryAccent} style={styles.unreadCount}>
-                    {notif.unreadCount} unread messages
+                <View style={styles.notifContent}>
+                  <View style={styles.notifHeader}>
+                    <Typography variant="bodyLarge" color={appTheme.text} style={{ fontWeight: !isUnread ? '500' : '700', flex: 1 }} numberOfLines={1}>
+                      {notif.title}
+                    </Typography>
+                    <Typography variant="caption" color={appTheme.muted}>{rel(notif.timestamp)}</Typography>
+                  </View>
+                  <Typography variant="bodySmall" color={appTheme.muted} style={{ marginTop: 4 }} numberOfLines={2}>
+                    {notif.description}
                   </Typography>
-                ) : null}
-              </View>
-              {!notif.read && <View style={[styles.unreadDot, { backgroundColor: appTheme.primaryAccent }]} />}
-            </GlassCard>
-          </TouchableOpacity>
-        ))}
+                  {displayUnreadCount > 1 ? (
+                    <Typography variant="caption" color={appTheme.primaryAccent} style={styles.unreadCount}>
+                      {displayUnreadCount} unread messages
+                    </Typography>
+                  ) : null}
+                </View>
+                {isUnread && <View style={[styles.unreadDot, { backgroundColor: appTheme.primaryAccent }]} />}
+              </GlassCard>
+            </TouchableOpacity>
+          );
+        })}
       </ScrollView>
     </View>
   );

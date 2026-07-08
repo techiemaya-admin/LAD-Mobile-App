@@ -99,9 +99,9 @@ export default function SupportScreen() {
       >
         <View style={styles.header}>
           <View style={styles.headerText}>
-            <Typography variant="h2" style={styles.headerTitle} numberOfLines={2}>How can we help?</Typography>
+            <Typography variant="h1" style={styles.headerTitle} numberOfLines={2}>How can we help?</Typography>
             <Typography variant="bodyLarge" color={appTheme.muted} numberOfLines={3}>
-              Send a support request to the LAD backend or email the team directly.
+              Send a support request to our team or email the team directly.
             </Typography>
           </View>
           <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadSupport(true)} disabled={refreshing || loading}>
@@ -182,6 +182,9 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     marginBottom: Theme.spacing.sm,
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: '800',
   },
   refreshButton: {
     width: 42,

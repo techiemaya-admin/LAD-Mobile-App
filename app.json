@@ -22,7 +22,15 @@
             "edgeToEdgeEnabled": false,
             "softwareKeyboardLayoutMode": "resize",
             "predictiveBackGestureEnabled": false,
-            "package": "com.company.mrlad"
+            "package": "com.company.mrlad",
+            "permissions": [
+                "android.permission.ACCESS_COARSE_LOCATION",
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.RECORD_AUDIO",
+                "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.WRITE_EXTERNAL_STORAGE",
+                "android.permission.CAMERA"
+            ]
         },
         "web": {
             "output": "single",
@@ -40,6 +48,18 @@
                     "dark": {
                         "backgroundColor": "#79797A"
                     }
+                }
+            ],
+            [
+                "expo-location",
+                {
+                    "locationAlwaysAndWhenInUsePermission": "Allow Mr LAD to use your location to share it in conversations."
+                }
+            ],
+            [
+                "expo-av",
+                {
+                    "microphonePermission": "Allow Mr LAD to access your microphone to record voice notes."
                 }
             ]
         ],

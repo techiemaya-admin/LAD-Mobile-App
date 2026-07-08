@@ -165,13 +165,13 @@ export const isGenericCompanySearchQuery = (text: string) => {
 
 export const buildConfirmationMessage = (intent: LeadTargeting) => {
   const lines = ['Here is what I understood:'];
-  if (intent.job_titles?.length) lines.push(`Roles: ${intent.job_titles.join(', ')}`);
-  if (intent.industries?.length) lines.push(`Industries: ${intent.industries.join(', ')}`);
-  if (intent.company_names?.length) lines.push(`Companies: ${intent.company_names.join(', ')}`);
-  if (intent.locations?.length) lines.push(`Locations: ${intent.locations.join(', ')}`);
-  if (intent.keywords?.length) lines.push(`Keywords: ${intent.keywords.join(', ')}`);
-  if (intent.decision_maker_nationality?.length) lines.push(`Nationality: ${intent.decision_maker_nationality.join(', ')}`);
-  if (intent.company_size?.length) lines.push(`Company size: ${intent.company_size.join(', ')}`);
+  if (intent.job_titles?.length) lines.push(`**Roles:** ${intent.job_titles.join(', ')}`);
+  if (intent.industries?.length) lines.push(`**Industries:** ${intent.industries.join(', ')}`);
+  if (intent.company_names?.length) lines.push(`**Companies:** ${intent.company_names.join(', ')}`);
+  if (intent.locations?.length) lines.push(`**Locations:** ${intent.locations.join(', ')}`);
+  if (intent.keywords?.length) lines.push(`**Keywords:** ${intent.keywords.join(', ')}`);
+  if (intent.decision_maker_nationality?.length) lines.push(`**Nationality:** ${intent.decision_maker_nationality.join(', ')}`);
+  if (intent.company_size?.length) lines.push(`**Company size:** ${intent.company_size.join(', ')}`);
   lines.push('', 'Does this look right? Tap Yes to search, or tell me what to change.');
   return lines.join('\n');
 };

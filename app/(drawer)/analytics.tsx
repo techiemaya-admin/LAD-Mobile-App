@@ -83,7 +83,7 @@ export default function AnalyticsScreen() {
     >
       <View style={styles.header}>
         <View style={styles.headerText}>
-          <Typography variant="h1" numberOfLines={2}>Analytics</Typography>
+          <Typography variant="h1" style={styles.pageTitle} numberOfLines={2}>Analytics</Typography>
           <Typography variant="body" color={appTheme.muted} numberOfLines={2}>Analyze performance and engagement metrics across your workspace.</Typography>
         </View>
         <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadAnalytics(true)} disabled={refreshing || loading}>
@@ -179,6 +179,11 @@ const styles = StyleSheet.create({
   headerText: {
     flex: 1,
     minWidth: 0,
+  },
+  pageTitle: {
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: '800',
   },
   refreshButton: {
     width: 42,

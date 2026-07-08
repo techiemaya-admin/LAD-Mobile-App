@@ -14,32 +14,25 @@ export default function WorkspaceStackLayout() {
     <Stack
       screenOptions={{
         headerShown: true,
-        header: ({ navigation, options }) => (
+        header: () => (
           <View
             style={[
               styles.safeHeader,
               {
-                paddingTop: Math.max(insets.top, 24) + 8,
-                backgroundColor: appTheme.surface,
-                borderBottomColor: appTheme.border,
+                paddingTop: Math.max(insets.top, 10) + 6,
+                backgroundColor: appTheme.background,
               },
             ]}
           >
             <TouchableOpacity
-              style={styles.backButton}
+              style={[styles.backButton, { backgroundColor: appTheme.primarySoft }]}
               activeOpacity={0.72}
-              onPress={() => {
-                if (navigation.canGoBack()) {
-                  navigation.goBack();
-                  return;
-                }
-                router.replace('/(tabs)/profile' as never);
-              }}
+              onPress={() => router.replace('/(drawer)/settings' as never)}
             >
-              <ArrowLeft color={appTheme.text} size={24} />
+              <ArrowLeft color={appTheme.primaryAccent} size={14} />
             </TouchableOpacity>
-            <Text numberOfLines={1} style={[styles.headerTitle, { color: appTheme.text }]}>
-              {String(options.title || '')}
+            <Text numberOfLines={1} style={[styles.headerTitle, { color: appTheme.muted }]}>
+              BACK TO SETTINGS MENU
             </Text>
           </View>
         ),
@@ -53,31 +46,33 @@ export default function WorkspaceStackLayout() {
       <Stack.Screen name="settings" options={{ headerShown: false }} />
       <Stack.Screen name="business-profile" options={{ title: 'Business Profile' }} />
       <Stack.Screen name="integrations" options={{ title: 'Integrations' }} />
+      <Stack.Screen name="billing" options={{ title: 'Billing & Plans' }} />
+      <Stack.Screen name="support" options={{ title: 'Support' }} />
     </Stack>
   );
 }
 
 const styles = StyleSheet.create({
   safeHeader: {
-    minHeight: 86,
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Theme.spacing.md,
-    paddingBottom: Theme.spacing.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: Theme.spacing.xl,
+    paddingBottom: 4,
   },
   backButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: Theme.spacing.sm,
+    marginRight: 6,
   },
   headerTitle: {
     flex: 1,
     minWidth: 0,
-    fontSize: 20,
+    fontSize: 10,
     fontWeight: '800',
+    letterSpacing: 0,
   },
 });

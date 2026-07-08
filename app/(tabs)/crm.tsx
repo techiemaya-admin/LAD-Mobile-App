@@ -23,6 +23,7 @@ import {
   BriefcaseBusiness,
   Camera,
   Check,
+  ChevronDown,
   ChevronRight,
   Clock,
   Download,
@@ -39,6 +40,7 @@ import {
   Search,
   Settings2,
   ShieldMinus,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
   TrendingUp,
@@ -156,6 +158,33 @@ const TYPE_META: Record<string, { label: string; color: string; bg: string }> = 
   inbound: { label: 'Inbound', color: '#a16207', bg: '#fef3c7' },
 };
 
+const CHANNEL_FILTER_OPTS: Array<{ key: string; label: string }> = [
+  { key: 'all', label: 'All Channels' },
+  { key: 'linkedin', label: 'LinkedIn' },
+  { key: 'whatsapp', label: 'WhatsApp' },
+  { key: 'wapa', label: 'Personal WA' },
+  { key: 'email', label: 'Email' },
+  { key: 'voice', label: 'Voice' },
+  { key: 'instagram', label: 'Instagram' },
+];
+
+const TYPE_FILTER_OPTS: Array<{ key: string; label: string }> = [
+  { key: 'all', label: 'All Types' },
+  { key: 'prospect', label: 'Prospect' },
+  { key: 'lead', label: 'Lead' },
+  { key: 'client', label: 'Client' },
+  { key: 'imported', label: 'Imported' },
+  { key: 'inbound', label: 'Inbound' },
+];
+
+function getStageFilterOpts(view: VisibleView): Array<{ key: string; label: string }> {
+  const base = [{ key: 'all', label: 'All Stages' }];
+  if (view === 'prospects') return [...base, { key: 'new', label: 'New' }, { key: 'contacted', label: 'Contacted' }, { key: 'engaged', label: 'Engaged' }];
+  if (view === 'leads') return [...base, { key: 'contacted', label: 'Contacted' }, { key: 'engaged', label: 'Engaged' }, { key: 'qualified', label: 'Qualified' }, { key: 'sah', label: 'Handled' }, { key: 'won', label: 'Won' }, { key: 'lost', label: 'Lost' }];
+  if (view === 'clients') return [...base, { key: 'won', label: 'Won' }, { key: 'sah', label: 'Handled' }];
+  return [...base, { key: 'new', label: 'New' }, { key: 'contacted', label: 'Contacted' }, { key: 'engaged', label: 'Engaged' }, { key: 'qualified', label: 'Qualified' }, { key: 'sah', label: 'Handled' }, { key: 'won', label: 'Won' }, { key: 'lost', label: 'Lost' }];
+}
+
 function useCrmPalette() {
   const appTheme = useAppTheme();
   return useMemo(() => ({
@@ -269,6 +298,7 @@ export default function CRMScreen() {
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [stageFilter, setStageFilter] = useState<string>('all');
+  const [channelFilter, setChannelFilter] = useState<string>('all');
   const [loading, setLoading] = useState(() => !readScreenCache<CrmScreenCache>(CRM_CACHE_KEY));
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -359,10 +389,11 @@ export default function CRMScreen() {
       ].some((item) => String(item || '').toLowerCase().includes(normalized));
 
       const matchesType = view !== 'all' || typeFilter === 'all' || contact.type === typeFilter;
-      const matchesStage = view !== 'leads' || stageFilter === 'all' || contact.stage === stageFilter;
-      return matchesQuery && matchesType && matchesStage;
+      const matchesStage = stageFilter === 'all' || contact.stage === stageFilter;
+      const matchesChannel = channelFilter === 'all' || (contact.channels || []).some((ch: string) => ch === channelFilter);
+      return matchesQuery && matchesType && matchesStage && matchesChannel;
     });
-  }, [baseRows, query, stageFilter, typeFilter, view]);
+  }, [baseRows, query, stageFilter, typeFilter, channelFilter, view]);
 
   useEffect(() => {
     if (!selectedContact) return;
@@ -500,7 +531,7 @@ export default function CRMScreen() {
       return;
     }
 
-    await Share.share({ title: 'CRM prospects export', message: csv });
+    await Share.share({ message: csv, title: `CRM export ${new Date().toISOString().slice(0, 10)}` });
   };
 
   const lastSynced = lastSyncedAt
@@ -601,6 +632,8 @@ export default function CRMScreen() {
             setTypeFilter={setTypeFilter}
             stageFilter={stageFilter}
             setStageFilter={setStageFilter}
+            channelFilter={channelFilter}
+            setChannelFilter={setChannelFilter}
             onSelect={openProfile}
             onRemove={confirmRemove}
             onExport={() => void exportRows()}
@@ -648,8 +681,8 @@ function StatsCards({
   const isMobile = width < 720;
   const mobileBasis = '48%' as const;
   const cards: Array<{ key: Exclude<VisibleView, 'board'>; title: string; value: number; Icon: IconComponent; bg: string; color: string }> = [
-    { key: 'all', title: 'All Contacts', value: counts.all, Icon: Users, bg: '#dbeafe', color: T.primary },
-    { key: 'prospects', title: 'Prospects', value: counts.prospects, Icon: Sparkles, bg: '#e0e7ff', color: T.primary },
+    { key: 'all', title: 'All Contacts', value: counts.all, Icon: Users, bg: '#dbeafe', color: palette.primary },
+    { key: 'prospects', title: 'Prospects', value: counts.prospects, Icon: Sparkles, bg: '#e0e7ff', color: palette.primary },
     { key: 'leads', title: 'Leads', value: counts.leads, Icon: TrendingUp, bg: '#e0f2fe', color: '#0369a1' },
     { key: 'clients', title: 'Clients', value: counts.clients, Icon: BadgeCheck, bg: '#ecfdf5', color: '#059669' },
   ];
@@ -916,6 +949,8 @@ function ContactList({
   setTypeFilter,
   stageFilter,
   setStageFilter,
+  channelFilter,
+  setChannelFilter,
   onSelect,
   onRemove,
   onExport,
@@ -929,11 +964,15 @@ function ContactList({
   setTypeFilter: (value: string) => void;
   stageFilter: string;
   setStageFilter: (value: string) => void;
+  channelFilter: string;
+  setChannelFilter: (value: string) => void;
   onSelect: (contact: CrmContact) => void;
   onRemove: (contact: CrmContact) => void;
   onExport: () => void;
 }) {
   const palette = useCrmPalette();
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
   const title = view === 'all' ? 'All Contacts' : view === 'prospects' ? 'Prospects' : view === 'leads' ? 'Leads' : 'Clients';
   const subtitle = view === 'prospects'
     ? 'Top-of-funnel contacts sourced from Apollo, LinkedIn Sales Nav, imports, or referrals.'
@@ -942,6 +981,15 @@ function ContactList({
       : view === 'clients'
         ? `MRR: ${fmtCurrency(rows.reduce((sum, row) => sum + (row.mrr || 0), 0), 'USD')} - ARR: ${fmtCurrency(rows.reduce((sum, row) => sum + (row.mrr || 0), 0) * 12, 'USD')}`
         : 'Every contact in this tenant: imported, prospected, inbound, and customer.';
+
+  const stageOpts = getStageFilterOpts(view);
+  const activeCount = (stageFilter !== 'all' ? 1 : 0) + (typeFilter !== 'all' ? 1 : 0) + (channelFilter !== 'all' ? 1 : 0);
+
+  const clearAll = () => {
+    setStageFilter('all');
+    setTypeFilter('all');
+    setChannelFilter('all');
+  };
 
   return (
     <View style={[styles.tableShell, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
@@ -958,9 +1006,19 @@ function ContactList({
           <Typography variant="caption" color={palette.muted}>{subtitle}</Typography>
         </View>
         <View style={styles.tableActions}>
+          <TouchableOpacity
+            onPress={() => setFiltersOpen((o) => !o)}
+            activeOpacity={0.78}
+            style={[styles.tableActionButton, { borderColor: filtersOpen || activeCount > 0 ? T.primary : palette.border, backgroundColor: filtersOpen ? (palette.badgeBg) : 'transparent' }]}
+          >
+            <SlidersHorizontal color={filtersOpen || activeCount > 0 ? palette.primary : palette.primaryText} size={15} />
+            <Typography variant="caption" color={filtersOpen || activeCount > 0 ? palette.primary : palette.primaryText} style={styles.tableActionText}>
+              Filters{activeCount > 0 ? ` (${activeCount})` : ''}
+            </Typography>
+            <ChevronDown color={filtersOpen || activeCount > 0 ? palette.primary : palette.primaryText} size={13} style={{ transform: [{ rotate: filtersOpen ? '180deg' : '0deg' }] }} />
+          </TouchableOpacity>
           <TouchableOpacity onPress={onExport} activeOpacity={0.78} style={[styles.tableActionButton, { borderColor: palette.border }]}>
             <Download color={palette.primaryText} size={15} />
-            <Typography variant="caption" color={palette.primaryText} style={styles.tableActionText}>Export</Typography>
           </TouchableOpacity>
         </View>
       </View>
@@ -970,37 +1028,96 @@ function ContactList({
         <TextInput
           value={query}
           onChangeText={setQuery}
-          placeholder="Search..."
+          placeholder="Search contacts..."
           placeholderTextColor={palette.disabled}
           style={[styles.searchInput, WEB_INPUT_RESET, { color: palette.text }]}
         />
+        {query.length > 0 && (
+          <TouchableOpacity onPress={() => setQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <X color={palette.disabled} size={15} />
+          </TouchableOpacity>
+        )}
       </View>
 
-      {view === 'all' ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-          {['all', 'prospect', 'lead', 'client', 'imported', 'inbound'].map((type) => (
-            <FilterChip
-              key={type}
-              label={type === 'all' ? 'Type: All' : TYPE_META[type]?.label || titleCase(type)}
-              active={typeFilter === type}
-              onPress={() => setTypeFilter(type)}
-            />
-          ))}
-        </ScrollView>
-      ) : null}
+      {filtersOpen && (
+        <View style={[styles.filterPanel, { borderTopColor: palette.borderSoft, backgroundColor: palette.softSurface ?? palette.input }]}>
+          <View style={styles.filterPanelRow}>
+            <View style={styles.filterPanelSection}>
+              <Typography variant="caption" color={palette.muted} style={styles.filterSectionLabel}>STAGE</Typography>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipScroll}>
+                {stageOpts.map((opt) => (
+                  <FilterChip key={opt.key} label={opt.label} active={stageFilter === opt.key} onPress={() => setStageFilter(opt.key)} />
+                ))}
+              </ScrollView>
+            </View>
+          </View>
 
-      {view === 'leads' ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-          {['all', 'contacted', 'engaged', 'qualified', 'sah'].map((stage) => (
-            <FilterChip
-              key={stage}
-              label={stage === 'all' ? 'Stage: All' : STAGE_LABEL[stage] || titleCase(stage)}
-              active={stageFilter === stage}
-              onPress={() => setStageFilter(stage)}
-            />
-          ))}
+          {view === 'all' && (
+            <View style={[styles.filterPanelRow, { borderTopWidth: 1, borderTopColor: palette.borderSoft }]}>
+              <View style={styles.filterPanelSection}>
+                <Typography variant="caption" color={palette.muted} style={styles.filterSectionLabel}>TYPE</Typography>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipScroll}>
+                  {TYPE_FILTER_OPTS.map((opt) => (
+                    <FilterChip key={opt.key} label={opt.label} active={typeFilter === opt.key} onPress={() => setTypeFilter(opt.key)} />
+                  ))}
+                </ScrollView>
+              </View>
+            </View>
+          )}
+
+          <View style={[styles.filterPanelRow, { borderTopWidth: 1, borderTopColor: palette.borderSoft }]}>
+            <View style={styles.filterPanelSection}>
+              <Typography variant="caption" color={palette.muted} style={styles.filterSectionLabel}>CHANNEL</Typography>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipScroll}>
+                {CHANNEL_FILTER_OPTS.map((opt) => (
+                  <FilterChip key={opt.key} label={opt.label} active={channelFilter === opt.key} onPress={() => setChannelFilter(opt.key)} />
+                ))}
+              </ScrollView>
+            </View>
+          </View>
+
+          {activeCount > 0 && (
+            <View style={[styles.filterPanelRow, { borderTopWidth: 1, borderTopColor: palette.borderSoft, paddingVertical: 10 }]}>
+              <TouchableOpacity onPress={clearAll} activeOpacity={0.7} style={styles.clearAllBtn}>
+                <X color={T.danger} size={12} />
+                <Typography variant="caption" color={T.danger} style={{ fontWeight: '600' }}>Clear all filters</Typography>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      )}
+
+      {!filtersOpen && activeCount > 0 && (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.activeFilterBar}>
+          {stageFilter !== 'all' && (
+            <TouchableOpacity onPress={() => setStageFilter('all')} activeOpacity={0.7} style={[styles.activeFilterPill, { borderColor: palette.primary }]}>
+              <Typography variant="caption" color={palette.primary} style={{ fontWeight: '600' }}>
+                {STAGE_LABEL[stageFilter] || titleCase(stageFilter)}
+              </Typography>
+              <X color={palette.primary} size={11} />
+            </TouchableOpacity>
+          )}
+          {typeFilter !== 'all' && (
+            <TouchableOpacity onPress={() => setTypeFilter('all')} activeOpacity={0.7} style={[styles.activeFilterPill, { borderColor: palette.primary }]}>
+              <Typography variant="caption" color={palette.primary} style={{ fontWeight: '600' }}>
+                {TYPE_META[typeFilter]?.label || titleCase(typeFilter)}
+              </Typography>
+              <X color={palette.primary} size={11} />
+            </TouchableOpacity>
+          )}
+          {channelFilter !== 'all' && (
+            <TouchableOpacity onPress={() => setChannelFilter('all')} activeOpacity={0.7} style={[styles.activeFilterPill, { borderColor: palette.primary }]}>
+              <Typography variant="caption" color={palette.primary} style={{ fontWeight: '600' }}>
+                {CHANNELS[channelFilter]?.label || titleCase(channelFilter)}
+              </Typography>
+              <X color={palette.primary} size={11} />
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity onPress={clearAll} activeOpacity={0.7} style={styles.clearAllInline}>
+            <Typography variant="caption" color={T.danger} style={{ fontWeight: '600' }}>Clear</Typography>
+          </TouchableOpacity>
         </ScrollView>
-      ) : null}
+      )}
 
       <View style={styles.rowsWrap}>
         {rows.length ? rows.map((contact) => (
@@ -1144,7 +1261,7 @@ function ProspectDetailModal({
         <View style={[styles.detailSheet, { backgroundColor: palette.surface, borderColor: palette.border }]}>
           <View style={[styles.modalHeader, { borderBottomColor: palette.borderSoft }]}>
             <View style={styles.modalIdentity}>
-              <Avatar name={contact.name} initials={contact.initials} tone={STAGE_COLOR[contact.stage] || T.primary} size={42} />
+              <Avatar name={contact.name} initials={contact.initials} tone={STAGE_COLOR[contact.stage] || palette.primary} size={42} />
               <View style={styles.modalTitleBlock}>
                 <Typography variant="h3" color={palette.primaryText} numberOfLines={1}>{contact.name}</Typography>
                 <Typography variant="caption" color={palette.muted} numberOfLines={1}>
@@ -1306,6 +1423,7 @@ function ProspectDetailModal({
 }
 
 function Avatar({ name, initials, tone, size = 28 }: { name?: string; initials?: string; tone?: string; size?: number }) {
+  const palette = useCrmPalette();
   const display = initials || (name ? initialsOf(name) : '?');
   return (
     <View
@@ -1315,7 +1433,7 @@ function Avatar({ name, initials, tone, size = 28 }: { name?: string; initials?:
           width: size,
           height: size,
           borderRadius: size / 2,
-          backgroundColor: tone || T.primary,
+          backgroundColor: tone || palette.primary,
         },
       ]}
     >
@@ -1537,7 +1655,7 @@ function AssignMemberSheet({
                   style={[styles.assignMemberRow, { borderBottomColor: palette.borderSoft }]}
                 >
                   <View style={[styles.assignAvatar, { backgroundColor: T.badgeBg }]}>
-                    <Typography variant="caption" color={T.primary} style={styles.boldText}>
+                    <Typography variant="caption" color={palette.primary} style={styles.boldText}>
                       {initialsOf(member.name)}
                     </Typography>
                   </View>
@@ -2132,7 +2250,7 @@ const styles = StyleSheet.create({
   searchInput: {
     flex: 1,
     minHeight: 40,
-    color: T.primaryHead,
+    color: Theme.colors.text,
     fontSize: 14,
   },
   filterRow: {
@@ -2153,6 +2271,57 @@ const styles = StyleSheet.create({
   filterChipActive: {
     backgroundColor: T.primary,
     borderColor: T.primary,
+  },
+  filterPanel: {
+    borderTopWidth: 1,
+    marginTop: 2,
+  },
+  filterPanelRow: {
+    paddingHorizontal: Theme.spacing.lg,
+    paddingTop: 10,
+    paddingBottom: 6,
+  },
+  filterPanelSection: {
+    gap: 6,
+  },
+  filterSectionLabel: {
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    fontSize: 10,
+    marginBottom: 2,
+  },
+  filterChipScroll: {
+    gap: 6,
+    paddingRight: Theme.spacing.lg,
+  },
+  activeFilterBar: {
+    paddingHorizontal: Theme.spacing.lg,
+    paddingTop: 8,
+    paddingBottom: 4,
+    gap: 6,
+    alignItems: 'center',
+  },
+  activeFilterPill: {
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(99, 102, 241, 0.08)',
+  },
+  clearAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    alignSelf: 'flex-start',
+    paddingVertical: 2,
+  },
+  clearAllInline: {
+    height: 26,
+    paddingHorizontal: 10,
+    justifyContent: 'center',
   },
   rowsWrap: {
     padding: Theme.spacing.lg,

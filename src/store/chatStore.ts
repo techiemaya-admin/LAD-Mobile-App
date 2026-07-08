@@ -1,4 +1,7 @@
 import { create } from 'zustand';
+import { Platform } from 'react-native';
+
+import { getAuthToken } from '@/src/api';
 import { getSocket } from '@/src/services/socketService';
 import useAuthStore from '@/src/store/authStore';
 import {
@@ -20,6 +23,7 @@ import {
   getConnectedIntegrations,
 } from '@/src/services/integration.service';
 import { ConnectedIntegration } from '@/src/types/chat';
+import { getBroadcastGroups, getWhatsAppLabels, BroadcastGroup, WhatsAppLabel } from '@/src/services/chat.service';
 
 export type {
   ChatChannel,
@@ -33,6 +37,9 @@ interface ChatState {
   activeConversationId: string | null;
   activeMessages: ChatMessage[];
   messagesByConversationId: Record<string, ChatMessage[]>;
+  broadcastGroups: BroadcastGroup[];
+  whatsappLabels: WhatsAppLabel[];
+  isLoadingGroups: boolean;
   isLoadingConversations: boolean;
   isLoadingMoreConversations: boolean;
   isLoadingMessages: boolean;
@@ -53,6 +60,8 @@ interface ChatState {
   initializeRealtime: () => void;
   fetchConnectedIntegrations: () => Promise<void>;
   fetchConversations: (options?: { force?: boolean }) => Promise<void>;
+  fetchBroadcastGroups: () => Promise<void>;
+  fetchWhatsAppLabels: () => Promise<void>;
   fetchMoreConversations: () => Promise<void>;
   syncConversations: (options?: { silent?: boolean; force?: boolean }) => Promise<void>;
   startConversationAutoSync: () => void;
@@ -67,6 +76,7 @@ interface ChatState {
   clearActiveConversation: () => void;
   markConversationRead: (conversationId: string) => void;
   disposeRealtime: () => void;
+  reset: () => void;
 }
 
 type RawRecord = Record<string, any>;
@@ -205,7 +215,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeConversationId: null,
   activeMessages: [],
   messagesByConversationId: {},
-  isLoadingConversations: false,
+  isLoadingConversations: true,
   isLoadingMoreConversations: false,
   isLoadingMessages: false,
   isLoadingOlderMessages: false,
@@ -213,6 +223,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isUploadingAttachment: false,
   isSyncing: false,
   isLoadingIntegrations: false,
+  broadcastGroups: [],
+  whatsappLabels: [],
+  isLoadingGroups: false,
   error: null,
   syncError: null,
   lastSyncedAt: null,
@@ -272,7 +285,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const rawMessages = Array.isArray(payload.messages) ? payload.messages : [];
       const messages = rawMessages
         .map((message: RawRecord) => getMessagePayload({ ...payload, message }, conversationId))
-        .filter((message: ChatMessage) => message.content);
+        .filter((message: ChatMessage) => message.content || message.mediaId);
       const lastMessage = payload.lastMessage
         ? getMessagePayload({ ...payload, message: payload.lastMessage }, conversationId)
         : messages[messages.length - 1];
@@ -345,7 +358,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const hasMessage = state.activeMessages.some((item) => item.id === message.id);
         const shouldIncrementUnread = state.activeConversationId !== conversationId && !isOwnMessage;
 
-        const shouldAppendToActive = state.activeConversationId === conversationId && message.content && !hasMessage;
+        const shouldAppendToActive = state.activeConversationId === conversationId && (message.content || message.mediaId) && !hasMessage;
         const cachedMessages = state.messagesByConversationId[conversationId] ?? [];
         const cachedHasMessage = cachedMessages.some((item) => item.id === message.id);
 
@@ -365,7 +378,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ),
           activeMessages: shouldAppendToActive ? [...state.activeMessages, message] : state.activeMessages,
           messagesByConversationId:
-            message.content && !cachedHasMessage
+            (message.content || message.mediaId) && !cachedHasMessage
               ? { ...state.messagesByConversationId, [conversationId]: [...cachedMessages, message] }
               : state.messagesByConversationId,
         };
@@ -467,8 +480,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  fetchBroadcastGroups: async () => {
+    try {
+      set({ isLoadingGroups: true });
+      const groups = await getBroadcastGroups();
+      set({ broadcastGroups: groups, isLoadingGroups: false });
+    } catch (error) {
+      console.log('Error fetching broadcast groups:', error);
+      set({ isLoadingGroups: false });
+    }
+  },
+  
+  fetchWhatsAppLabels: async () => {
+    try {
+      const labels = await getWhatsAppLabels();
+      set({ whatsappLabels: labels });
+    } catch (error) {
+      console.log('Error fetching whatsapp labels:', error);
+    }
+  },
+
   fetchConnectedIntegrations: async () => {
-    set({ isLoadingIntegrations: true, syncError: null });
+    // Only show the loading spinner on the very first fetch.
+    // Background re-fetches (e.g. on every screen focus) should be silent so
+    // they don't trigger re-renders that reset the channel tabs or the FlatList.
+    const isFirstFetch = get().connectedIntegrations.length === 0;
+    if (isFirstFetch) {
+      set({ isLoadingIntegrations: true, syncError: null });
+    }
     try {
       const summary = await getConnectedIntegrations();
       set({
@@ -493,7 +532,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const conversations = await loadAllConversationPages();
       set((state) => ({
-        conversations: conversations.length ? conversations : state.conversations,
+        conversations: conversations.length
+          ? conversations.map((conv) =>
+              localReadOverrides.has(conv.id) ? { ...conv, unreadCount: 0 } : conv
+            )
+          : state.conversations,
         conversationPage: 1,
         hasMoreConversations: false,
         isLoadingConversations: false,
@@ -601,8 +644,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   fetchMoreConversations: async () => {
-    const { conversationPage, hasMoreConversations, isLoadingConversations, isLoadingMoreConversations } = get();
-    if (!hasMoreConversations || isLoadingConversations || isLoadingMoreConversations) {
+    const { conversationPage, hasMoreConversations, isLoadingConversations, isLoadingMoreConversations, isSyncing, conversations } = get();
+    // Also block while a full sync is running — prevents a race where the initial
+    // sync hasn't finished yet but onEndReached fires for a short list.
+    // Prevent fetching more if the list is completely empty.
+    if (!hasMoreConversations || isLoadingConversations || isLoadingMoreConversations || isSyncing || conversations.length === 0) {
       return;
     }
 
@@ -627,9 +673,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
 
+      // Set hasMoreConversations:false on error so a transient 503 or network
+      // failure does not cause an infinite retry loop (onEndReached keeps firing
+      // while hasMoreConversations is true, flooding the backend).
       set({
         error: getErrorMessage(error, 'Unable to load more conversations.'),
         isLoadingMoreConversations: false,
+        hasMoreConversations: false,
       });
     }
   },
@@ -816,51 +866,142 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    set({ isUploadingAttachment: true, error: null });
+    const optimisticMessageId = `optimistic-${Date.now()}`;
+    const optimisticMessage: ChatMessage = {
+      id: optimisticMessageId,
+      conversationId: activeConversationId,
+      content: caption || asset.name || 'Attachment',
+      sender: 'agent',
+      channel: get().conversations.find((c) => c.id === activeConversationId)?.channel || 'whatsapp',
+      status: 'sending',
+      createdAt: new Date().toISOString(),
+      mediaId: asset.uri, // Use local URI for preview
+      mediaType: asset.mimeType?.startsWith('image/') ? 'image' 
+               : asset.mimeType?.startsWith('video/') ? 'video' 
+               : asset.mimeType?.startsWith('audio/') ? 'audio' 
+               : 'document',
+      mediaMimeType: asset.mimeType ?? undefined,
+      mediaFilename: asset.name,
+      mediaCaption: caption,
+    };
+
+    set((state) => ({
+      isUploadingAttachment: true,
+      error: null,
+      activeMessages: [...state.activeMessages, optimisticMessage],
+    }));
 
     try {
-      const formData = new FormData();
-      formData.append('conversationId', activeConversationId);
-      formData.append('channel', get().conversations.find((c) => c.id === activeConversationId)?.channel || 'personal');
-      if (caption) {
-        formData.append('caption', caption);
-      }
+      const conversation = get().conversations.find((c) => c.id === activeConversationId);
+      const rawChannel = conversation?.waBackendChannel || 'personal';
+      const apiChannel = rawChannel === 'waba' ? 'waba' : 'personal';
+
       let mediaType = 'document';
       if (asset.mimeType?.startsWith('image/')) mediaType = 'image';
       else if (asset.mimeType?.startsWith('video/')) mediaType = 'video';
       else if (asset.mimeType?.startsWith('audio/')) mediaType = 'audio';
 
-      formData.append('type', mediaType);
-      let fileData: any = (asset as any).file;
+      if (Platform.OS !== 'web') {
+        // Native: XMLHttpRequest with { uri, name, type } FormData entry.
+        // React Native's OkHttp layer reads file:// URIs natively — no extra package needed.
+        // copyToCacheDirectory:true in the picker guarantees a file:// URI.
+        const token = await getAuthToken();
+        const wapaBase = (process.env.EXPO_PUBLIC_WAPA_SERVICE_URL || 'https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app').replace(/\/+$/, '');
+        const bniBase = (process.env.EXPO_PUBLIC_BNI_SERVICE_URL || process.env.EXPO_PUBLIC_WHATSAPP_API_URL || 'https://lad-waba-comms-develop-asia-160078175457.asia-south1.run.app').replace(/\/+$/, '');
+        const uploadBase = apiChannel === 'waba' ? bniBase : wapaBase;
+        const uploadPath = apiChannel === 'waba'
+          ? '/api/conversations/upload-media'
+          : '/api/whatsapp-conversations/conversations/upload-media';
+        const uploadUrl = `${uploadBase}${uploadPath}?channel=${apiChannel}`;
 
-      if (!fileData) {
-        if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-          // Web fallback: fetch blob from URI (blob: URL)
+        const nativeForm = new FormData();
+        nativeForm.append('file', {
+          uri: asset.uri,
+          name: asset.name || `attachment-${Date.now()}`,
+          type: asset.mimeType || 'application/octet-stream',
+        } as any);
+        nativeForm.append('conversationId', activeConversationId);
+        nativeForm.append('type', mediaType);
+        if (caption) nativeForm.append('caption', caption);
+
+        const uploadResult = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', uploadUrl);
+          if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+          xhr.timeout = 60000;
+          xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText });
+          xhr.onerror = () => reject(new Error('Network error during upload'));
+          xhr.ontimeout = () => reject(new Error('Upload timed out'));
+          xhr.send(nativeForm);
+        });
+
+        if (uploadResult.status >= 400) {
+          let errMsg = 'Failed to upload media.';
+          try {
+            const errBody = JSON.parse(uploadResult.body) as Record<string, unknown>;
+            errMsg = String(errBody.message || errBody.error || errMsg);
+          } catch {}
+          throw new Error(errMsg);
+        }
+
+        let uploadData: Record<string, unknown> = {};
+        try { uploadData = JSON.parse(uploadResult.body) as Record<string, unknown>; } catch {}
+        const nested = uploadData?.data as Record<string, unknown> | undefined;
+        const uploadedMediaId = String(nested?.media_id ?? uploadData?.media_id ?? uploadData?.url ?? '');
+
+        if (!uploadedMediaId) {
+          throw new Error('Media upload did not return a media ID.');
+        }
+
+        await sendChatMessage({
+          conversationId: activeConversationId,
+          message: caption || asset.name || 'Media',
+          content: uploadedMediaId,
+          role: 'user',
+          type: mediaType as any,
+          mediaId: uploadedMediaId,
+          mediaType: mediaType as any,
+          mediaFilename: asset.name || `attachment-${Date.now()}`,
+          mediaCaption: caption || undefined,
+        });
+      } else {
+        // Web: use FormData + fetch approach via the local proxy
+        const formData = new FormData();
+        formData.append('conversationId', activeConversationId);
+        formData.append('channel', apiChannel);
+        if (caption) formData.append('caption', caption);
+        formData.append('type', mediaType);
+
+        let fileData: any = (asset as any).file;
+        if (!fileData) {
           const response = await fetch(asset.uri);
           const blob = await response.blob();
-          fileData = new File([blob], asset.name || `attachment-${Date.now()}`, {
-            type: asset.mimeType || asset.type || 'application/octet-stream',
-          });
-        } else {
-          // React Native format
-          fileData = {
-            uri: asset.uri,
-            name: asset.name || `attachment-${Date.now()}`,
-            type: asset.mimeType || asset.type || 'application/octet-stream',
-          };
+          const effectiveMimeType = blob.type || asset.mimeType || asset.type || 'application/octet-stream';
+          let fileName = asset.name || `attachment-${Date.now()}`;
+          if (effectiveMimeType.startsWith('audio/webm') && fileName.endsWith('.m4a')) {
+            fileName = fileName.replace(/\.m4a$/, '.webm');
+          } else if (effectiveMimeType.startsWith('audio/ogg') && fileName.endsWith('.m4a')) {
+            fileName = fileName.replace(/\.m4a$/, '.ogg');
+          }
+          fileData = new File([blob], fileName, { type: effectiveMimeType });
         }
+        formData.append('file', fileData);
+        await sendMessageWithAttachment(formData);
       }
-
-      formData.append('file', fileData);
-
-      await sendMessageWithAttachment(formData);
-      set({ isUploadingAttachment: false });
+      
+      // Cleanup optimistic message (it will be replaced by socket message, but we also refresh)
+      set((state) => ({
+        isUploadingAttachment: false,
+        activeMessages: state.activeMessages.filter(m => m.id !== optimisticMessageId)
+      }));
+      
       await get().setActiveConversation(activeConversationId, { force: true });
     } catch (error) {
-      set({
+      set((state) => ({
         isUploadingAttachment: false,
+        activeMessages: state.activeMessages.filter(m => m.id !== optimisticMessageId),
         error: getErrorMessage(error, 'Attachment failed to upload.'),
-      });
+      }));
     }
   },
 
@@ -909,9 +1050,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       conversations: markConversationReadLocally(state.conversations, conversationId),
     }));
-    void markConversationReadRequest(conversationId)
-      .then(() => { localReadOverrides.delete(conversationId); })
-      .catch(() => undefined);
+    // Keep the local override until a new incoming message clears it — a 2xx here
+    // doesn't guarantee the backend actually reset unread_count (e.g. the request
+    // may have been served by a backend that ignores the read side effect).
+    void markConversationReadRequest(conversationId).catch(() => undefined);
   },
 
   disposeRealtime: () => {
@@ -929,5 +1071,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     socket.off('connect_error');
     get().stopConversationAutoSync();
     listenersAttached = false;
+  },
+
+  reset: () => {
+    localReadOverrides.clear();
+    set({
+      conversations: [],
+      activeConversationId: null,
+      activeMessages: [],
+      messagesByConversationId: {},
+      isLoadingConversations: true,
+      isLoadingMoreConversations: false,
+      isLoadingMessages: false,
+      isLoadingOlderMessages: false,
+      isSending: false,
+      isUploadingAttachment: false,
+      isSyncing: false,
+      isLoadingIntegrations: false,
+      error: null,
+      syncError: null,
+      lastSyncedAt: null,
+      conversationPage: 1,
+      hasMoreConversations: true,
+      hasOlderMessages: true,
+      connectedIntegrations: [],
+      typingConversationIds: {},
+    });
   },
 }));
