@@ -1145,8 +1145,8 @@ function HeroKpis({
               <Typography variant="h3" color={palette.text} style={styles.heroName} numberOfLines={2}>
                 {contact.name}
               </Typography>
-                <StatusPill label={stage.label} color={stage.color} />
-                {!phone && temperature ? <StatusPill label={temperature.label} color={temperature.color} /> : null}
+                <StatusPill label={stage.label} color={stage.color === T.primary ? palette.primary : stage.color} />
+                {!phone && temperature ? <StatusPill label={temperature.label} color={temperature.color === T.primary ? palette.primary : temperature.color} /> : null}
               </View>
             <Typography variant="bodySmall" color={palette.text} numberOfLines={phone ? 2 : 1}>
               {titleLine}
@@ -1307,9 +1307,9 @@ function KpiLast({ channel, occurredAt, direction }: { channel?: string | null; 
       </View>
       <View style={styles.lastTouchPill}>
         <View style={[styles.channelDotLarge, { backgroundColor: `${meta.color}1a` }]}>
-          <Icon color={meta.color} size={12} />
+          <Icon color={meta.color === T.primary ? palette.primary : meta.color} size={12} />
         </View>
-        <Typography variant="caption" color={meta.color} style={styles.boldText}>{meta.label}</Typography>
+        <Typography variant="caption" color={meta.color === T.primary ? palette.primary : meta.color} style={styles.boldText}>{meta.label}</Typography>
         <Typography variant="caption" color={palette.muted}>{direction === 'inbound' ? 'reply' : 'sent'}</Typography>
       </View>
     </View>
@@ -1510,16 +1510,16 @@ function WarmPathGraphSheet({
           <Svg width={graphWidth} height={GRAPH_H} viewBox={`0 0 ${graphWidth} ${GRAPH_H}`}>
             <Defs>
               <LinearGradient id="ladLinkProfile" x1="0" x2="1">
-                <Stop offset="0%" stopColor={T.primary} stopOpacity="0.7" />
-                <Stop offset="100%" stopColor={T.primary} stopOpacity="0.15" />
+                <Stop offset="0%" stopColor={palette.primary} stopOpacity="0.7" />
+                <Stop offset="100%" stopColor={palette.primary} stopOpacity="0.15" />
               </LinearGradient>
               <LinearGradient id="ladLinkBlueProfile" x1="0" x2="1">
                 <Stop offset="0%" stopColor={T.linkedin} stopOpacity="0.1" />
                 <Stop offset="100%" stopColor={T.linkedin} stopOpacity="0.6" />
               </LinearGradient>
               <RadialGradient id="ladHaloProfile" cx="50%" cy="50%" r="50%">
-                <Stop offset="0%" stopColor={T.primary} stopOpacity="0.18" />
-                <Stop offset="100%" stopColor={T.primary} stopOpacity="0" />
+                <Stop offset="0%" stopColor={palette.primary} stopOpacity="0.18" />
+                <Stop offset="100%" stopColor={palette.primary} stopOpacity="0" />
               </RadialGradient>
             </Defs>
             <Circle cx={graphCenter.x} cy={graphCenter.y} r={kidsExpanded ? 60 : 80} fill="url(#ladHaloProfile)" />
@@ -1572,7 +1572,7 @@ function WarmPathGraphSheet({
                   y={pos.y}
                   name={def.name}
                   sub={def.sub}
-                  color={def.color}
+                  color={def.color === T.primary ? palette.primary : def.color}
                   badge={def.badge}
                   big={Boolean(def.big)}
                   active={activeId === def.id}
@@ -1584,7 +1584,7 @@ function WarmPathGraphSheet({
               y={graphCenter.y}
               name={contact.name.split(' ')[0]}
               sub={kidsExpanded ? 'Click to collapse' : 'Click to expand'}
-              color={T.primary}
+              color={palette.primary}
               badge={contact.initials}
               big
               isProspect
@@ -1723,7 +1723,7 @@ function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact
             return (
               <View key={channel} style={styles.heatRow}>
                 <View style={styles.heatLabel}>
-                  <Icon color={meta.color} size={13} />
+                  <Icon color={meta.color === T.primary ? palette.primary : meta.color} size={13} />
                   <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText}>{meta.label}</Typography>
                 </View>
                 <View style={styles.heatCells}>
@@ -1844,7 +1844,7 @@ function IntentCard({ contact }: { contact: CrmContact }) {
           return (
             <View key={signal.id} style={[styles.intentCard, { borderColor: palette.border, backgroundColor: palette.pillBg }]}>
               <View style={[styles.intentIcon, { backgroundColor: `${meta.color}1a` }]}>
-                <Icon color={meta.color} size={17} />
+                <Icon color={meta.color === T.primary ? palette.primary : meta.color} size={17} />
               </View>
               <Typography variant="overline" color={palette.muted}>{meta.label}</Typography>
               <Typography variant="bodySmall" color={palette.primaryStrong} style={styles.boldText}>{meta.description(signal.payload)}</Typography>
@@ -1875,7 +1875,7 @@ function RecentActivityCard({ events }: { events: ProspectEvent[] }) {
           return (
             <View key={`${event.seq}-${event.occurred_at}`} style={styles.feedItem}>
               <View style={[styles.feedIcon, { backgroundColor: `${meta.color}1a` }]}>
-                <Icon color={meta.color} size={14} />
+                <Icon color={meta.color === T.primary ? palette.primary : meta.color} size={14} />
               </View>
               <View style={styles.feedCopy}>
                 <Typography variant="caption" color={palette.muted}>
@@ -2008,7 +2008,7 @@ function NextFollowupsCard({ followups, loading }: { followups: ProspectFollowup
             return (
               <View key={followup.id} style={styles.followupRow}>
                 <View style={[styles.followupIcon, { backgroundColor: palette.badgeBg }]}>
-                  <Icon color={meta.color} size={15} />
+                  <Icon color={meta.color === T.primary ? palette.primary : meta.color} size={15} />
                 </View>
                 <View style={styles.followupCopy}>
                   <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText} numberOfLines={1}>

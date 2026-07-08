@@ -14,7 +14,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, Building2, Check, ChevronDown, ExternalLink, History, ImageIcon, Mail, MessageSquare, Plus, RefreshCw, Search, Send, Sparkles, Star, UserPlus, UserRound, UsersRound, Zap } from 'lucide-react-native';
+import * as DocumentPicker from 'expo-document-picker';
+import { ArrowLeft, Building2, Check, ChevronDown, ExternalLink, History, Mail, MessageSquare, Plus, RefreshCw, Search, Send, Sparkles, Star, UserPlus, UserRound, UsersRound, Zap } from 'lucide-react-native';
 import Svg, { Path } from 'react-native-svg';
 import Theme from '@/constants/theme';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -43,11 +44,7 @@ const LANDING_SUGGESTIONS = [
   { label: 'VP of Sales in UK SaaS', value: 'Find VP of Sales in SaaS companies in UK', icon: 'people' },
   { label: 'Strengthen client relationships', value: 'Strengthen my relationship with existing clients', icon: 'relationship' },
   { label: ICP_LEADS_PROMPT, value: ICP_LEADS_PROMPT, icon: 'spark' },
-  { label: 'Media Generation', value: 'Help me create media for an outreach campaign', icon: 'image' },
 ];
-const LANDING_BACKGROUND = '#FBFCFF';
-const LANDING_SOFT = '#F6F8FF';
-const LANDING_BORDER = '#AFC2FF';
 
 const scoreTone = (score?: number) => {
   if ((score ?? 0) >= 70) return { bg: '#DCFCE7', fg: '#166534', label: 'Strong' };
@@ -75,8 +72,6 @@ const LandingSuggestionIcon = ({ icon, color }: { icon: string; color: string })
       return <UserPlus color={color} size={15} />;
     case 'spark':
       return <Sparkles color={color} size={15} />;
-    case 'image':
-      return <ImageIcon color={color} size={15} />;
     default:
       return <Search color={color} size={15} />;
   }
@@ -97,6 +92,7 @@ export default function AIAssistantScreen() {
   const [showLanding, setShowLanding] = useState(true);
   const [showLandingMenu, setShowLandingMenu] = useState(false);
   const [typedPlaceholder, setTypedPlaceholder] = useState('');
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const isCompact = width < 520;
   const horizontalPadding = isCompact ? Theme.spacing.md : Theme.spacing.xl;
   const contentMaxWidth = width >= 900 ? 860 : undefined;
@@ -153,7 +149,33 @@ export default function AIAssistantScreen() {
     if (!hasLeads && activePanel !== 'chat') {
       setActivePanel('chat');
     }
-  }, [activePanel, hasLeads]);
+  }, [hasLeads, activePanel]);
+
+  const handleImportLeads = async () => {
+    setAttachmentMenuOpen(false);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['text/csv', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/pdf', 'image/*'],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const file = result.assets[0];
+      assistant.submitMessage(`📁 Uploaded: ${file.name}`);
+    } catch (e) {
+      console.warn('Document picker error:', e);
+    }
+  };
+
+  const handleSelectContacts = () => {
+    setAttachmentMenuOpen(false);
+    assistant.submitMessage("I want to select contacts from my CRM.");
+    router.push('/(tabs)/crm');
+  };
+
+  const handleConnectTools = () => {
+    setAttachmentMenuOpen(false);
+    router.push('/(drawer)/integrations');
+  };
 
   const handleBack = () => {
     if (router.canGoBack()) {
@@ -161,6 +183,12 @@ export default function AIAssistantScreen() {
       return;
     }
     router.replace('/(tabs)');
+  };
+
+  // Back from the chat panel goes to the landing page without resetting the conversation.
+  const handleBackToLanding = () => {
+    setShowLanding(true);
+    setShowLandingMenu(false);
   };
 
   const handleReset = () => {
@@ -551,7 +579,7 @@ export default function AIAssistantScreen() {
               }}
               style={styles.flowStepWrap}
             >
-              <View style={[styles.flowCircle, { backgroundColor: getJourneyColor(step.channel) }]}>
+              <View style={[styles.flowCircle, { backgroundColor: getJourneyColor(step.channel, appTheme.darkMode) }]}>
                 {getJourneyIcon(step.channel, Theme.colors.surface)}
               </View>
               <Typography variant="caption" color={appTheme.text} style={styles.flowStepTitle}>{step.channel}</Typography>
@@ -641,7 +669,7 @@ export default function AIAssistantScreen() {
 
     return (
       <KeyboardAvoidingView
-        style={[styles.container, { backgroundColor: LANDING_BACKGROUND }]}
+        style={[styles.container, { backgroundColor: appTheme.background }]}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={0}
       >
@@ -752,21 +780,27 @@ export default function AIAssistantScreen() {
           </View>
 
           <View style={[styles.landingSuggestions, { width: landingContentWidth }]}>
-            {LANDING_SUGGESTIONS.map((suggestion) => (
-              <TouchableOpacity
-                key={suggestion.label}
-                activeOpacity={0.78}
-                onPress={() => handleLandingSuggestion(suggestion.value)}
-                style={[styles.landingSuggestionChip, { width: landingChipWidth, borderColor: LANDING_BORDER, backgroundColor: appTheme.surface }]}
-              >
-                <View style={styles.landingSuggestionIcon}>
-                  <LandingSuggestionIcon icon={suggestion.icon} color={appTheme.primaryAccent} />
-                </View>
-                <Typography variant="caption" color={appTheme.text} style={styles.landingSuggestionText}>
-                  {suggestion.label}
-                </Typography>
-              </TouchableOpacity>
-            ))}
+            {LANDING_SUGGESTIONS.map((suggestion, index) => {
+              const isLastOdd =
+                index === LANDING_SUGGESTIONS.length - 1 &&
+                LANDING_SUGGESTIONS.length % 2 !== 0;
+              const chipWidth = landingChipWidth === '100%' || isLastOdd ? '100%' : '48%';
+              return (
+                <TouchableOpacity
+                  key={suggestion.label}
+                  activeOpacity={0.78}
+                  onPress={() => handleLandingSuggestion(suggestion.value)}
+                  style={[styles.landingSuggestionChip, { width: chipWidth, borderColor: appTheme.borderSoft, backgroundColor: appTheme.surface }]}
+                >
+                  <View style={[styles.landingSuggestionIcon, { backgroundColor: appTheme.softSurface }]}>
+                    <LandingSuggestionIcon icon={suggestion.icon} color={appTheme.text} />
+                  </View>
+                  <Typography variant="caption" color={appTheme.text} style={styles.landingSuggestionText}>
+                    {suggestion.label}
+                  </Typography>
+                </TouchableOpacity>
+              );
+            })}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -780,7 +814,7 @@ export default function AIAssistantScreen() {
       keyboardVerticalOffset={0}
     >
       <View style={[styles.header, { paddingTop: insets.top + 10, paddingHorizontal: horizontalPadding, backgroundColor: appTheme.surface, borderBottomColor: appTheme.border }]}>
-        <TouchableOpacity onPress={handleBack} style={[styles.iconBtn, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]} activeOpacity={0.76}>
+        <TouchableOpacity onPress={handleBackToLanding} style={[styles.iconBtn, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]} activeOpacity={0.76}>
           <ArrowLeft color={appTheme.text} size={21} />
         </TouchableOpacity>
         <View style={styles.titleBlock}>
@@ -840,7 +874,7 @@ export default function AIAssistantScreen() {
           styles.messagesContent,
           {
             paddingHorizontal: horizontalPadding,
-            paddingBottom: hasLeads ? Math.max(insets.bottom + 116, 148) : Theme.spacing.xl,
+            paddingBottom: hasLeads ? Math.max(insets.bottom + 72, 88) : Theme.spacing.xl,
             maxWidth: contentMaxWidth,
             width: '100%',
             alignSelf: 'center',
@@ -884,37 +918,16 @@ export default function AIAssistantScreen() {
             ) : null}
 
             {assistant.leads.length ? (
-              <View style={styles.panel}>
-                <View style={styles.panelHeader}>
-                  <Typography variant="body" color={appTheme.text} style={styles.panelTitle}>Mobile lead results</Typography>
-                  <TouchableOpacity
-                    activeOpacity={0.76}
-                    onPress={() => setShowLeadResults((value) => !value)}
-                    style={[styles.resultsToggle, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
-                  >
-                    <Typography variant="caption" color={appTheme.muted} style={styles.resultsCount}>
-                      {assistant.totalResults || assistant.leads.length} total
-                    </Typography>
-                    <ChevronDown
-                      color={appTheme.muted}
-                      size={18}
-                      style={!showLeadResults ? undefined : styles.resultsChevronOpen}
-                    />
-                  </TouchableOpacity>
-                </View>
-                {showLeadResults ? (
-                  <>
-                    {assistant.leads.map(renderLeadCard)}
-                    <TouchableOpacity
-                      style={[styles.loadMoreBtn, { backgroundColor: appTheme.primaryAccent }]}
-                      disabled={assistant.isLoadingMore}
-                      onPress={() => void assistant.loadMore()}
-                    >
-                      {assistant.isLoadingMore ? <ActivityIndicator color={Theme.colors.surface} size="small" /> : <Typography variant="bodySmall" color={Theme.colors.surface} style={styles.loadMoreText}>Get More Leads</Typography>}
-                    </TouchableOpacity>
-                  </>
-                ) : null}
-              </View>
+              <TouchableOpacity
+                activeOpacity={0.78}
+                onPress={() => setActivePanel('leads')}
+                style={[styles.resultsToggle, { backgroundColor: appTheme.infoSoft, borderColor: appTheme.borderSoft, alignSelf: 'flex-start', marginTop: 8 }]}
+              >
+                <UsersRound color={appTheme.primaryAccent} size={14} />
+                <Typography variant="caption" color={appTheme.primaryAccent} style={{ fontWeight: '600' }}>
+                  {assistant.totalResults || assistant.leads.length} leads found — tap to view
+                </Typography>
+              </TouchableOpacity>
             ) : null}
 
             {assistant.outreachJourney.length ? (
@@ -967,13 +980,50 @@ export default function AIAssistantScreen() {
           styles.inputArea,
           {
             paddingHorizontal: horizontalPadding,
-            paddingBottom: hasLeads ? Math.max(insets.bottom + 84, 92) : Math.max(insets.bottom + 8, Theme.spacing.md),
+            paddingBottom: Math.max(insets.bottom + 8, Theme.spacing.md),
             backgroundColor: appTheme.surface,
             borderTopColor: appTheme.border,
           },
         ]}
       >
+        {attachmentMenuOpen && (
+          <View style={[styles.attachmentMenu, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
+            <TouchableOpacity style={styles.attachmentItem} onPress={handleImportLeads}>
+              <View style={[styles.attachmentIcon, { backgroundColor: '#dcfce7' }]}>
+                <UserPlus color="#16a34a" size={16} />
+              </View>
+              <View>
+                <Typography variant="bodySmall" color={appTheme.text}>Import leads</Typography>
+                <Typography variant="caption" color={appTheme.muted}>CSV, Excel, images, PDFs</Typography>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.attachmentItem} onPress={handleSelectContacts}>
+              <View style={[styles.attachmentIcon, { backgroundColor: '#dce3f5' }]}>
+                <UserRound color="#0b1957" size={16} />
+              </View>
+              <View>
+                <Typography variant="bodySmall" color={appTheme.text}>Select contacts</Typography>
+                <Typography variant="caption" color={appTheme.muted}>Pick from your CRM contacts</Typography>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.attachmentItem} onPress={handleConnectTools}>
+              <View style={[styles.attachmentIcon, { backgroundColor: '#fef3c7' }]}>
+                <Zap color="#d97706" size={16} />
+              </View>
+              <View>
+                <Typography variant="bodySmall" color={appTheme.text}>Connect tools</Typography>
+                <Typography variant="caption" color={appTheme.muted}>LinkedIn, HubSpot, Salesforce</Typography>
+              </View>
+            </TouchableOpacity>
+          </View>
+        )}
         <GlassCard style={[styles.inputCard, { maxWidth: contentMaxWidth, backgroundColor: appTheme.input, borderColor: appTheme.border }]}>
+          <TouchableOpacity
+            style={[styles.attachBtn, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]}
+            onPress={() => setAttachmentMenuOpen(!attachmentMenuOpen)}
+          >
+            <Plus color={appTheme.muted} size={18} />
+          </TouchableOpacity>
           <TextInput
             style={[styles.input, WEB_INPUT_RESET, { color: appTheme.text }]}
             placeholder="Ask for leads, company insights, or outreach workflow..."
@@ -1148,10 +1198,10 @@ function DiscoveryBackendChip({ name, rollup }: { name: string; rollup: SearchBa
   );
 }
 
-const getJourneyColor = (channel: string) => {
+const getJourneyColor = (channel: string, darkMode: boolean) => {
   const normalized = channel.toLowerCase();
   if (normalized.includes('whatsapp')) return '#25D366';
-  if (normalized.includes('email')) return '#0B1957';
+  if (normalized.includes('email')) return darkMode ? '#818CF8' : '#0B1957';
   if (normalized.includes('voice')) return '#F97316';
   return '#0A66C2';
 };
@@ -1169,7 +1219,6 @@ const styles = StyleSheet.create({
   landingContent: {
     flexGrow: 1,
     alignItems: 'center',
-    backgroundColor: LANDING_BACKGROUND,
   },
   landingTopBar: {
     flexDirection: 'row',
@@ -1225,7 +1274,7 @@ const styles = StyleSheet.create({
     paddingTop: 22,
     paddingBottom: Theme.spacing.md,
     marginTop: 28,
-    shadowColor: '#0B1957',
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.08,
     shadowRadius: 18,
@@ -1236,7 +1285,8 @@ const styles = StyleSheet.create({
     maxHeight: 128,
     fontSize: 19,
     lineHeight: 27,
-    textAlign: 'center',
+    textAlign: 'left',
+    textAlignVertical: 'top',
     paddingHorizontal: Theme.spacing.sm,
     paddingVertical: 0,
     fontWeight: '500',
@@ -1244,8 +1294,7 @@ const styles = StyleSheet.create({
   landingInputFooter: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
+    justifyContent: 'space-between',
     marginTop: Theme.spacing.md,
   },
   landingCircleBtn: {
@@ -1312,7 +1361,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Theme.spacing.sm,
-    shadowColor: '#0B1957',
+    shadowColor: '#000000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.04,
     shadowRadius: 10,
@@ -1322,7 +1371,6 @@ const styles = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: LANDING_SOFT,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1780,6 +1828,41 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     paddingHorizontal: Theme.spacing.sm,
     paddingVertical: Theme.spacing.sm,
+  },
+  attachBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    marginBottom: 2,
+  },
+  attachmentMenu: {
+    position: 'absolute',
+    bottom: '100%',
+    left: Theme.spacing.md,
+    marginBottom: Theme.spacing.sm,
+    borderRadius: Theme.radius.lg,
+    borderWidth: 1,
+    padding: Theme.spacing.sm,
+    ...Theme.shadows.medium,
+    width: 260,
+    zIndex: 50,
+  },
+  attachmentItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: Theme.spacing.sm,
+    gap: Theme.spacing.md,
+    borderRadius: Theme.radius.md,
+  },
+  attachmentIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   sendBtn: {
     width: 40,

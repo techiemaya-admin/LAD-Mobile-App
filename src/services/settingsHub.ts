@@ -475,8 +475,8 @@ const normalizeBillingOverview = (
   );
 
   return {
-    currentBalance: pickNumber(wallet.currentBalance, wallet.current_balance, wallet.balance, wallet.credits, walletRoot.credits),
-    availableBalance: pickNumber(wallet.availableBalance, wallet.available_balance, wallet.balance, walletRoot.balance, walletRoot.credits),
+    currentBalance: pickNumber(wallet.currentBalance, wallet.current_balance, wallet.credit_balance, wallet.credits_balance, wallet.balance, wallet.credits, walletData.balance, walletData.credits, walletRoot.credits),
+    availableBalance: pickNumber(wallet.availableBalance, wallet.available_balance, wallet.available_credits, wallet.credit_balance, wallet.balance, walletData.available_balance, walletData.balance, walletRoot.balance, walletRoot.credits),
     reservedBalance: pickNumber(wallet.reservedBalance, wallet.reserved_balance),
     currency: pickString(wallet.currency, walletRoot.currency, 'credits'),
     status: pickString(wallet.status, walletRoot.status, 'active'),
@@ -495,11 +495,22 @@ const normalizeCallsOverview = (payload: unknown) => {
   const logs = unwrapList(data.logs ?? data.calls ?? data);
   const summary = unwrapList(data.summary);
   const totalFromSummary = summary.reduce((sum, item) => sum + pickNumber(item.count, item.total, item.calls), 0);
-  const totalCalls = logs.length || totalFromSummary;
-  const answeredCalls = logs.filter((item) => {
+  // Prefer an explicit aggregate total from the API over the (paginated) logs array length.
+  const explicitTotal = pickNumber(
+    data.totalCalls, data.total_calls, data.total, data.count,
+    root.totalCalls, root.total_calls, root.total, root.count,
+  );
+  const totalCalls = explicitTotal || logs.length || totalFromSummary;
+  // Prefer an explicit answered count from the API over computing from the paginated logs.
+  const explicitAnswered = pickNumber(
+    data.answeredCalls, data.answered_calls, data.answered,
+    root.answeredCalls, root.answered_calls, root.answered,
+  );
+  const answeredFromLogs = logs.filter((item) => {
     const status = pickString(item.status, item.call_status, item.result).toLowerCase();
     return status.includes('answer') || status.includes('complete') || status.includes('ended') || status.includes('success');
   }).length;
+  const answeredCalls = explicitAnswered || answeredFromLogs;
 
   return {
     totalCalls,
@@ -551,6 +562,34 @@ export async function getTeamMembers(): Promise<TeamMember[]> {
   const response = await apiGet<unknown>('/api/users')
     .catch(() => apiGet<unknown>('/api/overview/users'));
   return unwrapList(response.data).map(normalizeTeamMember);
+}
+
+export type AddTeamMemberPayload = {
+  name: string;
+  email: string;
+  password?: string;
+  phoneNumber?: string;
+  role: string;
+  status: 'active' | 'inactive';
+  capabilities: string[];
+  maskPhoneNumber: boolean;
+};
+
+export async function addTeamMember(payload: AddTeamMemberPayload) {
+  const body = {
+    name: payload.name,
+    email: payload.email,
+    password: payload.password || undefined,
+    phone_number: payload.phoneNumber || undefined,
+    phoneNumber: payload.phoneNumber || undefined,
+    role: payload.role,
+    status: payload.status,
+    capabilities: payload.capabilities,
+    mask_phone_number: payload.maskPhoneNumber,
+    maskPhoneNumber: payload.maskPhoneNumber,
+  };
+  const response = await apiPost<unknown>('/api/users', body);
+  return normalizeTeamMember(asRecord(unwrapData(response.data)), 0);
 }
 
 export async function updateTeamMemberPhoneMask(userId: string, maskPhoneNumber: boolean) {

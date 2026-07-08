@@ -17,3 +17,7 @@ export function writeScreenCache<T>(key: string, value: T, updatedAt = Date.now(
 export function clearScreenCache(key: string) {
   screenCache.delete(key);
 }
+
+export function clearAllScreenCache() {
+  screenCache.clear();
+}

@@ -446,7 +446,7 @@ export async function fetchHomeDashboardData(): Promise<HomeDashboardData> {
       missedCalls,
       queuedCalls,
       teamMembers: teamMembers.length,
-      walletBalance: pickNumber(billing.availableBalance, billing.currentBalance),
+      walletBalance: billing.availableBalance || billing.currentBalance || 0,
       bookingsToday,
       voiceAgents: voiceAgents.length,
       voiceNumbers: voiceNumbers.length,

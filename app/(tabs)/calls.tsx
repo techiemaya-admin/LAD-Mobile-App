@@ -797,7 +797,7 @@ export default function CallsScreen() {
                   return;
                 }
                 if (!savedConfig) {
-                  setVoiceConfigError(syncError instanceof Error ? syncError.message : 'Could not sync backend starter prompt.');
+                  setVoiceConfigError(syncError instanceof Error ? syncError.message : 'Could not sync starter prompt.');
                 }
               });
           }
@@ -952,11 +952,11 @@ export default function CallsScreen() {
     if (!configuredAgentId || !normalizedFromNumber) {
       setCallFeedback({
         type: 'error',
-        text: voiceConfigError || 'Open Settings > AI Voice Calling, select one of the verified backend numbers, add content, and save it first.',
+        text: voiceConfigError || 'Open Settings > AI Voice Calling, select one of the verified numbers, add content, and save it first.',
       });
       Alert.alert(
-        'Voice call setup missing',
-        voiceConfigError || 'Open Settings > AI Voice Calling, select one of the verified backend numbers, add content, and save it first.',
+        'AI Agent unavailable',
+        voiceConfigError || 'Open Settings > AI Voice Calling, select one of the verified numbers, add content, and save it first.',
         [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Phone App', onPress: () => void handlePhoneFallback(normalizedNumber) },
@@ -1427,7 +1427,7 @@ export default function CallsScreen() {
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={[styles.dialSheetContent, isCompactDialer && styles.dialSheetContentCompact]}
             >
-              <View style={styles.dialSheetNumberRow}>
+              <View style={[styles.dialSheetNumberRow, { justifyContent: 'center' }]}>
                 <TextInput
                   value={dialNumber}
                   onChangeText={setDialNumber}
@@ -1437,24 +1437,16 @@ export default function CallsScreen() {
                   style={[
                     styles.dialSheetNumberInput,
                     isCompactDialer && styles.dialSheetNumberInputCompact,
-                    { color: appTheme.text },
+                    { color: appTheme.text, textAlign: 'center', paddingRight: 0 },
                     WEB_INPUT_RESET,
                   ]}
                 />
-                <TouchableOpacity
-                  style={[styles.dialSheetDeleteButton, { backgroundColor: appTheme.softSurface }]}
-                  onPress={deleteDialDigit}
-                  onLongPress={() => setDialNumber('')}
-                  activeOpacity={0.7}
-                >
-                  <Delete color={appTheme.muted} size={22} />
-                </TouchableOpacity>
               </View>
 
               <TextInput
                 value={dialContactName}
                 onChangeText={setDialContactName}
-                placeholder="Contact name"
+                placeholder="Add Contact Name"
                 placeholderTextColor={appTheme.disabled}
                 autoCapitalize="words"
                 style={[
@@ -1655,7 +1647,7 @@ export default function CallsScreen() {
                             {formatCallTypeLabel(historyCall.type)} - {formatCallStatusLabel(historyCall.callStatus)} - {historyCall.duration}s
                           </Typography>
                           <Typography variant="caption" color={appTheme.muted} numberOfLines={2}>
-                            {historyCall.aiSummary.callOutcome || historyCall.transcript || 'Backend record pending'}
+                            {historyCall.aiSummary.callOutcome || historyCall.transcript || 'Record pending'}
                           </Typography>
                         </View>
                       ))
@@ -1835,7 +1827,7 @@ export default function CallsScreen() {
         <View style={styles.modalBackdrop}>
           <View style={[styles.goalModalCard, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
             <View style={styles.goalModalHeader}>
-              <View>
+              <View style={{ flex: 1, paddingRight: 12 }}>
                 <Typography variant="h3" style={styles.goalModalTitle}>Create Call Goal</Typography>
                 <Typography variant="caption" color={appTheme.muted}>
                   Set the outcome this calling session should optimize for.
@@ -2334,15 +2326,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 0,
     borderWidth: 0,
     backgroundColor: 'transparent',
-    fontSize: 30,
-    lineHeight: 36,
+    fontSize: 28,
+    lineHeight: 34,
     fontWeight: '500',
     textAlign: 'center',
   },
   dialSheetNumberInputCompact: {
     minHeight: 44,
-    fontSize: 25,
-    lineHeight: 30,
+    fontSize: 24,
+    lineHeight: 28,
   },
   dialSheetContactInput: {
     minHeight: 44,
@@ -2372,23 +2364,23 @@ const styles = StyleSheet.create({
   },
   phoneKey: {
     width: '31%',
-    minHeight: 72,
+    minHeight: 60,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 26,
-  },
-  phoneKeyCompact: {
-    minHeight: 58,
     borderRadius: 22,
   },
+  phoneKeyCompact: {
+    minHeight: 50,
+    borderRadius: 18,
+  },
   phoneKeyDigit: {
-    fontSize: 42,
-    lineHeight: 48,
+    fontSize: 36,
+    lineHeight: 40,
     fontWeight: '300',
   },
   phoneKeyDigitCompact: {
-    fontSize: 34,
-    lineHeight: 38,
+    fontSize: 30,
+    lineHeight: 34,
   },
   phoneKeyLetters: {
     minHeight: 16,
@@ -2458,12 +2450,16 @@ const styles = StyleSheet.create({
     lineHeight: 26,
   },
   modalCloseButton: {
+    position: 'absolute',
+    top: Theme.spacing.lg,
+    right: Theme.spacing.lg,
     width: 36,
     height: 36,
     borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#F8FAFC',
+    zIndex: 10,
   },
   detailsModalCard: {
     maxHeight: '88%',

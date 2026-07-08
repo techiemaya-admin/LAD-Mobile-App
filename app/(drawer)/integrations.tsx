@@ -49,6 +49,7 @@ import {
 import Svg, { Polygon, Rect, Circle, Defs, RadialGradient, Stop, Path, LinearGradient } from 'react-native-svg';
 
 import Theme from '@/constants/theme';
+import { getFriendlyError } from '@/src/utils/errors';
 import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Badge } from '@/components/ui/Badge';
@@ -360,10 +361,10 @@ export default function IntegrationsScreen() {
   if (loading && activeView === 'grid') {
     return (
       <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
-        <View style={[styles.header, { marginTop: insets.top + Theme.spacing.md }]}>
-          <View style={styles.headerText}>
-            <Typography variant="h2" color={appTheme.text} style={{ fontWeight: '500' }}>Integrations</Typography>
-            <Typography variant="body" color={appTheme.muted}>
+        <View style={[styles.header, { marginTop: Theme.spacing.lg, alignItems: 'center' }]}>
+          <View style={[styles.headerText, { alignItems: 'center' }]}>
+            <Typography variant="h1" color={appTheme.text} style={[styles.pageTitle, { textAlign: 'center' }]}>Integrations</Typography>
+            <Typography variant="body" color={appTheme.muted} style={{ textAlign: 'center' }}>
               Connect your favorite applications for seamless, automated workflows.
             </Typography>
           </View>
@@ -424,8 +425,8 @@ export default function IntegrationsScreen() {
         return (
           <View style={styles.comingSoonContainer}>
             <TouchableOpacity style={styles.backLink} onPress={() => setActiveView('grid')}>
-              <ArrowLeft color={appTheme.text} size={16} />
-              <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+              <ArrowLeft color={appTheme.text} size={14} />
+              <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
             </TouchableOpacity>
             <GlassCard style={styles.detailCard}>
               <Typography variant="h3" style={{ marginBottom: 8 }}>Slack Integration</Typography>
@@ -437,8 +438,8 @@ export default function IntegrationsScreen() {
         return (
           <View style={styles.comingSoonContainer}>
             <TouchableOpacity style={styles.backLink} onPress={() => setActiveView('grid')}>
-              <ArrowLeft color={appTheme.text} size={16} />
-              <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+              <ArrowLeft color={appTheme.text} size={14} />
+              <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
             </TouchableOpacity>
             <GlassCard style={styles.detailCard}>
               <Typography variant="h3" style={{ marginBottom: 8 }}>Instagram Integration</Typography>
@@ -464,7 +465,7 @@ export default function IntegrationsScreen() {
     return (
       <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
         <ScrollView 
-          contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + Theme.spacing.md, paddingBottom: insets.bottom + 80 }]}
+          contentContainerStyle={[styles.scrollContent, { paddingTop: Theme.spacing.lg, paddingBottom: insets.bottom + 80 }]}
           showsVerticalScrollIndicator={false}
         >
           {renderDetailView()}
@@ -477,12 +478,12 @@ export default function IntegrationsScreen() {
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
       <ScrollView 
-        contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + Theme.spacing.md, paddingBottom: insets.bottom + 80 }]}
+        contentContainerStyle={[styles.scrollContent, { paddingTop: Theme.spacing.lg, paddingBottom: insets.bottom + 80 }]}
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
           <View style={styles.headerText}>
-            <Typography variant="h2" color={appTheme.text} style={{ fontWeight: '500' }}>Integrations</Typography>
+            <Typography variant="h1" color={appTheme.text} style={styles.pageTitle}>Integrations</Typography>
             <Typography variant="body" color={appTheme.muted}>
               Connect your favorite applications for seamless, automated workflows.
             </Typography>
@@ -503,7 +504,7 @@ export default function IntegrationsScreen() {
         {error && (
           <GlassCard style={[styles.messageCard, { borderColor: Theme.colors.error }]}>
             <AlertCircle color={Theme.colors.error} size={20} />
-            <Typography variant="bodySmall" color={Theme.colors.error} style={{ marginLeft: 8 }}>{error}</Typography>
+            <Typography variant="bodySmall" color={Theme.colors.error} style={{ marginLeft: 8 }}>{getFriendlyError(error)}</Typography>
           </GlassCard>
         )}
 
@@ -782,15 +783,15 @@ function WhatsAppAiDetailView({ onBack }: { onBack: () => void }) {
   return (
     <View style={styles.detailContainer}>
       <TouchableOpacity style={styles.backLink} onPress={onBack}>
-        <ArrowLeft color={appTheme.text} size={16} />
-        <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+        <ArrowLeft color={appTheme.text} size={14} />
+        <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
       </TouchableOpacity>
 
       <View style={styles.detailTitleRow}>
         <View style={styles.detailTitleWrapper}>
           <WhatsAppIcon size={32} />
           <View style={{ marginLeft: 12 }}>
-            <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '500' }}>WhatsApp API Agent</Typography>
+            <Typography variant="h3" color={appTheme.text} style={styles.detailHeading}>WhatsApp API Agent</Typography>
             <Typography variant="caption" color={appTheme.muted}>AI-powered Cloud API connections</Typography>
           </View>
         </View>
@@ -909,7 +910,7 @@ function WhatsAppAiDetailView({ onBack }: { onBack: () => void }) {
           {actionError && (
             <View style={[styles.errorBanner, { borderColor: Theme.colors.error }]}>
               <AlertCircle size={14} color={Theme.colors.error} />
-              <Typography variant="caption" color={Theme.colors.error} style={{ marginLeft: 6, flex: 1 }}>{actionError}</Typography>
+              <Typography variant="caption" color={Theme.colors.error} style={{ marginLeft: 6, flex: 1 }}>{getFriendlyError(actionError)}</Typography>
             </View>
           )}
 
@@ -1349,15 +1350,15 @@ function WhatsAppPersonalDetailView({ onBack }: { onBack: () => void }) {
   return (
     <View style={styles.detailContainer}>
       <TouchableOpacity style={styles.backLink} onPress={onBack}>
-        <ArrowLeft color={appTheme.text} size={16} />
-        <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+        <ArrowLeft color={appTheme.text} size={14} />
+        <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
       </TouchableOpacity>
 
       <View style={styles.detailTitleRow}>
         <View style={styles.detailTitleWrapper}>
           <WhatsAppIcon size={32} />
           <View style={{ marginLeft: 12 }}>
-            <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '500' }}>WhatsApp Personal</Typography>
+            <Typography variant="h3" color={appTheme.text} style={styles.detailHeading}>WhatsApp Personal</Typography>
             <Typography variant="caption" color={appTheme.muted}>WAPA QR Code Connection</Typography>
           </View>
         </View>
@@ -1394,7 +1395,7 @@ function WhatsAppPersonalDetailView({ onBack }: { onBack: () => void }) {
         {error && (
           <View style={[styles.errorBanner, { borderColor: Theme.colors.error }]}>
             <AlertCircle color={Theme.colors.error} size={16} />
-            <Typography variant="caption" color={Theme.colors.error} style={{ marginLeft: 8, flex: 1 }}>{error}</Typography>
+            <Typography variant="caption" color={Theme.colors.error} style={{ marginLeft: 8, flex: 1 }}>{getFriendlyError(error)}</Typography>
           </View>
         )}
 
@@ -1680,15 +1681,15 @@ function EmailOAuthDetailView({ provider, label, onBack }: { provider: 'google' 
   return (
     <View style={styles.detailContainer}>
       <TouchableOpacity style={styles.backLink} onPress={onBack}>
-        <ArrowLeft color={appTheme.text} size={16} />
-        <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+        <ArrowLeft color={appTheme.text} size={14} />
+        <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
       </TouchableOpacity>
 
       <View style={styles.detailTitleRow}>
         <View style={styles.detailTitleWrapper}>
           {provider === 'google' ? <GoogleIcon size={32} /> : <MicrosoftIcon size={32} />}
           <View style={{ marginLeft: 12 }}>
-            <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '500' }}>{label}</Typography>
+            <Typography variant="h3" color={appTheme.text} style={styles.detailHeading}>{label}</Typography>
             <Typography variant="caption" color={appTheme.muted}>Email &amp; Calendar Synchronization</Typography>
           </View>
         </View>
@@ -1874,15 +1875,15 @@ function CustomEmailDetailView({ onBack }: { onBack: () => void }) {
   return (
     <View style={styles.detailContainer}>
       <TouchableOpacity style={styles.backLink} onPress={onBack}>
-        <ArrowLeft color={appTheme.text} size={16} />
-        <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+        <ArrowLeft color={appTheme.text} size={14} />
+        <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
       </TouchableOpacity>
 
       <View style={styles.detailTitleRow}>
         <View style={styles.detailTitleWrapper}>
           <Server size={32} color="#059669" />
           <View style={{ marginLeft: 12 }}>
-            <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '500' }}>Custom Email (SMTP)</Typography>
+            <Typography variant="h3" color={appTheme.text} style={styles.detailHeading}>Custom Email (SMTP)</Typography>
             <Typography variant="caption" color={appTheme.muted}>Synchronize private/self-hosted webmails</Typography>
           </View>
         </View>
@@ -2183,15 +2184,15 @@ function GoHighLevelDetailView({ onBack }: { onBack: () => void }) {
   return (
     <View style={styles.detailContainer}>
       <TouchableOpacity style={styles.backLink} onPress={onBack}>
-        <ArrowLeft color={appTheme.text} size={16} />
-        <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+        <ArrowLeft color={appTheme.text} size={14} />
+        <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
       </TouchableOpacity>
 
       <View style={styles.detailTitleRow}>
         <View style={styles.detailTitleWrapper}>
           <GoHighLevelIcon size={32} />
           <View style={{ marginLeft: 12 }}>
-            <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '500' }}>GoHighLevel CRM</Typography>
+            <Typography variant="h3" color={appTheme.text} style={styles.detailHeading}>GoHighLevel CRM</Typography>
             <Typography variant="caption" color={appTheme.muted}>Sync leads and contacts pipeline</Typography>
           </View>
         </View>
@@ -2427,15 +2428,15 @@ function MindBodyDetailView({ onBack }: { onBack: () => void }) {
   return (
     <View style={styles.detailContainer}>
       <TouchableOpacity style={styles.backLink} onPress={onBack}>
-        <ArrowLeft color={appTheme.text} size={16} />
-        <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+        <ArrowLeft color={appTheme.text} size={14} />
+        <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
       </TouchableOpacity>
 
       <View style={styles.detailTitleRow}>
         <View style={styles.detailTitleWrapper}>
           <Typography variant="h3" style={{ fontSize: 32 }}>🧘</Typography>
           <View style={{ marginLeft: 12 }}>
-            <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '500' }}>MindBody</Typography>
+            <Typography variant="h3" color={appTheme.text} style={styles.detailHeading}>MindBody</Typography>
             <Typography variant="caption" color={appTheme.muted}>Automate class booking workflows</Typography>
           </View>
         </View>
@@ -2657,15 +2658,15 @@ function RouteMagicDetailView({ onBack }: { onBack: () => void }) {
   return (
     <View style={styles.detailContainer}>
       <TouchableOpacity style={styles.backLink} onPress={onBack}>
-        <ArrowLeft color={appTheme.text} size={16} />
-        <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+        <ArrowLeft color={appTheme.text} size={14} />
+        <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
       </TouchableOpacity>
 
       <View style={styles.detailTitleRow}>
         <View style={styles.detailTitleWrapper}>
           <Truck size={32} color="#047857" />
           <View style={{ marginLeft: 12 }}>
-            <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '500' }}>Route Magic</Typography>
+            <Typography variant="h3" color={appTheme.text} style={styles.detailHeading}>Route Magic</Typography>
             <Typography variant="caption" color={appTheme.muted}>Synchronize customer ERP profiles</Typography>
           </View>
         </View>
@@ -2877,15 +2878,15 @@ function LinkedInDetailView({ onBack }: { onBack: () => void }) {
   return (
     <View style={styles.detailContainer}>
       <TouchableOpacity style={styles.backLink} onPress={onBack}>
-        <ArrowLeft color={appTheme.text} size={16} />
-        <Typography variant="bodySmall" color={appTheme.text} style={{ marginLeft: 6 }}>Back to Integrations</Typography>
+        <ArrowLeft color={appTheme.text} size={14} />
+        <Typography variant="caption" color={appTheme.text} style={styles.backLinkText}>Back to Integrations</Typography>
       </TouchableOpacity>
 
       <View style={styles.detailTitleRow}>
         <View style={styles.detailTitleWrapper}>
           <LinkedInIcon size={32} />
           <View style={{ marginLeft: 12 }}>
-            <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '500' }}>LinkedIn</Typography>
+            <Typography variant="h3" color={appTheme.text} style={styles.detailHeading}>LinkedIn</Typography>
             <Typography variant="caption" color={appTheme.muted}>Sync leads and manage outreach outreach</Typography>
           </View>
         </View>
@@ -2989,6 +2990,11 @@ const styles = StyleSheet.create({
   },
   headerText: { 
     flex: 1 
+  },
+  pageTitle: {
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: '800',
   },
   refreshButton: { 
     width: 40, 
@@ -3101,7 +3107,21 @@ const styles = StyleSheet.create({
   backLink: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8
+    alignSelf: 'flex-start',
+    minHeight: 28,
+    marginBottom: 8,
+    paddingVertical: 3,
+  },
+  backLinkText: {
+    marginLeft: 5,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0,
+  },
+  detailHeading: {
+    fontSize: 24,
+    lineHeight: 30,
+    fontWeight: '800',
   },
   detailTitleRow: {
     flexDirection: 'row',

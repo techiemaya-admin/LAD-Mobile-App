@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Platform,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -36,6 +37,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
 const formatPercent = (value: number) => `${Math.round((value || 0) * 10) / 10}%`;
 const SETTINGS_CACHE_KEY = 'drawer.settings.hub';
+
+const DARK_LOGO_STYLE = Platform.OS === 'web'
+  ? ({ filter: 'brightness(0) invert(1)', opacity: 0.95 } as const)
+  : ({ tintColor: '#F8FAFC', opacity: 0.95 } as const);
 
 const lightPalette = {
   background: Theme.colors.background,
@@ -142,7 +147,7 @@ export default function SettingsScreen() {
         title: 'Campaigns',
         detail: `${formatNumber(stats?.totalLeads || 0)} leads across ${formatNumber(stats?.totalCampaigns || 0)} campaigns`,
         value: `${formatNumber(stats?.activeCampaigns || 0)} active`,
-        badge: 'Live backend',
+        badge: 'Live',
         route: '/(drawer)/campaigns',
         icon: <Megaphone color={palette.primary} size={22} />,
       },
@@ -200,7 +205,7 @@ export default function SettingsScreen() {
       >
         <View style={styles.headerRow}>
           <View style={styles.headerText}>
-            <Typography variant="h2" color={palette.text} numberOfLines={2}>Settings</Typography>
+            <Typography variant="h1" color={palette.text} style={styles.pageTitle} numberOfLines={2}>Settings</Typography>
             <Typography variant="bodySmall" color={palette.muted} numberOfLines={2}>Manage your workspace and profile settings</Typography>
           </View>
           <TouchableOpacity
@@ -279,7 +284,7 @@ export default function SettingsScreen() {
 
 
         <View style={styles.footerLogo}>
-          <Logo variant="code" width={150} height={50} />
+          <Logo variant="code" width={150} height={50} style={localDarkMode ? DARK_LOGO_STYLE : undefined} />
           <Typography variant="caption" color={palette.disabled} style={styles.versionText}>
             v1.0.0
           </Typography>
@@ -309,6 +314,11 @@ const styles = StyleSheet.create({
   headerText: {
     flex: 1,
     minWidth: 0,
+  },
+  pageTitle: {
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: '800',
   },
   refreshButton: {
     width: 42,

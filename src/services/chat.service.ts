@@ -71,6 +71,44 @@ export type ConversationNote = {
   raw?: RawRecord;
 };
 
+export type BroadcastGroup = {
+  id: string;
+  name: string;
+  memberCount: number;
+  avatar?: string;
+  color?: string;
+  description?: string | null;
+  waBackendChannel?: 'waba' | 'personal';
+};
+
+export type BroadcastGroupMember = {
+  id: string;
+  name?: string | null;
+  phone?: string | null;
+};
+
+export type BroadcastTemplateSendPayload = {
+  templateName: string;
+  languageCode?: string;
+  parameters?: string[];
+  nameFormat?: 'first' | 'full';
+};
+
+export type StarredMessageRecord = {
+  id: string;
+  conversationId: string;
+  content: string;
+  senderName?: string;
+  conversationName?: string;
+  createdAt?: string;
+};
+
+export type WhatsAppLabel = {
+  id: string;
+  name: string;
+  color?: string;
+};
+
 export type ConversationTeamMember = {
   id: string;
   name: string;
@@ -113,6 +151,9 @@ export type MindBodyPaymentVerification = {
 };
 
 const leadSourceMessagesByConversation = new Map<string, ChatMessage[]>();
+// Groups live on a per-channel service (waba → BNI, personal → WAPA); remember
+// where each group came from so update/delete/send hit the right backend.
+const broadcastGroupChannelById = new Map<string, 'waba' | 'personal'>();
 const bniMessagesByConversation = new Map<string, ChatMessage[]>();
 const bniConversationIds = new Set<string>();
 const bniChannelByConversation = new Map<string, WhatsAppBackendChannel>();
@@ -145,6 +186,26 @@ const getWhatsAppBackendChannels = async (): Promise<WhatsAppBackendChannel[]> =
   return preferred === 'waba' ? ['waba', 'personal'] : ['personal', 'waba'];
 };
 const canUseDirectBackendFallback = () => Platform.OS !== 'web' && trimUrl(API_URL) !== trimUrl(RESOLVED_API_URL);
+
+const WAPA_SERVICE_URL = (process.env.EXPO_PUBLIC_WAPA_SERVICE_URL || 'https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app').replace(/\/+$/, '');
+// LAD-Instagram-Comms (FastAPI) — mirrors lad-frontend-2's instagram-conversations proxy
+const INSTAGRAM_SERVICE_URL = (
+  process.env.EXPO_PUBLIC_INSTAGRAM_API_URL ||
+  process.env.NEXT_PUBLIC_INSTAGRAM_API_URL ||
+  'https://lad-instagram-comms-develop-asia-160078175457.asia-south1.run.app'
+).replace(/\/+$/, '');
+// BNI service serves WABA media at /api/conversations/media/{id} (path differs from WAPA endpoint)
+// Mirrors auth-proxy.js smart media routing: pwa_ → WAPA, everything else → BNI with rewritten path
+const buildMediaFetchUrl = (mediaId: string) => {
+  if (Platform.OS !== 'web') {
+    if (mediaId.startsWith('pwa_')) {
+      return `${WAPA_SERVICE_URL}/api/whatsapp-conversations/conversations/media/${mediaId}`;
+    }
+    // WABA: BNI service with rewritten path
+    return `${BNI_SERVICE_URL.replace(/\/+$/, '')}/api/conversations/media/${mediaId}`;
+  }
+  return buildApiUrl(`/api/whatsapp-conversations/conversations/media/${mediaId}`, RESOLVED_API_URL);
+};
 
 const buildDirectApiUrl = (path: string, options?: { params?: Record<string, unknown> }) => {
   const url = new URL(buildApiUrl(path, API_URL));
@@ -375,7 +436,11 @@ const bniRequest = async (
       ? buildExternalUrl(WEB_API_URL, getBniWebProxyPath(path), { params: { ...options?.params, channel: backendChannel } })
       : backendChannel === 'waba'
         ? buildExternalUrl(BNI_SERVICE_URL, path, options)
-        : buildExternalUrl(API_URL, `/api/${backendChannel === 'linkedin' ? 'linkedin-conversations' : 'whatsapp-conversations'}${path.replace(/^\/api/, '')}`, options);
+        : backendChannel === 'linkedin'
+          ? buildExternalUrl(API_URL, `/api/linkedin-conversations${path.replace(/^\/api/, '')}`, options)
+          // Personal WhatsApp lives on the WAPA service post-Phase 5 (mirrors
+          // lad-frontend-2's python-proxy channel routing) — not the main backend.
+          : buildExternalUrl(WAPA_SERVICE_URL, `/api/whatsapp-conversations${path.replace(/^\/api/, '')}`, options);
 
   const response = await fetch(requestUrl, {
     method,
@@ -403,6 +468,118 @@ const bniRequest = async (
 
   if (isRecord(payload) && payload.success === false && (payload.error || payload.message || payload.detail)) {
     throw new Error(String(payload.error || payload.message || payload.detail));
+  }
+
+  return payload;
+};
+
+// Email contacts/messages live on the WABA (BNI) service under /api/email/*
+// (mirrors lad-frontend-2's email-conversations proxy). On web the auth-proxy
+// rewrites /api/email-conversations/* → BNI /api/email/*; on native we call
+// the BNI service directly with the same auth + tenant headers.
+const emailCommsRequest = async (
+  method: string,
+  path: string,
+  body?: unknown,
+  options?: { params?: Record<string, unknown> },
+) => {
+  if (Platform.OS === 'web') {
+    const webPath = `/api/email-conversations${path}`;
+    const response = method === 'GET'
+      ? await apiGet(webPath, options)
+      : await apiPost(webPath, body, options);
+    return response.data;
+  }
+
+  const token = await getAuthToken();
+  const tenantId = await getEffectiveTenantId(token);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  if (tenantId) {
+    headers['X-Tenant-ID'] = tenantId;
+  }
+
+  const response = await fetch(buildExternalUrl(BNI_SERVICE_URL, `/api/email${path}`, options), {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const contentType = response.headers.get('content-type') || '';
+  const payload = contentType.includes('application/json')
+    ? await response.json().catch(() => null)
+    : await response.text().catch(() => null);
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      await expireAuthSession();
+    }
+
+    const message =
+      isRecord(payload) && (payload.message || payload.error || payload.detail)
+        ? String(payload.message || payload.error || payload.detail)
+        : `HTTP ${response.status}: ${response.statusText}`;
+    throw new Error(message);
+  }
+
+  return payload;
+};
+
+// Instagram conversations live on the standalone LAD-Instagram-Comms service
+// (mirrors lad-frontend-2's instagram-conversations catch-all proxy). On web the
+// auth-proxy rewrites /api/instagram-conversations/* → Instagram service /api/*;
+// on native we call the service directly.
+const instagramRequest = async (
+  method: string,
+  path: string,
+  body?: unknown,
+  options?: { params?: Record<string, unknown> },
+) => {
+  if (Platform.OS === 'web') {
+    const webPath = `/api/instagram-conversations${path}`;
+    const response = method === 'GET'
+      ? await apiGet(webPath, options)
+      : await apiPost(webPath, body, options);
+    return response.data;
+  }
+
+  const token = await getAuthToken();
+  const tenantId = await getEffectiveTenantId(token);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  if (tenantId) {
+    headers['X-Tenant-ID'] = tenantId;
+  }
+
+  const response = await fetch(buildExternalUrl(INSTAGRAM_SERVICE_URL, `/api${path}`, options), {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const contentType = response.headers.get('content-type') || '';
+  const payload = contentType.includes('application/json')
+    ? await response.json().catch(() => null)
+    : await response.text().catch(() => null);
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      await expireAuthSession();
+    }
+
+    const message =
+      isRecord(payload) && (payload.message || payload.error || payload.detail)
+        ? String(payload.message || payload.error || payload.detail)
+        : `HTTP ${response.status}: ${response.statusText}`;
+    throw new Error(message);
   }
 
   return payload;
@@ -906,6 +1083,39 @@ const parseMetadata = (value: unknown): RawRecord => {
   return {};
 };
 
+// Known WhatsApp placeholder texts for media messages (the text sent when no caption)
+const WA_MEDIA_PLACEHOLDERS = new Set([
+  '\u{1F4F7} Photo', '\u{1F4F8} Photo', 'Photo',
+  '\u{1F3A5} Video', 'Video',
+  '\u{1F3B5} Audio', 'Audio',
+  '\u{1F4C4} Document', 'Document',
+  '\u{1F3A4} Voice message', 'Voice message',
+  '\u{1F4CD} Location', 'Location',
+  '\u{1F4CE} Attachment', 'Attachment',
+  '\u{1F4F9} Video',
+  'image', 'video', 'audio', 'document',
+]);
+
+const isWaMediaPlaceholder = (text: string, mediaType?: string): boolean => {
+  const trimmed = text.trim();
+  if (WA_MEDIA_PLACEHOLDERS.has(trimmed)) return true;
+  // Also catch patterns like "📷 Photo" from any emoji prefix
+  if (/^[\u{1F300}-\u{1FFFF}\u{2600}-\u{27FF}]\s/u.test(trimmed)) return true;
+  // If the type is a media type and content is very short (likely a placeholder)
+  if (mediaType && ['image', 'video', 'audio', 'document'].includes(mediaType) && trimmed.length < 30) return true;
+  return false;
+};
+
+// Convert media filenames used as last-message previews into readable labels
+const normalizeLastMessagePreview = (text: string): string => {
+  const trimmed = text.trim();
+  if (/\.(jpe?g|png|gif|webp|heic|bmp|tiff?)$/i.test(trimmed)) return '📷 Photo';
+  if (/\.(mp4|mov|avi|mkv|webm|3gp)$/i.test(trimmed)) return '🎥 Video';
+  if (/\.(mp3|ogg|m4a|aac|wav|opus)$/i.test(trimmed)) return '🎵 Audio';
+  if (/\.(pdf|docx?|xlsx?|pptx?|txt|csv)$/i.test(trimmed)) return '📄 Document';
+  return trimmed;
+};
+
 const normalizeBniMessage = (item: ApiMessage | RawRecord, fallbackConversationId: string): ChatMessage => {
   const metadata = parseMetadata(item.metadata);
   const rawRole = item.role ?? item.sender ?? item.direction ?? metadata.sender_type;
@@ -923,10 +1133,43 @@ const normalizeBniMessage = (item: ApiMessage | RawRecord, fallbackConversationI
     metadata.human_agent_name ??
     (isOutgoing ? 'Agent' : 'Lead');
 
+  // Extract media info (same fields as normalizeMessage)
+  const rawType = String(item.type ?? item.message_type ?? metadata.message_type ?? metadata.media_type ?? item.mediaType ?? item.media_type ?? '').toLowerCase();
+  const inferredMediaType = rawType === 'image' || rawType === 'video' || rawType === 'audio' || rawType === 'document' ? rawType : undefined;
+  let mediaId = metadata.media_id ?? item.media_id ?? item.mediaId ?? item.file_url ?? item.url ?? metadata.url;
+  const rawContent = String(item.content ?? item.text ?? item.body ?? item.message ?? item.caption ?? '');
+
+  if (!mediaId && inferredMediaType && rawContent.startsWith('http')) {
+    mediaId = rawContent;
+  }
+
+  const mediaMimeType = metadata.mime_type ?? item.mime_type ?? item.content_type ?? item.media_mime_type
+    ? String(metadata.mime_type ?? item.mime_type ?? item.content_type ?? item.media_mime_type)
+    : undefined;
+  const mediaFilename = metadata.filename ?? item.filename ?? item.media_filename ?? item.mediaFilename
+    ? String(metadata.filename ?? item.filename ?? item.media_filename ?? item.mediaFilename)
+    : undefined;
+  const mediaCaption = metadata.caption ?? item.caption ?? item.media_caption ?? item.mediaCaption
+    ? String(metadata.caption ?? item.caption ?? item.media_caption ?? item.mediaCaption)
+    : undefined;
+
+  // Build attachments list from attachments array + mediaId
+  const atts = Array.isArray(item.attachments) ? [...item.attachments] : [];
+  if (mediaId) {
+    const url = String(mediaId);
+    const typeStr = inferredMediaType ?? 'document';
+    atts.push({
+      id: url,
+      url: url.startsWith('http') ? url : buildMediaFetchUrl(url),
+      type: typeStr === 'image' ? 'image' : typeStr === 'video' ? 'video' : 'document',
+      name: String(mediaFilename ?? metadata.filename ?? 'Attachment'),
+    });
+  }
+
   return {
     id: String(item.id ?? item._id ?? item.clientId ?? `${fallbackConversationId}-${Date.now()}-${Math.random()}`),
     conversationId: String(item.conversationId ?? item.conversation_id ?? fallbackConversationId),
-    content: String(item.content ?? item.text ?? item.body ?? item.message ?? item.caption ?? ''),
+    content: rawContent,
     sender: rawRole === 'system' ? 'system' : isOutgoing ? 'agent' : 'lead',
     channel: normalizeBniChannel(item.channel ?? item.source ?? item.platform),
     status: normalizeStatus(item.message_status ?? item.status ?? metadata.delivery_status ?? item.delivery_status),
@@ -935,7 +1178,12 @@ const normalizeBniMessage = (item: ApiMessage | RawRecord, fallbackConversationI
       ? String(item.humanAgentId ?? item.human_agent_id ?? metadata.human_agent_id)
       : undefined,
     senderName: senderName ? String(senderName) : undefined,
-    attachments: Array.isArray(item.attachments) ? item.attachments : undefined,
+    mediaId: mediaId ? String(mediaId) : undefined,
+    mediaType: inferredMediaType,
+    mediaMimeType,
+    mediaFilename,
+    mediaCaption,
+    attachments: atts.length ? atts : undefined,
   };
 };
 
@@ -968,7 +1216,7 @@ const normalizeBniConversation = (item: RawRecord, backendChannel?: WhatsAppBack
     id,
     name: String(name),
     channel: normalizeBniChannel(item.lead_channel ?? item.channel ?? item.source ?? item.platform),
-    lastMessage: String(lastMessage || inlineMessages[inlineMessages.length - 1]?.content || 'No messages yet'),
+    lastMessage: normalizeLastMessagePreview(String(lastMessage || inlineMessages[inlineMessages.length - 1]?.content || 'No messages yet')),
     lastMessageAt: asDateString(
       item.last_message_at ??
         item.updated_at ??
@@ -1046,24 +1294,39 @@ const normalizeLinkedInConversation = (item: RawRecord): ChatConversation | null
   };
 };
 
+// Convert an HTML email body to readable plain text. Paragraph/line-break tags
+// become newlines (collapsing everything to one line made real emails unreadable),
+// list items get bullets, and common entities are decoded.
 const stripHtml = (value: unknown) =>
   String(value ?? '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<head[\s\S]*?<\/head>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|table|h[1-6]|li|blockquote)>/gi, '\n')
+    .replace(/<li[^>]*>/gi, '• ')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ ?\n ?/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 
 const normalizeEmailMessage = (item: ApiMessage | RawRecord, fallbackConversationId: string): ChatMessage => {
   const isOutgoing = item.direction === 'outbound' || item.isOutgoing === true || item.role === 'assistant';
-  const body = stripHtml(item.preview_text ?? item.body_html ?? item.body ?? item.content ?? item.message);
+  const body = stripHtml(item.body_html ?? item.body ?? item.content ?? item.message ?? item.preview_text);
   const subject = String(item.subject ?? '').trim();
-  const content = [subject, body].filter(Boolean).join(subject && body ? '\n' : '');
 
   return {
     id: String(item.id ?? item._id ?? item.clientId ?? `${fallbackConversationId}-${Date.now()}-${Math.random()}`),
     conversationId: fallbackConversationId,
-    content: content || 'Email message',
+    content: body || subject || 'Email message',
+    subject: subject || undefined,
     sender: isOutgoing ? 'agent' : 'lead',
     channel: 'email',
     status: normalizeStatus(item.status ?? item.delivery_status ?? item.message_status),
@@ -1204,13 +1467,13 @@ const getConversationsFromLinkedInSource = async (params: ConversationPageParams
 };
 
 const getConversationsFromEmailSource = async (params: ConversationPageParams = {}) => {
-  const response = await apiGet('/api/email-conversations/contacts', {
+  const payload = await emailCommsRequest('GET', '/contacts', undefined, {
     params: {
       limit: params.limit ?? 500,
       ...(params.search ? { search: params.search } : {}),
     },
   });
-  const conversations = getArrayPayload(response.data, ['data', 'contacts', 'items', 'results'])
+  const conversations = getArrayPayload(payload, ['data', 'contacts', 'items', 'results'])
     .filter(isRecord)
     .map((item) => normalizeEmailContactConversation(item))
     .filter(Boolean) as ChatConversation[];
@@ -1266,13 +1529,13 @@ const normalizeInstagramMessage = (item: ApiMessage | RawRecord, fallbackConvers
 };
 
 const getConversationsFromInstagramSource = async (params: ConversationPageParams = {}) => {
-  const response = await apiGet('/api/instagram-conversations/conversations', {
+  const payload = await instagramRequest('GET', '/conversations', undefined, {
     params: {
       limit: params.limit ?? 100,
       ...(params.search ? { search: params.search } : {}),
     },
   });
-  const conversations = getArrayPayload(response.data, ['data', 'conversations', 'items', 'results'])
+  const conversations = getArrayPayload(payload, ['data', 'conversations', 'items', 'results'])
     .filter(isRecord)
     .map((item) => normalizeInstagramConversation(item))
     .filter(Boolean) as ChatConversation[];
@@ -1292,7 +1555,7 @@ const getMessagesFromBniSource = async (conversationId: string, page = 1, limit 
   });
   const messages = getArrayPayload(payload, ['data', 'messages', 'items', 'results'])
     .map((item) => normalizeBniMessage(item, conversationId))
-    .filter((message) => message.content);
+    .filter((message) => message.content || message.mediaId);
 
   if (messages.length) {
     bniMessagesByConversation.set(conversationId, messages);
@@ -1311,30 +1574,34 @@ const getMessagesFromLinkedInSource = async (conversationId: string, page = 1, l
   });
   const messages = getArrayPayload(payload, ['data', 'messages', 'items', 'results'])
     .map((item) => normalizeLinkedInMessage(item, conversationId))
-    .filter((message) => message.content);
+    .filter((message) => message.content || message.mediaId);
 
   return messages;
 };
 
 const getMessagesFromEmailSource = async (conversationId: string) => {
   const contactId = emailContactIdsByConversation.get(conversationId) ?? conversationId.replace(/^email:/, '');
-  const response = await apiGet('/api/email-conversations/messages', {
+  const payload = await emailCommsRequest('GET', '/messages', undefined, {
     params: {
       contact_id: contactId,
+      limit: 500,
     },
   });
-  const messages = getArrayPayload(response.data, ['messages', 'data', 'items', 'results'])
+  const messages = getArrayPayload(payload, ['messages', 'data', 'items', 'results'])
     .map((item) => normalizeEmailMessage(item, conversationId))
-    .filter((message) => message.content);
+    .filter((message) => message.content)
+    // Guarantee oldest → newest regardless of the backend's ordering; the
+    // thread list relies on it (and mirrors lad-frontend-2's thread order).
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
 
   return messages;
 };
 
 const getMessagesFromInstagramSource = async (conversationId: string, limit = 500) => {
-  const response = await apiGet(`/api/instagram-conversations/conversations/${conversationId}/messages`, {
+  const payload = await instagramRequest('GET', `/conversations/${conversationId}/messages`, undefined, {
     params: { limit },
   });
-  const messages = getArrayPayload(response.data, ['messages', 'data', 'items', 'results'])
+  const messages = getArrayPayload(payload, ['messages', 'data', 'items', 'results'])
     .map((item) => normalizeInstagramMessage(item, conversationId))
     .filter((message) => message.content);
 
@@ -1427,7 +1694,7 @@ export const normalizeConversation = (item: ApiConversation | RawRecord): ChatCo
     id: getId(item),
     name: String(name),
     channel: normalizeChannel(item.channel ?? item.source ?? item.platform ?? lastMessageRecord.channel),
-    lastMessage: String(lastMessageText || 'No messages yet'),
+    lastMessage: normalizeLastMessagePreview(String(lastMessageText || 'No messages yet')),
     lastMessageAt: asDateString(
       item.lastMessageAt ??
         item.last_message_at ??
@@ -1534,7 +1801,7 @@ export const normalizeMessage = (item: ApiMessage | RawRecord, fallbackConversat
         const typeStr = inferredMediaType ?? 'document';
         atts.push({
           id: url,
-          url: url.startsWith('http') ? url : buildApiUrl(`/api/whatsapp-conversations/conversations/media/${url}`, RESOLVED_API_URL),
+          url: url.startsWith('http') ? url : buildMediaFetchUrl(url),
           type: typeStr === 'image' ? 'image' : typeStr === 'video' ? 'video' : 'document',
           name: String(item.mediaFilename ?? item.media_filename ?? metadata.filename ?? metadata.media_filename ?? 'Attachment'),
         });
@@ -1890,7 +2157,7 @@ class ChatService {
     if (emailConversationIds.has(conversationId) || conversationId.startsWith('email:')) {
       const contactId = emailContactIdsByConversation.get(conversationId) ?? conversationId.replace(/^email:/, '');
       const provider = emailProvidersByConversation.get(conversationId) ?? 'gmail';
-      const response = await apiPost('/api/email-conversations/messages', {
+      const payload = await emailCommsRequest('POST', '/messages', {
         contact_id: contactId,
         direction: 'outbound',
         provider,
@@ -1898,15 +2165,15 @@ class ChatService {
         body_html: messageText,
         status: 'sent',
       });
-      const newMessage = (isRecord(response.data) ? response.data.data ?? response.data.message ?? response.data : response.data) as ApiMessage;
+      const newMessage = (isRecord(payload) ? payload.data ?? payload.message ?? payload : payload) as ApiMessage;
       return normalizeEmailMessage(newMessage, conversationId);
     }
 
     if (instagramConversationIds.has(conversationId)) {
-      const response = await apiPost(`/api/instagram-conversations/conversations/${conversationId}/messages`, {
+      const payload = await instagramRequest('POST', `/conversations/${conversationId}/messages`, {
         text: messageText,
       });
-      const newMessage = (isRecord(response.data) ? response.data.message ?? response.data.data ?? response.data : response.data) as ApiMessage;
+      const newMessage = (isRecord(payload) ? payload.message ?? payload.data ?? payload : payload) as ApiMessage;
       return normalizeInstagramMessage(newMessage, conversationId);
     }
 
@@ -1934,11 +2201,17 @@ class ChatService {
   }
 
   async sendMessageWithAttachment(formData: FormData) {
-    const channel = formData.get('channel') || 'personal';
+    const rawChannel = String(formData.get('channel') || 'personal');
+    // Normalise to backend channel — 'whatsapp' (general chat channel) falls back to 'personal'
+    const channel = rawChannel === 'waba' ? 'waba' : 'personal';
     // Remove it from formData so it's not sent to the python backend if it uses a proxy that doesn't expect it inside the body
     formData.delete('channel');
 
-    const response = await apiPost(`/api/whatsapp-conversations/conversations/upload-media?channel=${channel}`, formData);
+    const response = await apiPost(
+      '/api/whatsapp-conversations/conversations/upload-media',
+      formData,
+      { params: { channel } },
+    );
     
     const data = response.data as any;
     const mediaId = data?.media_id || data?.url;
@@ -1966,12 +2239,26 @@ class ChatService {
   }
 
   async markAsRead(conversationId: string) {
-    if (bniConversationIds.has(conversationId)) {
-      const backendChannel = bniChannelByConversation.get(conversationId);
-      await bniRequest('POST', `/api/conversations/${conversationId}/read`, undefined, { backendChannel });
+    // No backend has a working POST /read route — the proxy routes it to the WAPA
+    // service which returns 503 for every channel. LinkedIn/email/Instagram have no
+    // server-side read persistence at all, so their unread reset stays local-only
+    // (same as frontend-2's legacy Redux path).
+    if (
+      linkedinConversationIds.has(conversationId) ||
+      emailConversationIds.has(conversationId) ||
+      conversationId.startsWith('email:') ||
+      instagramConversationIds.has(conversationId)
+    ) {
+      return;
     }
-    const response = await apiPost(`/api/conversations/${conversationId}/read`, {});
-    return response.data;
+
+    // WhatsApp (WABA/personal) conversations: fetching the conversation detail
+    // resets unread_count server-side as a side effect — the same mechanism the
+    // web app relies on. Don't gate this on bniConversationIds — it may not be
+    // populated yet if the conversation was opened before the list finished loading.
+    // Fire-and-forget: read receipts are non-critical.
+    const backendChannel = await getConversationBackendChannel(conversationId);
+    bniRequest('GET', `/api/conversations/${conversationId}`, undefined, { backendChannel }).catch(() => undefined);
   }
 
   async assignConversationHandler(conversationId: string, { handler, humanAgentId }: AssignHandlerParams) {
@@ -2180,6 +2467,304 @@ class ChatService {
   disconnect() {
     getSocket().disconnect();
   }
+
+  async getBroadcastGroups(): Promise<BroadcastGroup[]> {
+    // Chat groups live on the WhatsApp services (waba → BNI /api/chat-groups,
+    // personal → WAPA /api/whatsapp-conversations/chat-groups), mirroring
+    // lad-frontend-2's chat-groups proxy — the main backend has no such route.
+    const channels = await getWhatsAppBackendChannels();
+    const results = await Promise.allSettled(
+      channels.map(async (backendChannel) => ({
+        backendChannel,
+        payload: await bniRequest('GET', '/api/chat-groups', undefined, { backendChannel }),
+      })),
+    );
+
+    const groups: BroadcastGroup[] = [];
+    const seen = new Set<string>();
+
+    results.forEach((result) => {
+      if (result.status !== 'fulfilled') {
+        console.warn('Failed to fetch broadcast groups', result.reason);
+        return;
+      }
+
+      const { backendChannel, payload } = result.value;
+      getArrayPayload(payload, ['data', 'groups', 'items', 'results'])
+        .filter(isRecord)
+        .forEach((g) => {
+          const id = String(g.id ?? g._id ?? '');
+          if (!id || seen.has(id)) {
+            return;
+          }
+
+          seen.add(id);
+          broadcastGroupChannelById.set(id, backendChannel);
+          const metadata = isRecord(g.metadata) ? g.metadata : {};
+          groups.push({
+            id,
+            name: String(g.name || 'Unnamed Group'),
+            memberCount: Number(
+              metadata.participant_count ??
+                g.member_count ??
+                g.memberCount ??
+                g.conversation_count ??
+                g.conversationCount ??
+                0,
+            ),
+            avatar: g.avatar ? String(g.avatar) : undefined,
+            color: g.color ? String(g.color) : undefined,
+            description: g.description !== undefined && g.description !== null ? String(g.description) : null,
+            waBackendChannel: backendChannel,
+          });
+        });
+    });
+
+    return groups;
+  }
+
+  private async getBroadcastGroupChannel(groupId: string) {
+    return broadcastGroupChannelById.get(groupId) ?? await getWhatsAppBackendChannel();
+  }
+
+  async createBroadcastGroup(name: string, color?: string, description?: string): Promise<BroadcastGroup | null> {
+    const backendChannel = await getWhatsAppBackendChannel();
+    const payload = await bniRequest('POST', '/api/chat-groups', {
+      name,
+      color: color || '#10B981',
+      description: description || null,
+    }, { backendChannel });
+    const record = isRecord(payload)
+      ? (isRecord(payload.group) ? payload.group : isRecord(payload.data) ? payload.data : payload)
+      : null;
+
+    if (!isRecord(record) || !record.id) {
+      return null;
+    }
+
+    const id = String(record.id);
+    broadcastGroupChannelById.set(id, backendChannel);
+
+    return {
+      id,
+      name: String(record.name ?? name),
+      memberCount: Number(record.member_count ?? record.conversation_count ?? 0),
+      color: record.color ? String(record.color) : color,
+      description: record.description !== undefined && record.description !== null ? String(record.description) : description ?? null,
+      waBackendChannel: backendChannel,
+    };
+  }
+
+  async updateBroadcastGroup(groupId: string, updates: { name?: string; color?: string; description?: string | null }) {
+    const backendChannel = await this.getBroadcastGroupChannel(groupId);
+    return bniRequest('PUT', `/api/chat-groups/${groupId}`, updates, { backendChannel });
+  }
+
+  async deleteBroadcastGroup(groupId: string) {
+    const backendChannel = await this.getBroadcastGroupChannel(groupId);
+    return bniRequest('DELETE', `/api/chat-groups/${groupId}`, undefined, { backendChannel });
+  }
+
+  async addConversationsToBroadcastGroup(groupId: string, conversationIds: string[]) {
+    const backendChannel = await this.getBroadcastGroupChannel(groupId);
+    return bniRequest('POST', `/api/chat-groups/${groupId}/conversations`, {
+      conversation_ids: conversationIds,
+    }, { backendChannel });
+  }
+
+  async getBroadcastGroupMembers(groupId: string): Promise<BroadcastGroupMember[]> {
+    const backendChannel = await this.getBroadcastGroupChannel(groupId);
+    const payload = await bniRequest('GET', `/api/chat-groups/${groupId}/members`, undefined, { backendChannel });
+
+    return getArrayPayload(payload, ['members', 'data', 'items', 'results'])
+      .filter(isRecord)
+      .map((member) => ({
+        id: String(member.id ?? member._id ?? ''),
+        name: member.name !== undefined && member.name !== null ? String(member.name) : null,
+        phone: member.phone !== undefined && member.phone !== null ? String(member.phone) : null,
+      }))
+      .filter((member) => member.id);
+  }
+
+  async removeBroadcastGroupMember(groupId: string, memberId: string) {
+    const backendChannel = await this.getBroadcastGroupChannel(groupId);
+    return bniRequest('DELETE', `/api/chat-groups/${groupId}/members/${memberId}`, undefined, { backendChannel });
+  }
+
+  // Mirrors lad-frontend-2's handleTemplateSend: loops groups, POSTs the WABA
+  // template payload with the same default batching parameters.
+  async sendTemplateToBroadcastGroups(groupIds: string[], payload: BroadcastTemplateSendPayload) {
+    let sent = 0;
+    const errors: string[] = [];
+
+    for (const groupId of groupIds) {
+      try {
+        const backendChannel = await this.getBroadcastGroupChannel(groupId);
+        const response = await bniRequest('POST', `/api/chat-groups/${groupId}/send-template`, {
+          template_name: payload.templateName,
+          language_code: payload.languageCode || 'en',
+          parameters: payload.parameters ?? [],
+          name_format: payload.nameFormat ?? 'first',
+          batch_size: 5,
+          delay_min: 120,
+          delay_random: 30,
+          daily_limit: 250,
+          header_param_count: 0,
+          header_type: '',
+          header_url: '',
+        }, { backendChannel });
+        sent += Number(isRecord(response) ? response.sent ?? 0 : 0) || 0;
+      } catch (error) {
+        errors.push(getErrorMessage(error, `Failed to send template to group ${groupId}`));
+      }
+    }
+
+    return { sent, errors };
+  }
+
+  // Mirrors lad-frontend-2's bulk send: POST /api/conversations/bulk/send-template
+  async sendTemplateToConversations(conversationIds: string[], payload: BroadcastTemplateSendPayload) {
+    const response = await bniRequest('POST', '/api/conversations/bulk/send-template', {
+      conversation_ids: conversationIds,
+      template_name: payload.templateName,
+      language_code: payload.languageCode || 'en',
+      parameters: payload.parameters ?? [],
+      name_format: payload.nameFormat ?? 'first',
+      batch_size: 5,
+      delay_min: 120,
+      delay_random: 30,
+      daily_limit: 250,
+      header_param_count: 0,
+      header_type: '',
+      header_url: '',
+    });
+
+    return { sent: Number(isRecord(response) ? response.sent ?? conversationIds.length : conversationIds.length) };
+  }
+
+  async bulkConversationsAction(action: 'delete' | 'status' | 'labels', body: Record<string, unknown>) {
+    return bniRequest('POST', `/api/conversations/bulk/${action}`, body);
+  }
+
+  // Create a label (shared labels store, same endpoint frontend-2's
+  // email/whatsapp label proxies use).
+  async createWhatsAppLabel(name: string, color?: string) {
+    const backendChannel = await getWhatsAppBackendChannel();
+    return bniRequest('POST', '/api/labels', { name, color: color || '#0078D4' }, { backendChannel });
+  }
+
+  // Real email send — mirrors lad-frontend-2's EmailComposePanel/ComposeWindow:
+  // POST send-bulk on the main backend (provider google|microsoft|custom_smtp),
+  // then persist the message in the WABA email thread store so it survives reloads.
+  async sendEmailReply(
+    conversation: { id: string; email?: string; name?: string; company?: string },
+    params: { subject: string; bodyHtml: string },
+  ): Promise<void> {
+    if (!conversation.email) {
+      throw new Error('This contact has no email address.');
+    }
+
+    const conversationId = conversation.id;
+    const contactId = emailContactIdsByConversation.get(conversationId) ?? conversationId.replace(/^email:/, '');
+    const provider = emailProvidersByConversation.get(conversationId) ?? 'gmail';
+    const backendProvider = /outlook|microsoft/i.test(provider)
+      ? 'microsoft'
+      : /custom/i.test(provider)
+        ? 'custom_smtp'
+        : 'google';
+
+    await apiPost('/api/social-integration/email/send-bulk', {
+      provider: backendProvider,
+      recipients: [{ email: conversation.email, name: conversation.name ?? '', company: conversation.company ?? '' }],
+      subject: params.subject,
+      body_html: params.bodyHtml,
+    });
+
+    try {
+      await emailCommsRequest('POST', '/messages', {
+        contact_id: contactId,
+        direction: 'outbound',
+        provider,
+        subject: params.subject,
+        body_html: params.bodyHtml,
+        status: 'sent',
+      });
+    } catch (error) {
+      // The email was sent; the thread record is best-effort.
+      console.warn('Failed to record sent email in thread history', error);
+    }
+  }
+
+  // Chat settings (AI inbound debounce etc.) — mirrors lad-frontend-2's
+  // chat-settings proxy: waba → BNI /api/settings (GET/PATCH).
+  async getWabaChatSettings(): Promise<RawRecord> {
+    const payload = await bniRequest('GET', '/api/settings', undefined, { backendChannel: 'waba' });
+    return isRecord(payload) ? (isRecord(payload.data) ? payload.data : payload) : {};
+  }
+
+  async updateWabaChatSettings(updates: Record<string, unknown>) {
+    return bniRequest('PATCH', '/api/settings', updates, { backendChannel: 'waba' });
+  }
+
+  // Starred messages live on the WABA (Python) service — same as lad-frontend-2's
+  // starred-messages proxy, which always targets the WABA service.
+  async getStarredMessages(): Promise<StarredMessageRecord[]> {
+    const payload = await bniRequest('GET', '/api/conversations/starred-messages', undefined, {
+      backendChannel: 'waba',
+    });
+
+    return getArrayPayload(payload, ['data', 'messages', 'starred', 'items', 'results'])
+      .filter(isRecord)
+      .map((row) => ({
+        id: String(row.id ?? row._id ?? ''),
+        conversationId: String(row.conversation_id ?? row.conversationId ?? ''),
+        content: String(row.content ?? row.text ?? row.body ?? ''),
+        senderName: row.sender_name || row.senderName ? String(row.sender_name ?? row.senderName) : undefined,
+        conversationName: row.lead_name || row.contact_name || row.conversation_name
+          ? String(row.lead_name ?? row.contact_name ?? row.conversation_name)
+          : undefined,
+        createdAt: row.created_at || row.createdAt ? asDateString(row.created_at ?? row.createdAt) : undefined,
+      }))
+      .filter((row) => row.id && row.content);
+  }
+
+  async getWhatsAppLabels(): Promise<WhatsAppLabel[]> {
+    // Labels are channel-routed like chat groups (waba → BNI /api/labels,
+    // personal → WAPA /api/whatsapp-conversations/labels), mirroring
+    // lad-frontend-2's labels proxy.
+    const channels = await getWhatsAppBackendChannels();
+    const results = await Promise.allSettled(
+      channels.map((backendChannel) => bniRequest('GET', '/api/labels', undefined, { backendChannel })),
+    );
+
+    const labels: WhatsAppLabel[] = [];
+    const seen = new Set<string>();
+
+    results.forEach((result) => {
+      if (result.status !== 'fulfilled') {
+        console.warn('Failed to fetch whatsapp labels', result.reason);
+        return;
+      }
+
+      getArrayPayload(result.value, ['data', 'labels', 'items', 'results'])
+        .filter(isRecord)
+        .forEach((l) => {
+          const id = String(l.id ?? l._id ?? '');
+          if (!id || seen.has(id)) {
+            return;
+          }
+
+          seen.add(id);
+          labels.push({
+            id,
+            name: String(l.name || 'Unnamed Label'),
+            color: String(l.color || '#00A884'),
+          });
+        });
+    });
+
+    return labels;
+  }
 }
 
 const chatService = new ChatService();
@@ -2194,6 +2779,33 @@ export const getOlderMessages = (conversationId: string, page?: number, limit?: 
 export const sendChatMessage = (payload: SendMessageParams) => chatService.sendMessage(payload);
 export const sendChannelMessage = (payload: SendChannelMessageParams | Record<string, unknown>) =>
   chatService.sendChannelMessage(payload);
+export const getBroadcastGroups = () => chatService.getBroadcastGroups();
+export const createBroadcastGroup = (name: string, color?: string, description?: string) =>
+  chatService.createBroadcastGroup(name, color, description);
+export const updateBroadcastGroup = (groupId: string, updates: { name?: string; color?: string; description?: string | null }) =>
+  chatService.updateBroadcastGroup(groupId, updates);
+export const deleteBroadcastGroup = (groupId: string) => chatService.deleteBroadcastGroup(groupId);
+export const addConversationsToBroadcastGroup = (groupId: string, conversationIds: string[]) =>
+  chatService.addConversationsToBroadcastGroup(groupId, conversationIds);
+export const getBroadcastGroupMembers = (groupId: string) => chatService.getBroadcastGroupMembers(groupId);
+export const removeBroadcastGroupMember = (groupId: string, memberId: string) =>
+  chatService.removeBroadcastGroupMember(groupId, memberId);
+export const sendTemplateToBroadcastGroups = (groupIds: string[], payload: BroadcastTemplateSendPayload) =>
+  chatService.sendTemplateToBroadcastGroups(groupIds, payload);
+export const sendTemplateToConversations = (conversationIds: string[], payload: BroadcastTemplateSendPayload) =>
+  chatService.sendTemplateToConversations(conversationIds, payload);
+export const bulkConversationsAction = (action: 'delete' | 'status' | 'labels', body: Record<string, unknown>) =>
+  chatService.bulkConversationsAction(action, body);
+export const getStarredMessages = () => chatService.getStarredMessages();
+export const getWabaChatSettings = () => chatService.getWabaChatSettings();
+export const sendEmailReply = (
+  conversation: { id: string; email?: string; name?: string; company?: string },
+  params: { subject: string; bodyHtml: string },
+) => chatService.sendEmailReply(conversation, params);
+export const updateWabaChatSettings = (updates: Record<string, unknown>) =>
+  chatService.updateWabaChatSettings(updates);
+export const getWhatsAppLabels = () => chatService.getWhatsAppLabels();
+export const createWhatsAppLabel = (name: string, color?: string) => chatService.createWhatsAppLabel(name, color);
 export const sendMessageWithAttachment = (formData: FormData) => chatService.sendMessageWithAttachment(formData);
 export const markConversationReadRequest = (conversationId: string) => chatService.markAsRead(conversationId);
 export const assignConversationHandler = (conversationId: string, payload: AssignHandlerParams) =>

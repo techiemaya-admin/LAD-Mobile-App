@@ -118,7 +118,7 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
             setError(null);
           })
           .catch((syncError) => {
-            const syncMessage = syncError instanceof Error ? syncError.message : 'Could not sync backend starter prompt.';
+            const syncMessage = syncError instanceof Error ? syncError.message : 'Could not sync starter prompt.';
             setError(syncMessage);
           });
         return;
@@ -131,7 +131,7 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
       );    } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : 'Could not load voice call options.';
       setError(message);
-      setStatus('Voice call options could not be loaded from the backend.');
+      setStatus('Voice call options could not be loaded.');
     } finally {
       setIsLoading(false);
     }
@@ -199,9 +199,9 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
           setError(null);
         })
         .catch((syncError) => {
-          const syncMessage = syncError instanceof Error ? syncError.message : 'Backend prompt sync is still pending.';
+          const syncMessage = syncError instanceof Error ? syncError.message : 'Prompt sync is still pending.';
           setError(syncMessage);
-          setStatus('Saved locally. Backend sync will retry on refresh.');
+          setStatus('Saved locally. Sync will retry on refresh.');
         });
     } catch (saveError) {
       setStatus(saveError instanceof Error ? saveError.message : 'Save failed');
@@ -220,11 +220,10 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
         <Logo variant="main" width={92} height={30} style={darkMode ? DARK_LOGO_STYLE : undefined} />
         <View style={styles.aiTitleBlock}>
           <Typography variant="h3" color={palette.text} style={styles.aiTitle}>AI Voice Calling</Typography>
-          <Typography variant="caption" color={palette.muted}>
+          <Typography variant="caption" color={palette.muted} numberOfLines={1}>
             Saved setup for dial-pad agent calls
           </Typography>
         </View>
-        <Bot color={palette.primary} size={22} />
       </View>
 
       <View style={styles.actionRow}>
@@ -242,7 +241,7 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
             variant="caption"
             color={savedSuccess ? '#10B981' : palette.muted}
             numberOfLines={1}
-            style={savedSuccess ? { fontWeight: '700' } : undefined}
+            style={savedSuccess ? { fontWeight: '700', flex: 1 } : { flex: 1 }}
           >
             {savedSuccess ? '✓ Saved!' : status}
           </Typography>
@@ -268,7 +267,7 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
               {selectedAgent?.name || 'Select voice agent'}
             </Typography>
             <Typography variant="overline" color={palette.muted} numberOfLines={1}>
-              {selectedAgent ? [selectedAgent.language, selectedAgent.accent, selectedAgent.gender].filter(Boolean).join(' / ') || selectedAgent.provider || 'Available agent' : 'Loaded from backend'}
+              {selectedAgent ? [selectedAgent.language, selectedAgent.accent, selectedAgent.gender].filter(Boolean).join(' / ') || selectedAgent.provider || 'Available agent' : 'Loaded'}
             </Typography>
           </View>
           <ChevronDown color={palette.muted} size={18} />
@@ -310,7 +309,7 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
               {selectedNumber?.label || 'Select agent number'}
             </Typography>
             <Typography variant="overline" color={palette.muted} numberOfLines={1}>
-              {selectedNumber?.phoneNumber || 'Verified backend number'}
+              {selectedNumber?.phoneNumber || 'Verified number'}
             </Typography>
           </View>
           <ChevronDown color={palette.muted} size={18} />

@@ -38,6 +38,7 @@ interface CallState {
   setCalls: (calls: CallRecord[]) => void;
   prependCall: (call: CallRecord) => void;
   prependCalls: (calls: CallRecord[]) => void;
+  reset: () => void;
 }
 
 let callListenersAttached = false;
@@ -1484,4 +1485,20 @@ export const useCallStore = create<CallState>((set) => ({
       calls: [...calls, ...state.calls.filter((item) => !incomingIds.has(item.id))],
     };
   }),
+
+  reset: () => {
+    clearOptimisticArtifacts();
+    manualDialOverrides.clear();
+    manualDialOverridesLoaded = false;
+    pendingManualCallsLoaded = false;
+    set({
+      calls: [],
+      isLoading: false,
+      isLoadingMore: false,
+      error: null,
+      page: 1,
+      hasMore: true,
+      lastFetchedAt: null,
+    });
+  },
 }));

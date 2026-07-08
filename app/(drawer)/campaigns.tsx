@@ -10,6 +10,7 @@ import { useAppTheme } from '@/src/theme/appTheme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
+import { useRouter } from 'expo-router';
 
 const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
 const formatPercent = (value: number) => `${Math.round((value || 0) * 10) / 10}%`;
@@ -21,6 +22,7 @@ type CampaignsCache = {
 };
 
 export default function CampaignsScreen() {
+  const router = useRouter();
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
   const [campaigns, setCampaigns] = useState<CampaignItem[]>(() => readScreenCache<CampaignsCache>(CAMPAIGNS_CACHE_KEY)?.value.campaigns ?? []);
@@ -125,14 +127,14 @@ export default function CampaignsScreen() {
       <View style={styles.header}>
         <View style={styles.headerContentMaxWidth}>
           <View style={styles.headerTitleContainer}>
-            <Typography variant="h1" numberOfLines={2}>Campaigns</Typography>
+            <Typography variant="h1" style={styles.pageTitle} numberOfLines={2}>Campaigns</Typography>
             <Typography variant="bodySmall" color={appTheme.muted}>Track and manage your active marketing campaigns in real time.</Typography>
           </View>
           <View style={styles.headerActions}>
             <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadCampaigns(true)} disabled={refreshing || loading}>
               {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={20} />}
             </TouchableOpacity>
-            <TouchableOpacity style={styles.addButton} onPress={() => Alert.alert('Create campaign', 'Open the web campaign builder to create a new workflow.')}>
+            <TouchableOpacity style={styles.addButton} onPress={() => router.push('/(tabs)/ai-assistant')}>
               <Plus color={Theme.colors.surface} size={24} />
             </TouchableOpacity>
           </View>
@@ -291,6 +293,11 @@ const styles = StyleSheet.create({
   headerTitleContainer: {
     flex: 1,
     minWidth: 200,
+  },
+  pageTitle: {
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: '800',
   },
   headerActions: {
     flexDirection: 'row',

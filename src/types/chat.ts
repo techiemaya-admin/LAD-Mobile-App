@@ -141,6 +141,8 @@ export interface ChatMessage {
   createdAt: string;
   humanAgentId?: string;
   senderName?: string;
+  /** Email threads only — the message subject line (body stays in content). */
+  subject?: string;
   attachments?: Attachment[];
   mediaId?: string;
   mediaType?: string;

@@ -20,10 +20,26 @@ import { DashboardSection } from '@/components/features/DashboardSection';
 import { SkeletonSummaryCard, SkeletonActivityRow } from '@/components/ui/SkeletonLoader';
 import { fetchHomeDashboardData, type HomeDashboardData, type HomeDashboardSection } from '@/src/services/homeDashboard';
 import useAuthStore from '@/src/store/authStore';
+import { useChatStore } from '@/src/store/chatStore';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
+
+const relTime = (from?: string) => {
+  if (!from) return '';
+  const date = new Date(from);
+  if (Number.isNaN(date.getTime())) return '';
+  const seconds = Math.max(1, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+};
 
 const CHANNEL_COLORS = {
   linkedin: '#0077B5',
@@ -60,6 +76,9 @@ export default function HomeDashboard() {
   const { width } = useWindowDimensions();
   const handleBottomTabScroll = useBottomTabScrollHandler();
   const user = useAuthStore((state) => state.user);
+  const hasUnreadNotifications = useChatStore((state) =>
+    state.conversations.some((c) => (c.unreadCount ?? 0) > 0),
+  );
 
   const [dashboard, setDashboard] = useState<HomeDashboardData | null>(
     () => readScreenCache<HomeDashboardData>(HOME_DASHBOARD_CACHE_KEY)?.value ?? null,
@@ -136,8 +155,8 @@ export default function HomeDashboard() {
     return [
       {
         label: 'Campaigns',
-        value: formatNumber(summary?.activeCampaigns ?? 0),
-        detail: `${formatNumber(summary?.totalCampaigns ?? 0)} total`,
+        value: formatNumber(summary?.totalCampaigns ?? 0),
+        detail: `${formatNumber(summary?.activeCampaigns ?? 0)} active`,
         icon: Megaphone,
         color: CHANNEL_COLORS.campaign,
       },
@@ -203,7 +222,7 @@ export default function HomeDashboard() {
               style={[styles.iconButton, { backgroundColor: appTheme.surface, borderColor: appTheme.borderSoft }]}
             >
               <Bell color={appTheme.text} size={20} />
-              <View style={styles.notificationDot} />
+              {hasUnreadNotifications && <View style={styles.notificationDot} />}
             </TouchableOpacity>
           </View>
         </View>
@@ -309,9 +328,16 @@ export default function HomeDashboard() {
                       ]}
                     />
                     <View style={styles.activityText}>
-                      <Typography variant="bodySmall" color={appTheme.text} numberOfLines={1}>
-                        {activity.title}
-                      </Typography>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Typography variant="bodySmall" color={appTheme.text} numberOfLines={1} style={{ flex: 1 }}>
+                          {activity.title}
+                        </Typography>
+                        {activity.at ? (
+                          <Typography variant="caption" color={appTheme.muted} style={{ marginLeft: 6, flexShrink: 0 }}>
+                            {relTime(activity.at)}
+                          </Typography>
+                        ) : null}
+                      </View>
                       <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
                         {activity.meta}
                       </Typography>

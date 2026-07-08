@@ -328,17 +328,6 @@ export default function LoginScreen() {
                 </TouchableOpacity>
               </Pressable>
 
-              <TouchableOpacity
-                style={styles.forgotPassword}
-                onPress={() => router.push('/forgot-password')}
-                disabled={isSubmitting}
-                activeOpacity={0.75}
-              >
-                <Typography variant="body" style={styles.forgotPasswordText}>
-                  Forgot password?
-                </Typography>
-              </TouchableOpacity>
-
               {authError && (
                 <Typography variant="caption" style={styles.errorText} align="center">
                   {authError}
@@ -371,22 +360,6 @@ export default function LoginScreen() {
               </TouchableOpacity>
             </View>
 
-            <View style={[styles.footer, isCompact && styles.footerCompact, isTinyPhone && styles.footerTinyPhone]}>
-              <Typography
-                variant="bodyLarge"
-                style={[styles.footerText, isPhone && styles.footerTextPhone, isTinyPhone && styles.footerTextTinyPhone, { fontSize: isTinyPhone ? 14 : isPhone ? 15 : 17 }]}
-              >
-                {`Don't have an account? `}
-              </Typography>
-              <TouchableOpacity onPress={() => router.push('/signup')} disabled={isSubmitting} activeOpacity={0.75}>
-                <Typography
-                  variant="bodyLarge"
-                  style={[styles.signUpText, isPhone && styles.footerTextPhone, isTinyPhone && styles.footerTextTinyPhone, { fontSize: isTinyPhone ? 14 : isPhone ? 15 : 17 }]}
-                >
-                  Sign up
-                </Typography>
-              </TouchableOpacity>
-            </View>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>

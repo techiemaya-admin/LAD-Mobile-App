@@ -10,8 +10,10 @@ import {
   TouchableOpacity,
   useWindowDimensions,
   View,
+  Modal,
+  TextInput,
 } from 'react-native';
-import { Eye, EyeOff, MoreHorizontal, RefreshCw, Trash2, UserPlus } from 'lucide-react-native';
+import { Eye, EyeOff, MoreHorizontal, RefreshCw, Trash2, UserPlus, X } from 'lucide-react-native';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -22,6 +24,7 @@ import {
   getTeamMembers,
   TeamMember,
   updateTeamMemberPhoneMask,
+  addTeamMember,
 } from '@/src/services/settingsHub';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -70,6 +73,19 @@ export default function TeamScreen() {
   const [busyMemberId, setBusyMemberId] = useState('');
   const [openMenuId, setOpenMenuId] = useState('');
   const [error, setError] = useState('');
+  const [inviteModalVisible, setInviteModalVisible] = useState(false);
+  const [inviteName, setInviteName] = useState('');
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [invitePassword, setInvitePassword] = useState('');
+  const [inviteShowPassword, setInviteShowPassword] = useState(false);
+  const [invitePhone, setInvitePhone] = useState('');
+  const [inviteRole, setInviteRole] = useState('MEMBER');
+  const [inviteStatus, setInviteStatus] = useState<'active' | 'inactive'>('active');
+  const [inviteCapabilities, setInviteCapabilities] = useState<string[]>([]);
+  const [inviteMaskPhone, setInviteMaskPhone] = useState(false);
+  const [showRoleMenu, setShowRoleMenu] = useState(false);
+  const [showPermissionPicker, setShowPermissionPicker] = useState(false);
+  const [inviteLoading, setInviteLoading] = useState(false);
 
   const setMembersAndCache = useCallback((updater: (current: TeamMember[]) => TeamMember[]) => {
     setMembers((current) => {
@@ -113,6 +129,68 @@ export default function TeamScreen() {
   const closeMemberMenu = useCallback(() => {
     setOpenMenuId('');
   }, []);
+
+  const ROLE_OPTIONS = ['MEMBER', 'ADMIN', 'OWNER', 'VIEWER'];
+
+  const resetInviteForm = () => {
+    setInviteName('');
+    setInviteEmail('');
+    setInvitePassword('');
+    setInviteShowPassword(false);
+    setInvitePhone('');
+    setInviteRole('MEMBER');
+    setInviteStatus('active');
+    setInviteCapabilities([]);
+    setInviteMaskPhone(false);
+    setShowRoleMenu(false);
+    setShowPermissionPicker(false);
+  };
+
+  const autoGenPassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%';
+    let pwd = '';
+    for (let i = 0; i < 12; i++) pwd += chars[Math.floor(Math.random() * chars.length)];
+    setInvitePassword(pwd);
+    setInviteShowPassword(true);
+  };
+
+  const toggleCapability = (key: string) => {
+    setInviteCapabilities((prev) =>
+      prev.includes(key) ? prev.filter((c) => c !== key) : [...prev, key],
+    );
+  };
+
+  const handleInvite = async () => {
+    if (!inviteName.trim()) {
+      Alert.alert('Name required', "Please enter the member's full name.");
+      return;
+    }
+    if (!inviteEmail.trim()) {
+      Alert.alert('Email required', 'Please enter an email address.');
+      return;
+    }
+    setInviteLoading(true);
+    try {
+      await addTeamMember({
+        name: inviteName.trim(),
+        email: inviteEmail.trim(),
+        password: invitePassword || undefined,
+        phoneNumber: invitePhone || undefined,
+        role: inviteRole,
+        status: inviteStatus,
+        capabilities: inviteCapabilities,
+        maskPhoneNumber: inviteMaskPhone,
+      });
+      Alert.alert('Success', `${inviteName} was successfully added to the team.`);
+      setInviteModalVisible(false);
+      resetInviteForm();
+      loadMembers(true);
+    } catch (err) {
+      Alert.alert('Add member failed', err instanceof Error ? err.message : 'Unable to add member.');
+    } finally {
+      setInviteLoading(false);
+    }
+  };
 
   const openMemberMenu = useCallback((memberId: string) => {
     setOpenMenuId((current) => current === memberId ? '' : memberId);
@@ -182,20 +260,18 @@ export default function TeamScreen() {
         <View style={styles.contentMaxWidth}>
           {openMenuId ? <Pressable style={styles.menuDismissLayer} onPress={closeMemberMenu} /> : null}
 
-          <View style={[styles.header, isPhone && styles.headerPhone]}>
-            <View style={[styles.headerCopy, isPhone && styles.headerCopyPhone]}>
-              <Typography variant="bodyLarge" color={appTheme.muted} numberOfLines={3}>Manage and configure member roles and permissions for your team.</Typography>
-              <Typography variant="caption" color={appTheme.muted}>{formatNumber(activeCount)} active of {formatNumber(members.length)} users</Typography>
-            </View>
-            <View style={styles.headerActions}>
+          <View style={styles.headerBlock}>
+            <View style={styles.headerTitleRow}>
+              <Typography variant="h1" style={styles.pageTitleText} numberOfLines={2}>Team Management</Typography>
               <TouchableOpacity style={[styles.iconBtn, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadMembers(true)} disabled={refreshing || loading}>
                 {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={18} />}
               </TouchableOpacity>
-              <TouchableOpacity style={styles.inviteBtn} onPress={() => Alert.alert('Invite team member', 'Team invitations are managed from the web workspace.')}>
-                <UserPlus color={Theme.colors.surface} size={20} />
-                <Typography variant="bodySmall" color={Theme.colors.surface} style={styles.inviteText}>Invite</Typography>
-              </TouchableOpacity>
             </View>
+            <Typography variant="bodyLarge" color={appTheme.muted} style={styles.pageSubtitleText}>Manage team members and their granular page permissions</Typography>
+            <TouchableOpacity style={[styles.addMemberBtnLarge, { backgroundColor: appTheme.primary }]} onPress={() => setInviteModalVisible(true)}>
+              <UserPlus color={appTheme.background} size={18} />
+              <Typography variant="body" color={appTheme.background} style={[styles.addMemberBtnText, { flexShrink: 1 }]} numberOfLines={1}>Add Team member</Typography>
+            </TouchableOpacity>
           </View>
 
           {error ? (
@@ -361,6 +437,177 @@ export default function TeamScreen() {
           )}
         </View>
       </ScrollView>
+
+      <Modal visible={inviteModalVisible} transparent animationType="slide" onRequestClose={() => { setInviteModalVisible(false); resetInviteForm(); }}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, { backgroundColor: appTheme.surface }]}>
+            {/* Header */}
+            <View style={[styles.modalHeader, { borderBottomColor: appTheme.borderSoft }]}>
+              <Typography variant="h3" style={{ fontWeight: '700' }}>Add Team Member</Typography>
+              <TouchableOpacity onPress={() => { setInviteModalVisible(false); resetInviteForm(); }} style={styles.modalCloseBtn}>
+                <X color={appTheme.muted} size={22} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Scrollable body */}
+            <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalBody} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+
+              {/* Full Name */}
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.modalLabel}>Full Name *</Typography>
+              <TextInput
+                style={[styles.modalInput, { backgroundColor: appTheme.input, color: appTheme.text, borderColor: appTheme.border }]}
+                placeholder="John Doe"
+                placeholderTextColor={appTheme.muted}
+                value={inviteName}
+                onChangeText={setInviteName}
+              />
+
+              {/* Email */}
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.modalLabel}>Email Address *</Typography>
+              <TextInput
+                style={[styles.modalInput, { backgroundColor: appTheme.input, color: appTheme.text, borderColor: appTheme.border }]}
+                placeholder="colleague@company.com"
+                placeholderTextColor={appTheme.muted}
+                value={inviteEmail}
+                onChangeText={setInviteEmail}
+                autoCapitalize="none"
+                keyboardType="email-address"
+              />
+
+              {/* Password */}
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.modalLabel}>Password</Typography>
+              <View style={styles.passwordRow}>
+                <View style={[styles.passwordInputWrap, { backgroundColor: appTheme.input, borderColor: appTheme.border }]}>
+                  <TextInput
+                    style={[styles.passwordInput, { color: appTheme.text }]}
+                    placeholder="Enter or auto-generate"
+                    placeholderTextColor={appTheme.muted}
+                    value={invitePassword}
+                    onChangeText={setInvitePassword}
+                    secureTextEntry={!inviteShowPassword}
+                  />
+                  <TouchableOpacity onPress={() => setInviteShowPassword((v) => !v)} style={styles.eyeBtn}>
+                    {inviteShowPassword ? <EyeOff color={appTheme.muted} size={18} /> : <Eye color={appTheme.muted} size={18} />}
+                  </TouchableOpacity>
+                </View>
+                <TouchableOpacity style={[styles.autoGenBtn, { backgroundColor: appTheme.primarySoft, borderColor: appTheme.primaryAccent }]} onPress={autoGenPassword}>
+                  <Typography variant="caption" color={appTheme.primaryAccent} style={{ fontWeight: '700' }}>Auto-Gen</Typography>
+                </TouchableOpacity>
+              </View>
+
+              {/* Phone */}
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.modalLabel}>Phone Number</Typography>
+              <TextInput
+                style={[styles.modalInput, { backgroundColor: appTheme.input, color: appTheme.text, borderColor: appTheme.border }]}
+                placeholder="+1 234 567 8900"
+                placeholderTextColor={appTheme.muted}
+                value={invitePhone}
+                onChangeText={setInvitePhone}
+                keyboardType="phone-pad"
+              />
+
+              {/* Role */}
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.modalLabel}>Role Assignment</Typography>
+              <TouchableOpacity
+                style={[styles.modalInput, { backgroundColor: appTheme.input, borderColor: appTheme.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }]}
+                onPress={() => setShowRoleMenu((v) => !v)}
+                activeOpacity={0.8}
+              >
+                <Typography variant="body" color={appTheme.text}>{inviteRole}</Typography>
+                <Typography variant="caption" color={appTheme.muted}>{showRoleMenu ? '▲' : '▼'}</Typography>
+              </TouchableOpacity>
+              {showRoleMenu ? (
+                <View style={[styles.roleDropdown, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
+                  {ROLE_OPTIONS.map((role) => (
+                    <TouchableOpacity
+                      key={role}
+                      style={[styles.roleOption, inviteRole === role && { backgroundColor: appTheme.primarySoft }]}
+                      onPress={() => { setInviteRole(role); setShowRoleMenu(false); }}
+                    >
+                      <Typography variant="body" color={inviteRole === role ? appTheme.primaryAccent : appTheme.text}>{role}</Typography>
+                      {inviteRole === role ? <Typography variant="caption" color={appTheme.primaryAccent}>✓</Typography> : null}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              ) : null}
+
+              {/* Account Status */}
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.modalLabel}>Account Status</Typography>
+              <View style={styles.radioRow}>
+                <TouchableOpacity style={styles.radioOption} onPress={() => setInviteStatus('active')} activeOpacity={0.8}>
+                  <View style={[styles.radioCircle, { borderColor: inviteStatus === 'active' ? appTheme.primaryAccent : appTheme.border }]}>
+                    {inviteStatus === 'active' ? <View style={[styles.radioDot, { backgroundColor: appTheme.primaryAccent }]} /> : null}
+                  </View>
+                  <Typography variant="body" color={inviteStatus === 'active' ? appTheme.primaryAccent : appTheme.text}>Active</Typography>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.radioOption} onPress={() => setInviteStatus('inactive')} activeOpacity={0.8}>
+                  <View style={[styles.radioCircle, { borderColor: inviteStatus === 'inactive' ? appTheme.primaryAccent : appTheme.border }]}>
+                    {inviteStatus === 'inactive' ? <View style={[styles.radioDot, { backgroundColor: appTheme.primaryAccent }]} /> : null}
+                  </View>
+                  <Typography variant="body" color={inviteStatus === 'inactive' ? appTheme.primaryAccent : appTheme.text}>Inactive</Typography>
+                </TouchableOpacity>
+              </View>
+
+              {/* Page Permissions */}
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.modalLabel}>Page Permissions</Typography>
+              <TouchableOpacity
+                style={[styles.permissionToggleBtn, { backgroundColor: appTheme.input, borderColor: appTheme.border }]}
+                onPress={() => setShowPermissionPicker((v) => !v)}
+                activeOpacity={0.8}
+              >
+                <Typography variant="body" color={appTheme.text}>
+                  {inviteCapabilities.length === 0 ? 'Select permissions...' : `${inviteCapabilities.length} selected`}
+                </Typography>
+                <Typography variant="caption" color={appTheme.primaryAccent} style={{ fontWeight: '700' }}>
+                  {showPermissionPicker ? 'HIDE CHOICES' : 'VIEW CHOICES'}
+                </Typography>
+              </TouchableOpacity>
+              {showPermissionPicker ? (
+                <View style={[styles.permissionList, { backgroundColor: appTheme.input, borderColor: appTheme.border }]}>
+                  {PAGE_CAPABILITIES.map((cap) => {
+                    const checked = inviteCapabilities.includes(cap.key);
+                    return (
+                      <TouchableOpacity key={cap.key} style={styles.permissionItem} onPress={() => toggleCapability(cap.key)} activeOpacity={0.75}>
+                        <View style={[styles.checkbox, { borderColor: checked ? appTheme.primaryAccent : appTheme.border, backgroundColor: checked ? appTheme.primaryAccent : 'transparent' }]}>
+                          {checked ? <Typography variant="caption" color="#fff" style={{ lineHeight: 14 }}>✓</Typography> : null}
+                        </View>
+                        <Typography variant="body" color={checked ? appTheme.primaryAccent : appTheme.text}>{cap.label}</Typography>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ) : null}
+
+              {/* Mask Phone Numbers */}
+              <View style={styles.maskRow}>
+                <View style={{ flex: 1 }}>
+                  <Typography variant="body" color={appTheme.text} style={{ fontWeight: '600' }}>Mask Phone Numbers</Typography>
+                  <Typography variant="caption" color={appTheme.muted}>Hide lead phone numbers from this member</Typography>
+                </View>
+                <TouchableOpacity
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: inviteMaskPhone }}
+                  onPress={() => setInviteMaskPhone((v) => !v)}
+                  style={[styles.privacySwitch, { backgroundColor: inviteMaskPhone ? appTheme.primaryAccent : appTheme.border }]}
+                >
+                  <View style={[styles.privacySwitchThumb, inviteMaskPhone && styles.privacySwitchThumbOn]} />
+                </TouchableOpacity>
+              </View>
+
+            </ScrollView>
+
+            {/* Footer */}
+            <View style={[styles.modalFooter, { borderTopColor: appTheme.borderSoft }]}>
+              <TouchableOpacity style={[styles.modalBtn, styles.modalBtnCancel, { borderColor: appTheme.border }]} onPress={() => { setInviteModalVisible(false); resetInviteForm(); }}>
+                <Typography variant="body" color={appTheme.text}>Cancel</Typography>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtn, styles.modalBtnPrimary, { backgroundColor: appTheme.primaryAccent }]} onPress={() => void handleInvite()} disabled={inviteLoading}>
+                {inviteLoading ? <ActivityIndicator color="#fff" /> : <Typography variant="body" color="#fff" style={{ fontWeight: '700' }}>Add Member</Typography>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </AnimatedScreen>
   );
 }
@@ -384,31 +631,38 @@ const styles = StyleSheet.create({
     zIndex: 20,
     elevation: 8,
   },
-  header: {
+  headerBlock: {
+    marginBottom: Theme.spacing.xl,
+    gap: Theme.spacing.sm,
+  },
+  headerTitleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    flexWrap: 'wrap',
-    marginBottom: Theme.spacing.xl,
-    gap: Theme.spacing.md,
   },
-  headerPhone: {
-    alignItems: 'flex-start',
-    flexWrap: 'nowrap',
-    marginBottom: Theme.spacing.lg,
-    gap: Theme.spacing.sm,
-  },
-  headerCopy: {
+  pageTitleText: {
+    fontWeight: '800',
+    fontSize: 36,
+    lineHeight: 42,
     flex: 1,
-    minWidth: 250,
-  },
-  headerCopyPhone: {
     minWidth: 0,
   },
-  headerActions: {
+  pageSubtitleText: {
+    marginBottom: Theme.spacing.sm,
+    fontSize: 16,
+  },
+  addMemberBtnLarge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Theme.spacing.sm,
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: Theme.radius.lg,
+    gap: 8,
+    width: '100%',
+    maxWidth: 400,
+  },
+  addMemberBtnText: {
+    fontWeight: '700',
   },
   iconBtn: {
     width: 40,
@@ -619,7 +873,68 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   actionMenuText: {
-    fontWeight: '800',
+    fontWeight: '600',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: Theme.spacing.lg,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 440,
+    padding: 0,
+    overflow: 'hidden',
+    borderRadius: Theme.radius.lg,
+    ...Theme.shadows.large,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: Theme.spacing.lg,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: Theme.colors.border,
+  },
+  modalCloseBtn: {
+    padding: Theme.spacing.xs,
+  },
+  modalBody: {
+    padding: Theme.spacing.lg,
+  },
+  modalLabel: {
+    marginBottom: Theme.spacing.xs,
+    fontWeight: '600',
+  },
+  modalInput: {
+    height: 48,
+    borderWidth: 1,
+    borderRadius: Theme.radius.md,
+    paddingHorizontal: Theme.spacing.md,
+    marginBottom: Theme.spacing.md,
+  },
+  modalFooter: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    padding: Theme.spacing.lg,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: Theme.colors.border,
+    gap: Theme.spacing.sm,
+  },
+  modalBtn: {
+    paddingHorizontal: Theme.spacing.lg,
+    paddingVertical: Theme.spacing.md,
+    borderRadius: Theme.radius.md,
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  modalBtnCancel: {
+    borderWidth: 1,
+  },
+  modalBtnPrimary: {
+    backgroundColor: Theme.colors.primary,
   },
   actionMenuDivider: {
     height: 1,
@@ -631,5 +946,115 @@ const styles = StyleSheet.create({
   },
   loader: {
     marginTop: Theme.spacing.xxl,
+  },
+  modalScroll: {
+    maxHeight: 480,
+  },
+  passwordRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+    marginBottom: Theme.spacing.md,
+  },
+  passwordInputWrap: {
+    flex: 1,
+    height: 48,
+    borderWidth: 1,
+    borderRadius: Theme.radius.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Theme.spacing.md,
+  },
+  passwordInput: {
+    flex: 1,
+    height: 48,
+    fontSize: 15,
+  },
+  eyeBtn: {
+    padding: 4,
+  },
+  autoGenBtn: {
+    height: 48,
+    paddingHorizontal: Theme.spacing.md,
+    borderRadius: Theme.radius.md,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  roleDropdown: {
+    borderWidth: 1,
+    borderRadius: Theme.radius.md,
+    marginBottom: Theme.spacing.md,
+    overflow: 'hidden',
+  },
+  roleOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: Theme.spacing.sm,
+    minHeight: 44,
+  },
+  radioRow: {
+    flexDirection: 'row',
+    gap: Theme.spacing.xl,
+    marginBottom: Theme.spacing.md,
+  },
+  radioOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+  },
+  radioCircle: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  radioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  permissionToggleBtn: {
+    height: 48,
+    borderWidth: 1,
+    borderRadius: Theme.radius.md,
+    paddingHorizontal: Theme.spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Theme.spacing.sm,
+  },
+  permissionList: {
+    borderWidth: 1,
+    borderRadius: Theme.radius.md,
+    marginBottom: Theme.spacing.md,
+    overflow: 'hidden',
+  },
+  permissionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: 10,
+    minHeight: 44,
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  maskRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.md,
+    paddingVertical: Theme.spacing.sm,
+    marginBottom: Theme.spacing.sm,
   },
 });

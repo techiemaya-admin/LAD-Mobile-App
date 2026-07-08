@@ -25,6 +25,7 @@ export const CHAT_SYNC_ENDPOINTS = {
   goHighLevelStatus: '/api/social-integration/gohighlevel/status',
   mindbodyStatus: '/api/social-integration/mindbody/status',
   routeMagicStatus: '/api/social-integration/routemagic/status',
+  customEmailStatus: '/api/social-integration/email/custom/status',
   currentUser: '/api/auth/me',
 } as const;
 
@@ -267,9 +268,19 @@ export async function getRouteMagicIntegration(): Promise<ConnectedIntegration[]
 }
 
 export async function getCustomEmailIntegration(): Promise<ConnectedIntegration[]> {
-  // Custom Email doesn't have a status endpoint in LAD-Frontend-2's IntegrationsSettings
-  // Assuming it's disconnected by default or checked differently
-  return [blankIntegration('custom-email', 'Custom Email (SMTP)', 'disconnected')];
+  try {
+    const response = await apiPost(CHAT_SYNC_ENDPOINTS.customEmailStatus, {});
+    const payload = isRecord(response.data) ? response.data : {};
+    const connected = Boolean(payload.connected);
+    return [
+      {
+        ...blankIntegration('custom-email', 'Custom Email (SMTP)', connected ? 'connected' : 'disconnected'),
+        email: payload.email ? String(payload.email) : undefined,
+      },
+    ];
+  } catch (error) {
+    return [blankIntegration('custom-email', 'Custom Email (SMTP)', 'disconnected')];
+  }
 }
 
 export async function getSlackIntegration(): Promise<ConnectedIntegration[]> {

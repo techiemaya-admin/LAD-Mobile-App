@@ -313,7 +313,7 @@ export default function BillingScreen() {
       >
         <View style={[styles.headerRow, isCompact && styles.headerRowCompact]}>
           <View style={styles.headerText}>
-            <Typography variant="h2" color={appTheme.text} numberOfLines={2}>Billing & Plans</Typography>
+            <Typography variant="h1" color={appTheme.text} style={styles.pageTitle} numberOfLines={2}>Billing & Plans</Typography>
             <Typography variant="bodySmall" color={appTheme.muted} numberOfLines={2}>Live credits, usage, and wallet checkout</Typography>
           </View>
           <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadBilling(true, selectedRange)} disabled={refreshing || loading}>
@@ -662,6 +662,11 @@ const styles = StyleSheet.create({
   headerText: {
     flex: 1,
     minWidth: 0,
+  },
+  pageTitle: {
+    fontSize: 36,
+    lineHeight: 42,
+    fontWeight: '800',
   },
   refreshButton: {
     width: 42,

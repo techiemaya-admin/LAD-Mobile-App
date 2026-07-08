@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Stack, useRouter, useSegments } from 'expo-router';
@@ -7,6 +7,9 @@ import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import useAuthStore from '@/src/store/authStore';
+import { useChatStore } from '@/src/store/chatStore';
+import { useCallStore } from '@/src/store/callStore';
+import { clearAllScreenCache } from '@/src/utils/screenCache';
 import { connectSocket, disconnectSocket } from '@/src/services/socketService';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { FloatingAssistantButton } from '@/components/features/FloatingAssistantButton';
@@ -27,12 +30,27 @@ export default function RootLayout() {
   }), []);
   const router = useRouter();
   const segments = useSegments();
-  const { token, isLoading, restoreToken } = useAuthStore();
+  const { token, user, isLoading, restoreToken } = useAuthStore();
   const appTheme = useAppTheme();
+  const loggedInUserIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     restoreToken();
   }, [restoreToken]);
+
+  useEffect(() => {
+    const currentUserId = token ? user?.id ?? null : null;
+    if (currentUserId && currentUserId !== loggedInUserIdRef.current) {
+      // A new session just started (fresh login, or a different account after
+      // logout) — wipe every in-memory cache so screens fetch this user's data
+      // instead of showing whatever the previous session left behind.
+      clearAllScreenCache();
+      queryClient.clear();
+      useChatStore.getState().reset();
+      useCallStore.getState().reset();
+    }
+    loggedInUserIdRef.current = currentUserId;
+  }, [token, user, queryClient]);
 
   useEffect(() => {
     if (isLoading) return;
