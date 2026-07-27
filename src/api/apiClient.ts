@@ -30,6 +30,38 @@ export const isApiRequestError = (error: unknown): error is ApiRequestError =>
   error instanceof ApiRequestError
   || Boolean(error && typeof error === 'object' && 'status' in error && 'data' in error);
 
+// Native builds hit the deployed backend directly with a single bare fetch — unlike
+// the web dev flow, which is fronted by scripts/auth-proxy.js and its own retry loop.
+// On a weak connection that made every transient hiccup surface immediately as a
+// user-facing "Agent call failed". Retry with a per-attempt timeout so a flaky
+// connection gets the same resilience the web proxy already provides.
+const FETCH_TIMEOUT_MS = 20000;
+const FETCH_RETRIES = 2;
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const fetchWithRetry = async (url: string, init: RequestInit): Promise<Response> => {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= FETCH_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (error) {
+      lastError = error;
+      if (attempt < FETCH_RETRIES) {
+        await wait(400 * (attempt + 1));
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  throw lastError;
+};
+
 export const API_URL =
   process.env.EXPO_PUBLIC_BACKEND_URL ||
   process.env.EXPO_PUBLIC_API_URL ||
@@ -166,7 +198,7 @@ class ApiClient {
 
     for (const baseURL of baseUrls) {
       try {
-        response = await fetch(this.buildUrl(path, baseURL, options), {
+        response = await fetchWithRetry(this.buildUrl(path, baseURL, options), {
           method,
           headers,
           credentials: 'include',

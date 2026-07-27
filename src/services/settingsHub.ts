@@ -1,4 +1,6 @@
 import { apiDelete, apiGet, apiPost, apiPut } from '@/src/api';
+import { getActiveTenantId } from '@/src/api/storage';
+import { getCallLogs, getCallLogsStats, type CallLogResponse, type CallLogsStats } from '@/src/services/call-logs';
 
 type ApiRecord = Record<string, unknown>;
 
@@ -33,6 +35,16 @@ export type CampaignStats = {
   connectionsToday: number;
   connectionsYesterday: number;
   dailyBreakdown: Array<{ date: string; count: number }>;
+  linkedinNetworkSize?: number | null;
+  linkedinRateLimits?: {
+    daily?: { max: number; total: number; accountCount: number };
+    weekly?: { max: number; total: number };
+    usage?: {
+      sentLast7Days: number;
+      weeklyPercentage: number;
+      dailyBreakdown: Array<{ date: string; sent: number }>;
+    };
+  };
 };
 
 export type TeamMember = {
@@ -143,6 +155,7 @@ export type SupportRequest = {
 
 const SUPPORT_EMAIL = 'support@techiemaya.com';
 const DEFAULT_CREDITS_PER_DOLLAR = 1000 / 99;
+const ANSWERED_CALL_STATUSES = ['answer', 'complete', 'completed', 'ended', 'success', 'connected'];
 
 const asRecord = (value: unknown): ApiRecord => (
   value && typeof value === 'object' && !Array.isArray(value) ? value as ApiRecord : {}
@@ -162,6 +175,9 @@ const pickOptionalNumber = (...values: unknown[]) => {
 };
 
 const pickNumber = (...values: unknown[]) => pickOptionalNumber(...values) ?? 0;
+
+const derivePercent = (part: number, total: number) =>
+  total > 0 ? Math.round((part / total) * 1000) / 10 : 0;
 
 const pickString = (...values: unknown[]) => {
   for (const value of values) {
@@ -288,6 +304,47 @@ const buildCampaignStatsFromCampaigns = (campaigns: CampaignItem[]): CampaignSta
     connectionsToday: 0,
     connectionsYesterday: 0,
     dailyBreakdown: [],
+    linkedinNetworkSize: null,
+  };
+};
+
+const normalizeLinkedInRateLimits = (value: unknown): CampaignStats['linkedinRateLimits'] => {
+  const record = asRecord(value);
+  if (!Object.keys(record).length) {
+    return undefined;
+  }
+
+  const daily = asRecord(record.daily);
+  const weekly = asRecord(record.weekly);
+  const usage = asRecord(record.usage);
+  const usageBreakdown = usage.daily_breakdown ?? usage.dailyBreakdown;
+
+  return {
+    daily: Object.keys(daily).length
+      ? {
+        max: pickNumber(daily.max),
+        total: pickNumber(daily.total),
+        accountCount: pickNumber(daily.account_count, daily.accountCount),
+      }
+      : undefined,
+    weekly: Object.keys(weekly).length
+      ? {
+        max: pickNumber(weekly.max),
+        total: pickNumber(weekly.total),
+      }
+      : undefined,
+    usage: Object.keys(usage).length
+      ? {
+        sentLast7Days: pickNumber(usage.sent_last_7_days, usage.sentLast7Days),
+        weeklyPercentage: pickNumber(usage.weekly_percentage, usage.weeklyPercentage),
+        dailyBreakdown: Array.isArray(usageBreakdown)
+          ? usageBreakdown.map((item) => {
+            const row = asRecord(item);
+            return { date: pickString(row.date), sent: pickNumber(row.sent, row.count) };
+          }).filter((item) => item.date)
+          : [],
+      }
+      : undefined,
   };
 };
 
@@ -295,6 +352,14 @@ const normalizeCampaignStats = (payload: unknown, campaigns: CampaignItem[] = []
   const data = asRecord(unwrapData(payload));
   const fallback = buildCampaignStatsFromCampaigns(campaigns);
   const breakdown = data.connections_daily_breakdown ?? data.connectionsDailyBreakdown;
+  const linkedinRateLimits = normalizeLinkedInRateLimits(data.linkedin_rate_limits ?? data.linkedinRateLimits);
+  const totalSent = pickNumber(data.total_sent, data.totalSent, fallback.totalSent);
+  const totalConnected = pickNumber(data.total_connected, data.totalConnected, fallback.totalConnected);
+  const totalReplied = pickNumber(data.total_replied, data.totalReplied, fallback.totalReplied);
+  const explicitConnectionRate = pickOptionalNumber(data.avg_connection_rate, data.avgConnectionRate);
+  const explicitReplyRate = pickOptionalNumber(data.avg_reply_rate, data.avgReplyRate);
+  const derivedConnectionRate = derivePercent(totalConnected, totalSent);
+  const derivedReplyRate = derivePercent(totalReplied, totalSent);
 
   // Use live data from the backend stats API if available, falling back to locally calculated metrics if needed.
   // Note: activeCampaigns is calculated locally from live campaigns status as the backend stats API active count is incorrect.
@@ -302,12 +367,16 @@ const normalizeCampaignStats = (payload: unknown, campaigns: CampaignItem[] = []
     totalCampaigns: pickNumber(data.total_campaigns, data.totalCampaigns, fallback.totalCampaigns),
     activeCampaigns: fallback.activeCampaigns,
     totalLeads: pickNumber(data.total_leads, data.totalLeads, fallback.totalLeads),
-    totalSent: pickNumber(data.total_sent, data.totalSent, fallback.totalSent),
+    totalSent,
     totalDelivered: pickNumber(data.total_delivered, data.totalDelivered, fallback.totalDelivered),
-    totalConnected: pickNumber(data.total_connected, data.totalConnected, fallback.totalConnected),
-    totalReplied: pickNumber(data.total_replied, data.totalReplied, fallback.totalReplied),
-    avgConnectionRate: pickNumber(data.avg_connection_rate, data.avgConnectionRate, fallback.avgConnectionRate),
-    avgReplyRate: pickNumber(data.avg_reply_rate, data.avgReplyRate, fallback.avgReplyRate),
+    totalConnected,
+    totalReplied,
+    avgConnectionRate: explicitConnectionRate !== null && (explicitConnectionRate > 0 || !derivedConnectionRate)
+      ? explicitConnectionRate
+      : derivedConnectionRate || fallback.avgConnectionRate,
+    avgReplyRate: explicitReplyRate !== null && (explicitReplyRate > 0 || !derivedReplyRate)
+      ? explicitReplyRate
+      : derivedReplyRate || fallback.avgReplyRate,
     connectionsToday: pickNumber(data.connections_today, data.connectionsToday),
     connectionsYesterday: pickNumber(data.connections_yesterday, data.connectionsYesterday),
     dailyBreakdown: Array.isArray(breakdown)
@@ -316,6 +385,8 @@ const normalizeCampaignStats = (payload: unknown, campaigns: CampaignItem[] = []
         return { date: pickString(record.date), count: pickNumber(record.count, record.sent) };
       }).filter((item) => item.date)
       : [],
+    linkedinNetworkSize: pickOptionalNumber(data.linkedin_network_size, data.linkedinNetworkSize, fallback.linkedinNetworkSize),
+    linkedinRateLimits,
   };
 };
 
@@ -489,33 +560,47 @@ const normalizeBillingOverview = (
   };
 };
 
-const normalizeCallsOverview = (payload: unknown) => {
-  const root = asRecord(payload);
-  const data = asRecord(root.data ?? root);
-  const logs = unwrapList(data.logs ?? data.calls ?? data);
-  const summary = unwrapList(data.summary);
-  const totalFromSummary = summary.reduce((sum, item) => sum + pickNumber(item.count, item.total, item.calls), 0);
-  // Prefer an explicit aggregate total from the API over the (paginated) logs array length.
-  const explicitTotal = pickNumber(
-    data.totalCalls, data.total_calls, data.total, data.count,
-    root.totalCalls, root.total_calls, root.total, root.count,
-  );
-  const totalCalls = explicitTotal || logs.length || totalFromSummary;
-  // Prefer an explicit answered count from the API over computing from the paginated logs.
-  const explicitAnswered = pickNumber(
-    data.answeredCalls, data.answered_calls, data.answered,
-    root.answeredCalls, root.answered_calls, root.answered,
-  );
-  const answeredFromLogs = logs.filter((item) => {
-    const status = pickString(item.status, item.call_status, item.result).toLowerCase();
-    return status.includes('answer') || status.includes('complete') || status.includes('ended') || status.includes('success');
+const getCallStatus = (call: CallLogResponse | ApiRecord) => {
+  const record = asRecord(call);
+  return pickString(record.status, record.batch_status, record.call_status, record.result, record.outcome).toLowerCase();
+};
+
+const countCallsByStatus = (calls: (CallLogResponse | ApiRecord)[], statuses: string[]) =>
+  calls.filter((call) => {
+    const status = getCallStatus(call);
+    return statuses.some((candidate) => status.includes(candidate));
   }).length;
-  const answeredCalls = explicitAnswered || answeredFromLogs;
+
+const getVoiceCallStats = async (): Promise<CallLogsStats | null> => {
+  const tenantId = await getActiveTenantId();
+  if (!tenantId) {
+    return null;
+  }
+
+  return getCallLogsStats(tenantId);
+};
+
+const normalizeCallsOverview = (logsPayload: unknown, statsPayload: unknown) => {
+  const logsRecord = asRecord(logsPayload);
+  const logs = (Array.isArray(logsRecord.logs) ? logsRecord.logs : unwrapList(logsPayload)) as (CallLogResponse | ApiRecord)[];
+  const statsRoot = asRecord(statsPayload);
+  const stats = asRecord(statsRoot.stats ?? statsRoot.summary ?? statsRoot.data ?? statsRoot);
+  const totalCallsFromLogs = pickNumber(asRecord(logsRecord.pagination).total, logsRecord.total, logs.length);
+  const totalCallsFromStats = pickNumber(stats.totalCalls, stats.total_calls);
+  const answeredCallsFromStats = pickNumber(
+    stats.answeredCalls,
+    stats.answered_calls,
+    stats.completedCalls,
+    stats.completed_calls,
+  );
+  const useStats = totalCallsFromStats > 0 || answeredCallsFromStats > 0;
+  const totalCalls = useStats ? totalCallsFromStats : totalCallsFromLogs;
+  const answeredCalls = useStats ? answeredCallsFromStats : countCallsByStatus(logs, ANSWERED_CALL_STATUSES);
 
   return {
     totalCalls,
     answeredCalls,
-    callAnswerRate: totalCalls ? Math.round((answeredCalls / totalCalls) * 1000) / 10 : 0,
+    callAnswerRate: derivePercent(answeredCalls, totalCalls),
   };
 };
 
@@ -552,6 +637,10 @@ export async function getCampaignStats(campaigns: CampaignItem[] = []): Promise<
 
 export async function updateCampaignLifecycle(campaignId: string, action: 'start' | 'pause' | 'resume' | 'stop') {
   await apiPost(`/api/campaigns/${encodeURIComponent(campaignId)}/${action}`, {});
+}
+
+export async function restartCampaign(campaignId: string) {
+  await apiPost(`/api/campaigns/${encodeURIComponent(campaignId)}/restart`, {});
 }
 
 export async function deleteCampaign(campaignId: string) {
@@ -623,7 +712,10 @@ export async function getWalletUsageAnalytics(timeRange: '7d' | '30d' | '90d' = 
 export async function getAnalyticsOverview(campaigns: CampaignItem[] = []): Promise<AnalyticsOverview> {
   const [campaignStats, calls, usage] = await Promise.all([
     safe(getCampaignStats(campaigns), buildCampaignStatsFromCampaigns(campaigns)),
-    safe(apiGet<unknown>('/api/overview/calls').then((response) => normalizeCallsOverview(response.data)), {
+    safe(Promise.all([
+      getCallLogs({ page: 1, limit: 100 }),
+      getVoiceCallStats().catch(() => null),
+    ]).then(([logs, stats]) => normalizeCallsOverview(logs, stats)), {
       totalCalls: 0,
       answeredCalls: 0,
       callAnswerRate: 0,

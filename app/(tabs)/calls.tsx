@@ -1,22 +1,26 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, FlatList, Image, Linking, Modal, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, FlatList, Image, Keyboard, Linking, Modal, Platform, ScrollView, StyleSheet, TextInput, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Bot, ChevronDown, Delete, Goal, Phone, Plus, Search, X } from 'lucide-react-native';
+import { AlertTriangle, ChevronDown, Delete, Goal, Pause, Phone, Play, Plus, RefreshCw, Search, X } from 'lucide-react-native';
+import { Audio } from 'expo-av';
+import type { AVPlaybackStatus } from 'expo-av';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
+import { LadLogoMark } from '@/components/ui/LadLogoMark';
 import { CallCard } from '@/components/features/CallCard';
 import { useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 import { SkeletonConversationRow } from '@/components/ui/SkeletonLoader';
-import { isApiRequestError, safeStorage } from '@/src/api';
+import { apiGet, apiPut, isApiRequestError, safeStorage } from '@/src/api';
 import { RESOLVED_API_URL } from '@/src/api/apiClient';
-import { getCallLead, getCallLog, getCallLogs, searchCallLogsForPhone } from '@/src/services/call-logs';
+import { getCallLead, getCallLog, getCallLogs, getRecordingSignedUrl, searchCallLogsForPhone } from '@/src/services/call-logs';
 import { DEFAULT_OUTBOUND_STARTER_PROMPT, fetchVoiceCallOptions, loadVoiceCallConfig, phoneNumbersMatch, SavedVoiceCallConfig, syncVoiceAgentCallPrompt } from '@/src/services/voiceCallConfig';
 import { makeCall } from '@/src/services/voice-agent';
 import {
   clearPendingManualDialCall,
   normalizeCallLog,
   registerManualDialCallOverride,
+  registerPendingManualDialCall,
   useCallStore,
 } from '@/src/store/callStore';
 import { useOverlayStore } from '@/src/store/overlayStore';
@@ -39,7 +43,6 @@ const DIAL_KEY_META = [
   { digit: 'backspace', letters: '' },
 ];
 const CALL_GOALS_STORAGE_KEY = 'lad.callGoals.v1';
-const DEFAULT_DIAL_CODE = '+91';
 const WEB_INPUT_RESET = Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
 const DIAL_PAD_ICON = require('../../assets/images/dial-pad.png');
 
@@ -57,6 +60,11 @@ type CallGoal = {
 type CallFeedback = {
   type: 'info' | 'success' | 'error';
   text: string;
+};
+
+type CallFailureDialog = {
+  message: string;
+  phoneNumber: string;
 };
 
 type RawCallDetails = Record<string, unknown>;
@@ -80,6 +88,32 @@ type VoiceNumber = {
   provider?: string;
   assignedAgentId?: string;
 };
+
+type DialCountryOption = {
+  iso: string;
+  flagUri: string;
+  dialCode: string;
+  label: string;
+};
+
+type DialContactSuggestion = {
+  id: string;
+  name: string;
+  phone: string;
+  source: 'prospects' | 'pipeline' | 'call-log' | 'crm' | 'personal-whatsapp' | 'whatsapp-business' | 'gmail' | 'outlook';
+  raw: RawCallDetails;
+};
+
+const DIAL_COUNTRY_OPTIONS: DialCountryOption[] = [
+  { iso: 'IN', flagUri: 'https://flagcdn.com/w40/in.png', dialCode: '+91', label: 'India' },
+  { iso: 'US', flagUri: 'https://flagcdn.com/w40/us.png', dialCode: '+1', label: 'United States' },
+  { iso: 'GB', flagUri: 'https://flagcdn.com/w40/gb.png', dialCode: '+44', label: 'United Kingdom' },
+  { iso: 'CA', flagUri: 'https://flagcdn.com/w40/ca.png', dialCode: '+1', label: 'Canada' },
+  { iso: 'AU', flagUri: 'https://flagcdn.com/w40/au.png', dialCode: '+61', label: 'Australia' },
+  { iso: 'AE', flagUri: 'https://flagcdn.com/w40/ae.png', dialCode: '+971', label: 'United Arab Emirates' },
+];
+
+const DEFAULT_DIAL_COUNTRY = DIAL_COUNTRY_OPTIONS[0];
 
 const isOptimisticManualCallId = (id: string) => /^manual-agent-call-\d+$/.test(id);
 
@@ -254,6 +288,40 @@ const normalizeE164Like = (phone: unknown) => String(phone ?? '')
   .replace(/[^\d+]/g, '')
   .replace(/^\+{2,}/, '+');
 
+const MAX_DIAL_PHONE_DIGITS = 15;
+const MIN_DIAL_PHONE_DIGITS = 7;
+
+const sanitizeDialNumberInput = (phone: unknown) => {
+  const raw = String(phone ?? '').trim();
+  let hasLeadingPlus = false;
+  let digits = '';
+
+  for (const char of raw) {
+    if (char === '+' && !hasLeadingPlus && digits.length === 0) {
+      hasLeadingPlus = true;
+      continue;
+    }
+    if (/\d/.test(char) && digits.length < MAX_DIAL_PHONE_DIGITS) {
+      digits += char;
+    }
+  }
+
+  return `${hasLeadingPlus ? '+' : ''}${digits}`;
+};
+
+const isValidDialNumber = (phone: string) => {
+  const sanitized = sanitizeDialNumberInput(phone);
+  const digits = sanitized.replace(/\D/g, '');
+  const hasPlus = sanitized.startsWith('+');
+
+  return (
+    digits.length >= MIN_DIAL_PHONE_DIGITS
+    && digits.length <= MAX_DIAL_PHONE_DIGITS
+    && /[1-9]/.test(digits)
+    && (hasPlus ? /^\+[1-9]\d{6,14}$/.test(sanitized) : /^\d{7,15}$/.test(sanitized))
+  );
+};
+
 const findVoiceNumber = (numbers: VoiceNumber[], value?: string | null) => {
   if (!value) {
     return undefined;
@@ -267,17 +335,79 @@ const findVoiceNumber = (numbers: VoiceNumber[], value?: string | null) => {
 };
 
 const normalizeDialNumber = (phone: string) => {
-  const cleaned = normalizeE164Like(phone).replace(/[^0-9+]/g, '');
-  if (!cleaned) {
+  const cleaned = sanitizeDialNumberInput(phone);
+  if (!cleaned || !isValidDialNumber(cleaned)) {
     return '';
   }
-  if (cleaned.startsWith('+')) {
-    return cleaned;
+  return cleaned;
+};
+
+const findDialCountryForNumber = (phone: string) => {
+  const sanitized = sanitizeDialNumberInput(phone);
+  if (!sanitized.startsWith('+')) {
+    return null;
   }
-  if (cleaned.startsWith(DEFAULT_DIAL_CODE.replace('+', ''))) {
-    return `+${cleaned}`;
+
+  return DIAL_COUNTRY_OPTIONS
+    .slice()
+    .sort((a, b) => b.dialCode.length - a.dialCode.length)
+    .find((country) => sanitized.startsWith(country.dialCode)) ?? null;
+};
+
+const stripDialCountryCode = (phone: string, country: DialCountryOption) => {
+  const sanitized = sanitizeDialNumberInput(phone);
+  if (sanitized.startsWith(country.dialCode)) {
+    return sanitized.slice(country.dialCode.length).replace(/\D/g, '');
   }
-  return `${DEFAULT_DIAL_CODE}${cleaned.replace(/^0+/, '')}`;
+  return sanitized.replace(/^\+/, '').replace(/\D/g, '');
+};
+
+const normalizeDialInputForCountry = (phone: string, country: DialCountryOption) => {
+  const sanitized = sanitizeDialNumberInput(phone);
+  const detected = findDialCountryForNumber(sanitized);
+  if (detected) {
+    return {
+      country: detected,
+      localNumber: stripDialCountryCode(sanitized, detected),
+    };
+  }
+
+  return {
+    country,
+    localNumber: sanitized.replace(/\D/g, ''),
+  };
+};
+
+const normalizeDialNumberForCountry = (phone: string, country: DialCountryOption) => {
+  const sanitized = sanitizeDialNumberInput(phone);
+  if (!sanitized) {
+    return '';
+  }
+  if (sanitized.startsWith('+')) {
+    return normalizeDialNumber(sanitized);
+  }
+
+  const digits = sanitized.replace(/\D/g, '');
+  if (!digits) {
+    return '';
+  }
+
+  return normalizeDialNumber(`${country.dialCode}${digits}`);
+};
+
+const isLikelyTechnicalId = (value?: string | null) => {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return false;
+  }
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)
+    || /^[0-9a-f]{24,}$/i.test(text);
+};
+
+const isPhoneLikeValue = (value?: string | null) => {
+  const text = String(value ?? '').trim();
+  const digits = text.replace(/\D/g, '');
+  return Boolean(digits.length >= 7 && digits.length <= 15 && !isLikelyTechnicalId(text));
 };
 
 const DEFAULT_AGENT_CALL_CONTEXT = [
@@ -303,13 +433,13 @@ const buildAgentCallContext = (savedContext: string | undefined, phoneNumber: st
     'After the first line, follow these call instructions:',
     usefulContext,
     displayName !== phoneNumber ? 'Contact name: ' + displayName + '.' : '',
-    'Dialed number: ' + phoneNumber + '.',
+    'Target number: ' + phoneNumber + '.',
     'If the receiver is silent, ask once: "Can you hear me clearly?" Then continue politely.',
   ].filter(Boolean).join('\n\n');
 };
 
 const normalizeManualContactName = (name: string | undefined, phoneNumber: string) => {
-  const trimmed = name?.trim();
+  const trimmed = sanitizeDialContactName(name);
   if (!trimmed) {
     return phoneNumber;
   }
@@ -329,24 +459,60 @@ const scheduleCallHistoryRefresh = (fetchCalls: () => Promise<void>) => {
   });
 };
 
+const toSentenceCaseCountry = (value: string) =>
+  value.replace(/Detected country:\s*([a-z]+)/i, (_match, country: string) => `Detected country: ${country.charAt(0).toUpperCase()}${country.slice(1).toLowerCase()}`);
+
+const appendSentence = (value: string, sentence: string) =>
+  `${value.replace(/[.?!]\s*$/, '')}. ${sentence}`;
+
+const extractCallErrorDetail = (message: string) => {
+  const jsonMatch = message.match(/\{.*\}/);
+  if (!jsonMatch) {
+    return '';
+  }
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    const detail = parsed.detail || parsed.message || parsed.error;
+    return typeof detail === 'string' ? toSentenceCaseCountry(detail.trim()) : '';
+  } catch {
+    return '';
+  }
+};
+
 const getCallErrorMessage = (error: unknown) => {
   const message = error instanceof Error ? error.message : 'Failed to initiate the voice-agent call.';
   const status = isApiRequestError(error) ? error.status : null;
+  const backendDetail = extractCallErrorDetail(message);
+  const readableMessage = backendDetail || message;
 
-  if (status === 402 || /402|payment|required|billing|credit|credits|balance|insufficient|plan/i.test(message)) {
+  if (/only\s+uae\s+calls\s+allowed/i.test(readableMessage)) {
+    return appendSentence(readableMessage, 'Use a UAE recipient number or switch to a calling number that supports this country.');
+  }
+
+  if (status === 402 || /402|payment|required|billing|credit|credits|balance|insufficient|plan/i.test(readableMessage)) {
     return 'Out of credits. Please add credits and try again.';
   }
 
-  if (/network|fetch failed|unable to reach|timeout|offline|proxy/i.test(message)) {
+  // A real HTTP status means the request reached the backend and got a response —
+  // that is a backend/voice-provider failure, not a device connectivity problem, even
+  // if its message happens to mention "network" or "timeout" (e.g. the voice provider
+  // timing out). Only a thrown fetch error with no status at all is an actual
+  // client-side network failure.
+  if (status == null && /network|fetch failed|unable to reach|timeout|offline|proxy/i.test(readableMessage)) {
     return 'Network issue. Please check your connection and try again.';
   }
 
-  if (/verified|calling number|from number|provider|voice account|agent/i.test(message)) {
+  if (/verified|calling number|from number|provider|voice account|agent/i.test(readableMessage)) {
     return 'Voice calling setup needs attention. Check your agent and calling number, then try again.';
   }
 
-  if (/PRODUCTION database config missing|DB_HOST|DB_DATABASE|DB_USER|DB_PASSWORD/i.test(message)) {
+  if (/PRODUCTION database config missing|DB_HOST|DB_DATABASE|DB_USER|DB_PASSWORD/i.test(readableMessage)) {
     return 'Voice calling is temporarily unavailable. Please try again later.';
+  }
+
+  if (status != null && readableMessage) {
+    return readableMessage;
   }
 
   return 'Unable to start the voice call. Please try again.';
@@ -366,7 +532,7 @@ const formatDetailValue = (value: unknown) => {
 
 const formatCallTypeLabel = (type: CallRecord['type']) => {
   if (type === 'manual-dial') {
-    return 'manual dial';
+    return 'voice call';
   }
 
   if (type === 'missed') {
@@ -386,8 +552,21 @@ const isResolvedBackendCall = (call: CallRecord) => {
 };
 
 const isGenericCallName = (value?: string | null) => {
-  const normalized = String(value ?? '').trim().toLowerCase();
-  return !normalized || normalized === 'unknown lead' || normalized === 'manual dial' || isPlaceholderPhone(normalized);
+  const normalized = sanitizeDialContactName(value).toLowerCase();
+  return !normalized || normalized === 'unknown lead' || normalized === 'unknown contact' || normalized === 'manual dial' || isPlaceholderPhone(normalized) || phoneKey(normalized).length >= 7;
+};
+
+const getManualDialDisplayName = (call: CallRecord, details?: RawCallDetails | null) => {
+  const metadata = getBackendMetadata(details);
+  const value = normalizeContactDisplayName(String(
+    pickBackendOrMetadataValue(details, 'contact_name', 'lead_name', 'manual_contact_name', 'client_name') ||
+      metadata.contact_name ||
+      metadata.lead_name ||
+      metadata.manual_contact_name ||
+      call.name ||
+      '',
+  ));
+  return isGenericCallName(value) ? '' : value;
 };
 
 const isManualDialBackendCandidate = (call: CallRecord, details?: RawCallDetails | null) => {
@@ -485,10 +664,13 @@ const mergeManualDialBackendCall = (
     ? backendCall.backendDetails as RawCallDetails
     : {};
   const metadata = getBackendMetadata(backendDetails);
+  const selectedName = getManualDialDisplayName(selectedCall, selectedDetails);
+  const backendName = getManualDialDisplayName(backendCall, backendDetails);
+  const displayName = selectedName || backendName || (isGenericCallName(backendCall.name) && phone ? phone : backendCall.name);
 
   return {
     ...backendCall,
-    name: isGenericCallName(backendCall.name) && phone ? phone : backendCall.name,
+    name: displayName,
     phone,
     type: 'manual-dial',
     backendDetails: {
@@ -591,6 +773,561 @@ const formatBackendDate = (value: unknown) => {
   });
 };
 
+const buildAbsoluteApiUrl = (url: string) => {
+  const trimmed = url.trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  return `${RESOLVED_API_URL.replace(/\/+$/, '')}/${trimmed.replace(/^\/+/, '')}`;
+};
+
+const getRecordingUrlFromDetails = (details?: RawCallDetails | null) => {
+  const metadata = getBackendMetadata(details);
+  const value = pickBackendValue(
+    details,
+    'signed_recording_url',
+    'recording_signed_url',
+    'recording_url',
+    'call_recording_url',
+    'recordingUrl',
+    'callRecordingUrl',
+    'audio_url',
+    'audioUrl',
+  ) || pickBackendValue(
+    metadata,
+    'signed_recording_url',
+    'recording_signed_url',
+    'recording_url',
+    'call_recording_url',
+    'recordingUrl',
+    'callRecordingUrl',
+    'audio_url',
+    'audioUrl',
+  );
+
+  return typeof value === 'string' && value.trim() ? buildAbsoluteApiUrl(value) : '';
+};
+
+const getCallIdForRecording = (details?: RawCallDetails | null, selected?: CallRecord | null) => String(
+  pickBackendValue(details, 'call_log_id', 'id', 'call_id', 'callId') ||
+    selected?.id ||
+    '',
+).trim();
+
+const formatRecordingTime = (millis?: number) => {
+  const totalSeconds = Math.max(0, Math.floor((millis || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+};
+
+const unwrapRecordArray = (payload: unknown): RawCallDetails[] => {
+  if (Array.isArray(payload)) {
+    return payload.filter((item) => item && typeof item === 'object') as RawCallDetails[];
+  }
+
+  const record = getRawObject(payload);
+  for (const key of ['data', 'prospects', 'leads', 'contacts', 'items', 'results', 'rows']) {
+    const value = record[key];
+    if (Array.isArray(value)) {
+      return value.filter((item) => item && typeof item === 'object') as RawCallDetails[];
+    }
+    const nested = getRawObject(value);
+    for (const nestedKey of ['data', 'prospects', 'leads', 'contacts', 'items', 'results', 'rows']) {
+      const nestedValue = nested[nestedKey];
+      if (Array.isArray(nestedValue)) {
+        return nestedValue.filter((item) => item && typeof item === 'object') as RawCallDetails[];
+      }
+    }
+  }
+
+  for (const key of ['data', 'result', 'payload', 'contact', 'lead', 'prospect', 'item', 'record']) {
+    const value = getRawObject(record[key]);
+    if (Object.keys(value).length) {
+      return [value];
+    }
+  }
+
+  return Object.keys(record).length ? [record] : [];
+};
+
+const pickDisplayString = (...values: unknown[]) => {
+  for (const value of values) {
+    if (value != null && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+  return '';
+};
+
+const sanitizeDialContactName = (value?: string | null) =>
+  String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s+(manual\s+)?dial$/i, '')
+    .trim();
+
+const normalizeContactDisplayName = (value: string) => {
+  const text = sanitizeDialContactName(value);
+  if (!text) {
+    return '';
+  }
+
+  const parts = text.split(' ');
+  if (parts.length % 2 === 0) {
+    const mid = parts.length / 2;
+    const first = parts.slice(0, mid).join(' ').toLowerCase();
+    const second = parts.slice(mid).join(' ').toLowerCase();
+    if (first === second) {
+      return parts.slice(0, mid).join(' ');
+    }
+  }
+
+  return text;
+};
+
+const getDialContactNameFromRecord = (record: RawCallDetails) => {
+  const metadata = getRawObject(record.metadata);
+  const profile = getRawObject(record.profile || record.person || record.contact || record.lead || record.customer);
+  const nested = getRawObject(record.data || record.result || record.payload || record.record);
+  const name = normalizeContactDisplayName(pickDisplayString(
+    record.contact_name,
+    record.contactName,
+    record.contact_full_name,
+    record.contactFullName,
+    record.manual_contact_name,
+    record.manualContactName,
+    record.client_name,
+    record.clientName,
+    record.customer_name,
+    record.customerName,
+    record.lead_name,
+    record.leadName,
+    record.lead_full_name,
+    record.leadFullName,
+    record.name,
+    record.full_name,
+    record.fullName,
+    record.display_name,
+    record.displayName,
+    record.pushname,
+    record.profile_name,
+    [record.first_name, record.last_name].filter(Boolean).join(' '),
+    [record.firstName, record.lastName].filter(Boolean).join(' '),
+    profile.name,
+    profile.full_name,
+    profile.fullName,
+    profile.contact_name,
+    profile.contactName,
+    profile.display_name,
+    profile.displayName,
+    [profile.first_name, profile.last_name].filter(Boolean).join(' '),
+    [profile.firstName, profile.lastName].filter(Boolean).join(' '),
+    metadata.name,
+    metadata.contact_name,
+    metadata.contactName,
+    metadata.manual_contact_name,
+    metadata.manualContactName,
+    metadata.client_name,
+    metadata.clientName,
+    metadata.customer_name,
+    metadata.customerName,
+    metadata.lead_name,
+    metadata.leadName,
+    metadata.display_name,
+    metadata.displayName,
+    [metadata.first_name, metadata.last_name].filter(Boolean).join(' '),
+    [metadata.firstName, metadata.lastName].filter(Boolean).join(' '),
+    nested.contact_name,
+    nested.contactName,
+    nested.manual_contact_name,
+    nested.manualContactName,
+    nested.client_name,
+    nested.clientName,
+    nested.customer_name,
+    nested.customerName,
+    nested.lead_name,
+    nested.leadName,
+    nested.name,
+    nested.full_name,
+    nested.fullName,
+    nested.display_name,
+    nested.displayName,
+    [nested.first_name, nested.last_name].filter(Boolean).join(' '),
+    [nested.firstName, nested.lastName].filter(Boolean).join(' '),
+  ));
+  return isPhoneLikeValue(name) || isLikelyTechnicalId(name) ? '' : name;
+};
+
+const getDialContactPhoneFromRecord = (record: RawCallDetails) => {
+  const metadata = getRawObject(record.metadata);
+  const profile = getRawObject(record.profile || record.person || record.contact || record.lead || record.customer);
+  const nested = getRawObject(record.data || record.result || record.payload || record.record);
+  const baseNumber = pickDisplayString(record.to_base_number, record.base_number, metadata.to_base_number, metadata.base_number);
+  const countryCode = pickDisplayString(record.to_country_code, record.country_code, metadata.to_country_code, metadata.country_code);
+  const composedNumber = baseNumber ? `${countryCode}${baseNumber}` : '';
+  return pickDisplayString(
+    record.phone,
+    record.phone_e164,
+    record.phone_number,
+    record.phoneNumber,
+    record.to_number,
+    record.toNumber,
+    record.local_dialed_number,
+    record.localDialedNumber,
+    record.lad_app_dialed_number,
+    record.ladAppDialedNumber,
+    record.mobile,
+    record.mobile_number,
+    record.mobileNumber,
+    record.number,
+    record.whatsapp_number,
+    record.whatsappNumber,
+    record.wa_id,
+    record.waId,
+    record.remote_jid,
+    record.remoteJid,
+    record.contact_phone,
+    record.contactPhone,
+    record.lead_phone,
+    record.leadPhone,
+    profile.phone,
+    profile.phone_e164,
+    profile.phone_number,
+    profile.phoneNumber,
+    profile.mobile,
+    profile.mobile_number,
+    profile.mobileNumber,
+    profile.number,
+    profile.whatsapp_number,
+    profile.whatsappNumber,
+    profile.wa_id,
+    profile.waId,
+    metadata.phone,
+    metadata.phone_e164,
+    metadata.phone_number,
+    metadata.phoneNumber,
+    metadata.to_number,
+    metadata.toNumber,
+    metadata.local_dialed_number,
+    metadata.localDialedNumber,
+    metadata.lad_app_dialed_number,
+    metadata.ladAppDialedNumber,
+    metadata.mobile,
+    metadata.mobile_number,
+    metadata.number,
+    metadata.whatsapp_number,
+    metadata.whatsappNumber,
+    metadata.wa_id,
+    metadata.waId,
+    nested.phone,
+    nested.phone_e164,
+    nested.phone_number,
+    nested.phoneNumber,
+    nested.to_number,
+    nested.toNumber,
+    nested.local_dialed_number,
+    nested.localDialedNumber,
+    nested.lad_app_dialed_number,
+    nested.ladAppDialedNumber,
+    nested.mobile,
+    nested.mobile_number,
+    nested.number,
+    nested.whatsapp_number,
+    nested.whatsappNumber,
+    nested.wa_id,
+    composedNumber,
+  );
+};
+
+const normalizeDialContactSuggestion = (
+  record: RawCallDetails,
+  source: DialContactSuggestion['source'],
+  fallbackPhone = '',
+): DialContactSuggestion | null => {
+  const metadata = getRawObject(record.metadata);
+  const profile = getRawObject(record.profile || record.person || record.contact || record.lead || record.customer);
+  const nested = getRawObject(record.data || record.result || record.payload || record.record);
+  const id = pickDisplayString(
+    record.id,
+    record._id,
+    record.lead_id,
+    record.leadId,
+    record.contact_id,
+    record.contactId,
+    profile.id,
+    profile._id,
+    profile.lead_id,
+    profile.leadId,
+    profile.contact_id,
+    profile.contactId,
+    metadata.id,
+    metadata.lead_id,
+    metadata.contact_id,
+    nested.id,
+    nested._id,
+    nested.lead_id,
+    nested.leadId,
+    nested.contact_id,
+    nested.contactId,
+  );
+  const phone = getDialContactPhoneFromRecord(record) || fallbackPhone;
+  const name = getDialContactNameFromRecord(record);
+  if (!phone || !name) {
+    return null;
+  }
+
+  return { id: id || `${source}-${phoneKey(phone) || phone}`, name, phone, source, raw: record };
+};
+
+const findLocalDialContact = (calls: CallRecord[], phone: string): DialContactSuggestion | null => {
+  const search = phoneKey(phone);
+  if (!search) {
+    return null;
+  }
+
+  for (const call of calls) {
+    const details = getRawObject(call.backendDetails);
+    const metadata = getBackendMetadata(details);
+    const localPhone = getSelectedManualDialPhone(call, details) || getDetailsPhone(details) || call.phone || phone;
+    if (phoneKey(localPhone) !== search) {
+      continue;
+    }
+
+    const localName = getManualDialDisplayName(call, details) || getDialContactNameFromRecord(details);
+    const suggestion = normalizeDialContactSuggestion(
+      {
+        ...details,
+        id: details.id || details.call_log_id || call.id,
+        phone: localPhone,
+        contact_name: localName,
+        lead_name: localName,
+        metadata: {
+          ...metadata,
+          phone: localPhone,
+          contact_name: localName,
+          lead_name: localName,
+          manual_contact_name: localName,
+        },
+      },
+      'call-log',
+      phone,
+    );
+
+    if (suggestion && phoneKey(suggestion.phone) === search) {
+      return suggestion;
+    }
+  }
+
+  return null;
+};
+
+const findExistingDialContact = async (phone: string): Promise<DialContactSuggestion | null> => {
+  const search = phoneKey(phone) || phone.replace(/\D/g, '');
+  if (!search) {
+    return null;
+  }
+
+  const callLogMatch = (await searchCallLogsForPhone(phone).catch(() => []))
+    .map((item) => {
+      const rawItem = getRawObject(item);
+      const details = getRawObject(rawItem.backendDetails);
+      return normalizeDialContactSuggestion(Object.keys(details).length ? details : getRawObject(item), 'call-log', phone);
+    })
+    .filter((item): item is DialContactSuggestion => Boolean(item))
+    .find((item) => phoneKey(item.phone) === search || phoneKey(item.phone) === phoneKey(phone));
+
+  if (callLogMatch) {
+    return callLogMatch;
+  }
+
+  const queries = [
+    { source: 'prospects' as const, path: '/api/prospects' },
+    { source: 'pipeline' as const, path: '/api/deals-pipeline/leads' },
+    { source: 'crm' as const, path: '/api/social-integration/gohighlevel/contacts/local' },
+    { source: 'personal-whatsapp' as const, path: '/api/personal-whatsapp/contacts' },
+    { source: 'whatsapp-business' as const, path: '/api/conversations' },
+    { source: 'gmail' as const, path: '/api/email-comms/contacts', extraParams: { provider: 'google', channel: 'gmail' } },
+    { source: 'outlook' as const, path: '/api/email-comms/contacts', extraParams: { provider: 'microsoft', channel: 'outlook' } },
+  ];
+
+  for (const query of queries) {
+    const paramVariants = [
+      { search, limit: 10 },
+      { q: search, limit: 10 },
+      { query: search, limit: 10 },
+      { phone: search, limit: 10 },
+      { phone_e164: phone, limit: 10 },
+      { phone_number: search, limit: 10 },
+      { phoneNumber: search, limit: 10 },
+      { mobile: search, limit: 10 },
+      { mobile_number: search, limit: 10 },
+      { number: search, limit: 10 },
+      { whatsapp_number: search, limit: 10 },
+    ];
+
+    for (const params of paramVariants) {
+      try {
+        const response = await apiGet<unknown>(query.path, { params: { ...params, ...(query.extraParams ?? {}) } });
+        const records = unwrapRecordArray(response.data);
+        const allowFallbackPhone = records.length === 1 ? phone : '';
+        const match = records
+          .map((item) => normalizeDialContactSuggestion(item, query.source, allowFallbackPhone))
+          .filter((item): item is DialContactSuggestion => Boolean(item))
+          .find((item) => phoneKey(item.phone) === search || phoneKey(item.phone) === phoneKey(phone));
+        if (match) {
+          return match;
+        }
+      } catch {
+        // Try the next lightweight query shape.
+      }
+    }
+  }
+
+  return null;
+};
+
+const buildExistingContactMetadata = (contact: DialContactSuggestion | null) => {
+  if (!contact) {
+    return {};
+  }
+
+  return {
+    contact_source: contact.source,
+    existing_contact_lookup_id: String(contact.id),
+    existing_contact_lookup_name: contact.name,
+    existing_contact_lookup_phone: contact.phone,
+  };
+};
+
+const updateExistingDialContactName = async (contact: DialContactSuggestion, name: string) => {
+  const trimmed = normalizeContactDisplayName(name);
+  if (!trimmed || trimmed === contact.name) {
+    return;
+  }
+
+  if (contact.source === 'pipeline') {
+    await apiPut(`/api/deals-pipeline/leads/${encodeURIComponent(contact.id)}`, { name: trimmed });
+    return;
+  }
+
+  if (contact.source === 'prospects') {
+    return;
+  }
+
+  if (contact.source === 'call-log') {
+    return;
+  }
+
+  if (contact.source === 'crm') {
+    return;
+  }
+
+  if (contact.source === 'personal-whatsapp') {
+    return;
+  }
+
+  if (contact.source === 'whatsapp-business') {
+    return;
+  }
+
+  if (contact.source === 'gmail' || contact.source === 'outlook') {
+    return;
+  }
+};
+
+const renameCallsForDialContact = (
+  calls: CallRecord[],
+  contact: DialContactSuggestion,
+  phone: string,
+  name: string,
+) => {
+  const contactPhoneKey = phoneKey(contact.phone) || phoneKey(phone);
+  const contactId = String(contact.id);
+  return calls.map((call) => {
+    const details = getRawObject(call.backendDetails);
+    const metadata = getBackendMetadata(details);
+    const callIds = [
+      details.contact_id,
+      details.contactId,
+      details.lead_id,
+      details.leadId,
+      details.existing_contact_id,
+      metadata.contact_id,
+      metadata.contactId,
+      metadata.lead_id,
+      metadata.leadId,
+      metadata.existing_contact_id,
+    ].map((value) => String(value ?? '')).filter(Boolean);
+    const callPhoneKey = phoneKey(call.phone || getDetailsPhone(details));
+    const matches = callIds.includes(contactId) || (contactPhoneKey && callPhoneKey === contactPhoneKey);
+
+    if (!matches) {
+      return call;
+    }
+
+    return {
+      ...call,
+      name,
+      backendDetails: {
+        ...details,
+        contact_name: name,
+        lead_name: name,
+        manual_contact_name: name,
+        metadata: {
+          ...metadata,
+          contact_name: name,
+          lead_name: name,
+          manual_contact_name: name,
+        },
+      },
+    };
+  });
+};
+
+const getDisplayFromNumber = (
+  call: CallRecord | null,
+  details: RawCallDetails | null,
+  numbers: VoiceNumber[],
+) => {
+  const metadata = getBackendMetadata(details);
+  const candidates = [
+    pickBackendValue(details, 'from_number', 'caller_number', 'caller_id', 'from_phone_number'),
+    pickBackendValue(metadata, 'from_number', 'caller_number', 'caller_id', 'from_phone_number'),
+    call?.fromNumber?.phoneNumber,
+    call?.fromNumber?.label,
+  ].map((item) => String(item ?? '').trim());
+
+  const phoneCandidate = candidates.find(isPhoneLikeValue);
+  if (phoneCandidate) {
+    return phoneCandidate;
+  }
+
+  const fromId = String(
+    pickBackendValue(details, 'from_number_id', 'fromNumberId') ||
+      pickBackendValue(metadata, 'from_number_id', 'fromNumberId') ||
+      call?.fromNumber?.id ||
+      '',
+  ).trim();
+  const matchedNumber = numbers.find((number) => number.id === fromId || phoneNumbersMatch(number.phone_number, fromId));
+  return matchedNumber?.phone_number || '-';
+};
+
+const getCallFailureDetail = (details: RawCallDetails | null, call: CallRecord | null) => {
+  const metadata = getBackendMetadata(details);
+  const value = pickDisplayString(
+    getBackendStatusReason(details),
+    getBackendOutcomeValue(details),
+    pickBackendValue(details, 'error_message', 'failure_reason', 'message', 'provider_message'),
+    pickBackendValue(metadata, 'error_message', 'failure_reason', 'message', 'provider_message'),
+    call?.aiSummary.callOutcome,
+  );
+  return value || '-';
+};
+
 function DetailSection({
   title,
   appTheme,
@@ -641,7 +1378,13 @@ export default function CallsScreen() {
   const [search, setSearch] = useState('');
   const [isDialerOpen, setIsDialerOpen] = useState(false);
   const [dialNumber, setDialNumber] = useState('');
+  const [selectedDialCountry, setSelectedDialCountry] = useState<DialCountryOption>(DEFAULT_DIAL_COUNTRY);
+  const [isDialCountryPickerOpen, setIsDialCountryPickerOpen] = useState(false);
   const [dialContactName, setDialContactName] = useState('');
+  const [dialContactSuggestion, setDialContactSuggestion] = useState<DialContactSuggestion | null>(null);
+  const [isDialContactLookupLoading, setIsDialContactLookupLoading] = useState(false);
+  const [dialContactNameEdited, setDialContactNameEdited] = useState(false);
+  const [dialAutoFilledContactKey, setDialAutoFilledContactKey] = useState('');
   const [callGoals, setCallGoals] = useState<CallGoal[]>([]);
   const [goalModalOpen, setGoalModalOpen] = useState(false);
   const [goalTitle, setGoalTitle] = useState('');
@@ -655,7 +1398,10 @@ export default function CallsScreen() {
   const [savedVoiceConfig, setSavedVoiceConfig] = useState<SavedVoiceCallConfig | null>(null);
   const [isVoiceConfigLoading, setIsVoiceConfigLoading] = useState(false);
   const [isCalling, setIsCalling] = useState(false);
+  const [isManualRefreshActive, setIsManualRefreshActive] = useState(false);
   const [callFeedback, setCallFeedback] = useState<CallFeedback | null>(null);
+  const [callFailureDialog, setCallFailureDialog] = useState<CallFailureDialog | null>(null);
+  const [showContactNameRequired, setShowContactNameRequired] = useState(false);
   const [voiceConfigError, setVoiceConfigError] = useState<string | null>(null);
   // No per-call instruction override — always use saved AI Voice Calling config
   const [isAgentPickerOpen, setIsAgentPickerOpen] = useState(false);
@@ -665,12 +1411,21 @@ export default function CallsScreen() {
   const [selectedLeadDetails, setSelectedLeadDetails] = useState<RawLeadDetails | null>(null);
   const [selectedContactCalls, setSelectedContactCalls] = useState<CallRecord[]>([]);
   const [isDetailsLoading, setIsDetailsLoading] = useState(false);
+  const [isRecordingOpening, setIsRecordingOpening] = useState(false);
+  const [recordingResolvedUrl, setRecordingResolvedUrl] = useState('');
+  const [recordingPlaying, setRecordingPlaying] = useState(false);
+  const [recordingPositionMs, setRecordingPositionMs] = useState(0);
+  const [recordingDurationMs, setRecordingDurationMs] = useState(0);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const setCallDialerOpen = useOverlayStore((state) => state.setCallDialerOpen);
   const listRef = useRef<FlatList<CallRecord>>(null);
+  const manualCallInFlightRef = useRef(false);
+  const recordingSoundRef = useRef<Audio.Sound | null>(null);
   const {
     calls,
     isLoading,
+    isRefreshing,
     isLoadingMore,
     error,
     initializeRealtime,
@@ -679,6 +1434,35 @@ export default function CallsScreen() {
     prependCall,
     setCalls,
   } = useCallStore();
+
+  const resetRecordingPlayback = useCallback(async () => {
+    const sound = recordingSoundRef.current;
+    recordingSoundRef.current = null;
+    if (sound) {
+      await sound.stopAsync().catch(() => undefined);
+      await sound.unloadAsync().catch(() => undefined);
+    }
+    setRecordingResolvedUrl('');
+    setRecordingPlaying(false);
+    setRecordingPositionMs(0);
+    setRecordingDurationMs(0);
+    setRecordingError(null);
+    setIsRecordingOpening(false);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      const sound = recordingSoundRef.current;
+      recordingSoundRef.current = null;
+      if (sound) {
+        void sound.unloadAsync().catch(() => undefined);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    void resetRecordingPlayback();
+  }, [resetRecordingPlayback, selectedCall?.id]);
 
   useEffect(() => {
     Animated.timing(dialFabProgress, {
@@ -701,6 +1485,19 @@ export default function CallsScreen() {
     initializeRealtime();
     void fetchCalls();
   }, [fetchCalls, initializeRealtime]);
+
+  const handleRefreshCalls = useCallback(async () => {
+    if (isManualRefreshActive) {
+      return;
+    }
+
+    setIsManualRefreshActive(true);
+    try {
+      await fetchCalls({ force: true, replace: true });
+    } finally {
+      setIsManualRefreshActive(false);
+    }
+  }, [fetchCalls, isManualRefreshActive]);
 
   useEffect(() => {
     setCallDialerOpen(isDialerOpen);
@@ -830,11 +1627,81 @@ export default function CallsScreen() {
     () => findVoiceNumber(voiceNumbers, selectedFromNumber) ?? voiceNumbers[0],
     [selectedFromNumber, voiceNumbers],
   );
+  const normalizedDialNumber = useMemo(
+    () => normalizeDialNumberForCountry(dialNumber, selectedDialCountry),
+    [dialNumber, selectedDialCountry],
+  );
   const hasSavedVoiceSetup = Boolean(savedVoiceConfig?.agentId && savedVoiceConfig?.fromNumber);
-  const isDialCallDisabled = !dialNumber.trim() || isCalling || (isVoiceConfigLoading && !hasSavedVoiceSetup);
+  const isDialCallDisabled = !isValidDialNumber(normalizedDialNumber)
+    || isCalling
+    || (isVoiceConfigLoading && !hasSavedVoiceSetup);
+
+  useEffect(() => {
+    setDialAutoFilledContactKey('');
+  }, [normalizedDialNumber]);
+
+  useEffect(() => {
+    if (!isDialerOpen || normalizedDialNumber.replace(/\D/g, '').length < MIN_DIAL_PHONE_DIGITS) {
+      setDialContactSuggestion(null);
+      setIsDialContactLookupLoading(false);
+      return;
+    }
+
+    const localMatch = findLocalDialContact(calls, normalizedDialNumber);
+    if (localMatch) {
+      setDialContactSuggestion(localMatch);
+      setIsDialContactLookupLoading(false);
+      const matchKey = `${normalizedDialNumber}:${localMatch.id}`;
+      const canAutoFill = Boolean(
+        (!dialContactNameEdited || !dialContactName.trim()) &&
+        (dialAutoFilledContactKey !== matchKey || !dialContactName.trim()),
+      );
+      if (canAutoFill) {
+        setDialContactName(localMatch.name);
+        setDialContactNameEdited(false);
+        setDialAutoFilledContactKey(matchKey);
+        setShowContactNameRequired(false);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    setIsDialContactLookupLoading(true);
+    void findExistingDialContact(normalizedDialNumber)
+      .then((match) => {
+        if (cancelled) {
+          return;
+        }
+        setDialContactSuggestion(match);
+        const matchKey = match ? `${normalizedDialNumber}:${match.id}` : '';
+        const canAutoFill = Boolean(
+          match &&
+          (!dialContactNameEdited || !dialContactName.trim()) &&
+          (dialAutoFilledContactKey !== matchKey || !dialContactName.trim()),
+        );
+        if (match && canAutoFill) {
+          setDialContactName(match.name);
+          setDialContactNameEdited(false);
+          setDialAutoFilledContactKey(matchKey);
+          setShowContactNameRequired(false);
+        } else if (!match && !dialContactNameEdited) {
+          setDialContactName('');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsDialContactLookupLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [calls, dialAutoFilledContactKey, dialContactName, dialContactNameEdited, isDialerOpen, normalizedDialNumber]);
+
   const filteredCalls = useMemo(() => calls.filter((call) => {
     const query = search.trim().toLowerCase();
-    const displayName = call.type === 'manual-dial' ? 'manual dial' : call.name.toLowerCase();
+    const displayName = call.name.toLowerCase();
     const matchesSearch = !query
       || displayName.includes(query)
       || call.name.toLowerCase().includes(query)
@@ -887,11 +1754,18 @@ export default function CallsScreen() {
 
   const openDialer = useCallback((number?: string) => {
     if (number) {
-      setDialNumber(number);
+      const normalized = normalizeDialInputForCountry(number, selectedDialCountry);
+      setSelectedDialCountry(normalized.country);
+      setDialNumber(normalized.localNumber);
     } else {
       setDialNumber('');
     }
     setDialContactName('');
+    setDialContactSuggestion(null);
+    setDialContactNameEdited(false);
+    setDialAutoFilledContactKey('');
+    setIsDialCountryPickerOpen(false);
+    setShowContactNameRequired(false);
     setCallFeedback(null);
     void loadVoiceCallConfig().then((config) => {
       if (config) {
@@ -902,10 +1776,18 @@ export default function CallsScreen() {
       }
     });
     setIsDialerOpen(true);
-  }, [voiceNumbers]);
+  }, [selectedDialCountry, voiceNumbers]);
+
+  const handleDialNumberChange = useCallback((value: string) => {
+    const normalized = normalizeDialInputForCountry(value, selectedDialCountry);
+    setSelectedDialCountry(normalized.country);
+    setDialNumber(normalized.localNumber);
+    setDialContactSuggestion(null);
+    setDialAutoFilledContactKey('');
+  }, [selectedDialCountry]);
 
   const appendDialDigit = useCallback((digit: string) => {
-    setDialNumber((current) => `${current}${digit}`);
+    setDialNumber((current) => sanitizeDialNumberInput(`${current}${digit}`).replace(/\D/g, ''));
   }, []);
 
   const deleteDialDigit = useCallback(() => {
@@ -916,17 +1798,28 @@ export default function CallsScreen() {
     try {
       await Linking.openURL(`tel:${phoneNumber}`);
     } catch {
-      Alert.alert('Call unavailable', 'This device could not open the phone dialer.');
+      Alert.alert('Call unavailable', 'This device could not open the phone app.');
     }
   }, []);
 
   const handleManualCall = useCallback(async () => {
+    if (manualCallInFlightRef.current) {
+      return;
+    }
+
     setCallFeedback(null);
-    const normalizedNumber = normalizeDialNumber(dialNumber);
+    const contactName = dialContactName.trim();
+    const normalizedNumber = normalizedDialNumber;
+
+    if (!contactName) {
+      setShowContactNameRequired(true);
+      setCallFeedback({ type: 'error', text: 'Contact name is required before starting an agent call.' });
+      return;
+    }
 
     if (!normalizedNumber) {
-      setCallFeedback({ type: 'error', text: 'Enter a phone number before calling.' });
-      Alert.alert('Dial number', 'Enter a phone number before calling.');
+      setCallFeedback({ type: 'error', text: 'Enter a valid phone number with 7 to 15 digits.' });
+      Alert.alert('Invalid phone number', 'Enter a valid phone number with 7 to 15 digits. Country code is optional.');
       return;
     }
 
@@ -939,9 +1832,12 @@ export default function CallsScreen() {
     const configuredAgentId = configuredVoiceNumber?.assignedAgentId || effectiveSavedConfig?.agentId || selectedAgentId;
     // Always use the saved AI Voice Calling config from Settings — no per-call override
     const effectiveInstructions = effectiveSavedConfig?.context;
-    const manualContactName = normalizeManualContactName(dialContactName, normalizedNumber);
+    const manualContactName = normalizeManualContactName(contactName, normalizedNumber);
+    const existingContactMetadata = buildExistingContactMetadata(dialContactSuggestion);
     const configuredContext = buildAgentCallContext(effectiveInstructions, normalizedNumber, manualContactName);
     const configuredAgentName = voiceAgents.find((agent) => agent.id === configuredAgentId)?.name || effectiveSavedConfig?.agentName || selectedVoiceAgent?.name || 'Voice agent';
+    const clientCallId = `lad-manual-${Date.now()}`;
+    const startedAt = new Date().toISOString();
 
     if (latestConfigIsUsable && latestConfig) {
       setSavedVoiceConfig(latestConfig);
@@ -975,10 +1871,29 @@ export default function CallsScreen() {
       return;
     }
 
+    manualCallInFlightRef.current = true;
     setIsCalling(true);
     setCallFeedback({ type: 'info', text: `Calling ${normalizedNumber} with ${configuredAgentName}...` });
 
     try {
+      if (dialContactSuggestion) {
+        if (manualContactName !== dialContactSuggestion.name) {
+          try {
+            await updateExistingDialContactName(dialContactSuggestion, manualContactName);
+          } catch (updateError) {
+            const message = updateError instanceof Error
+              ? updateError.message
+              : 'Unable to update the existing contact name.';
+            setCallFeedback({ type: 'error', text: message });
+            Alert.alert('Contact update failed', message);
+            return;
+          }
+        }
+        const updatedContact = { ...dialContactSuggestion, name: manualContactName };
+        setDialContactSuggestion(updatedContact);
+        setCalls(renameCallsForDialContact(useCallStore.getState().calls, updatedContact, normalizedNumber, manualContactName));
+      }
+
       // Best-effort: push the latest starter prompt to the agent. Never blocks the call.
       void syncVoiceAgentCallPrompt(configuredAgent, configuredContext)
         .then((syncedAgentPrompt) => {
@@ -999,15 +1914,32 @@ export default function CallsScreen() {
         contactName: manualContactName,
         agentName: configuredAgentName,
         openingMessage: DEFAULT_OUTBOUND_STARTER_PROMPT,
+        clientCallId,
+        startedAt,
+        metadata: {
+          ...existingContactMetadata,
+          idempotency_key: clientCallId,
+          request_id: clientCallId,
+          source_table: 'lad_stage.voice_call_logs',
+          call_type: 'manual_dial',
+          source: 'lad_mobile_dialer',
+          contact_name: manualContactName,
+          lead_name: manualContactName,
+          manual_contact_name: manualContactName,
+          name: manualContactName,
+          full_name: manualContactName,
+          customer_name: manualContactName,
+          to_number: normalizedNumber,
+          phone_number: normalizedNumber,
+        },
       });
 
       // Use the real call log ID returned by the backend (not a fabricated one).
       // This allows the live-call poll to track and update this exact record once
       // the backend propagates it to the call list endpoint.
       const backendCallLogId = findCallLogIdInPayload(responseData) || `lad-dialing-${Date.now()}`;
-      const startedAt = new Date().toISOString();
       const hasContactName = Boolean(manualContactName) && manualContactName !== normalizedNumber;
-      const displayName = hasContactName ? manualContactName : 'Manual Dial';
+      const displayName = hasContactName ? manualContactName : normalizedNumber;
 
       // Register an override so applyManualDialOverride shows the contact name and
       // real phone number when the backend record lands (the backend may store a
@@ -1017,7 +1949,7 @@ export default function CallsScreen() {
       // Immediately prepend a "queued" entry using the real backend call log ID.
       // This gives instant visual feedback and — since its callStatus is live —
       // activates the 15 s live-call poll so status updates arrive automatically.
-      prependCall({
+      const queuedCall: CallRecord = {
         id: backendCallLogId,
         name: displayName,
         phone: normalizedNumber,
@@ -1040,10 +1972,21 @@ export default function CallsScreen() {
           lad_app_dialed_number: normalizedNumber,
           status: 'queued',
           local_started_at: startedAt,
+          client_call_id: clientCallId,
+          contact_name: hasContactName ? manualContactName : undefined,
+          lead_name: hasContactName ? manualContactName : undefined,
+          manual_contact_name: hasContactName ? manualContactName : undefined,
+          ...existingContactMetadata,
           metadata: {
+            ...existingContactMetadata,
             local_dialed_number: normalizedNumber,
             lad_app_dialed_number: normalizedNumber,
+            client_call_id: clientCallId,
+            call_type: 'manual_dial',
+            source: 'lad_mobile_dialer',
             contact_name: hasContactName ? manualContactName : undefined,
+            lead_name: hasContactName ? manualContactName : undefined,
+            manual_contact_name: hasContactName ? manualContactName : undefined,
           },
         },
         agent: configuredAgent ? {
@@ -1058,11 +2001,17 @@ export default function CallsScreen() {
           label: normalizedFromNumber,
           phoneNumber: normalizedFromNumber,
         } : undefined,
-      });
+      };
+      prependCall(queuedCall);
+      registerPendingManualDialCall(queuedCall);
 
       setCallFeedback({ type: 'success', text: `Call started for ${normalizedNumber}. Status will update as the agent connects.` });
       setDialNumber('');
       setDialContactName('');
+      setDialContactSuggestion(null);
+      setDialContactNameEdited(false);
+      setDialAutoFilledContactKey('');
+      setShowContactNameRequired(false);
       setIsDialerOpen(false);
       requestAnimationFrame(() => {
         listRef.current?.scrollToOffset({ offset: 0, animated: true });
@@ -1073,14 +2022,12 @@ export default function CallsScreen() {
     } catch (error) {
       const message = getCallErrorMessage(error);
       setCallFeedback({ type: 'error', text: message });
-      Alert.alert('Agent call failed', `${message}\n\nOpen phone dialer instead?`, [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Phone App', onPress: () => void handlePhoneFallback(normalizedNumber) },
-      ]);
+      setCallFailureDialog({ message, phoneNumber: normalizedNumber });
     } finally {
+      manualCallInFlightRef.current = false;
       setIsCalling(false);
     }
-  }, [dialContactName, dialNumber, fetchCalls, handlePhoneFallback, savedVoiceConfig, selectedAgentId, selectedFromNumber, selectedVoiceAgent?.name, voiceAgents, voiceConfigError, voiceNumbers]);
+  }, [dialContactName, dialContactSuggestion, fetchCalls, handlePhoneFallback, normalizedDialNumber, savedVoiceConfig, selectedAgentId, selectedFromNumber, selectedVoiceAgent?.name, setCalls, voiceAgents, voiceConfigError, voiceNumbers]);
 
   const openCallDetails = useCallback((call: CallRecord) => {
     setSelectedCall(call);
@@ -1271,19 +2218,125 @@ export default function CallsScreen() {
 
     loadBackendDetails()
       .catch((detailError) => {
-        setDetailsError(detailError instanceof Error ? detailError.message : 'Could not load full backend contact details.');
+        setDetailsError(detailError instanceof Error ? detailError.message : 'Could not load full call details.');
       }).finally(() => {
         setIsDetailsLoading(false);
       });
   }, [setCalls]);
 
+  const updateRecordingPlaybackStatus = useCallback((status: AVPlaybackStatus) => {
+    if (!status.isLoaded) {
+      setRecordingPlaying(false);
+      if (status.error) {
+        setRecordingError(status.error);
+      }
+      return;
+    }
+
+    setRecordingError(null);
+    setRecordingDurationMs(status.durationMillis ?? 0);
+    setRecordingPositionMs(status.positionMillis ?? 0);
+    setRecordingPlaying(status.isPlaying);
+
+    if (status.didJustFinish) {
+      setRecordingPlaying(false);
+      setRecordingPositionMs(0);
+      void recordingSoundRef.current?.setPositionAsync(0).catch(() => undefined);
+    }
+  }, []);
+
+  const resolveCallRecordingUrl = useCallback(async () => {
+    const details = selectedCallDetails || getRawObject(selectedCall?.backendDetails);
+    const callId = getCallIdForRecording(details, selectedCall);
+    const directUrl = getRecordingUrlFromDetails(details);
+
+    if (recordingResolvedUrl) {
+      return recordingResolvedUrl;
+    }
+
+    if (directUrl) {
+      setRecordingResolvedUrl(directUrl);
+      return directUrl;
+    }
+
+    if (!callId) {
+      throw new Error('The call recording is not available for this call yet.');
+    }
+
+    const signedPayload = await getRecordingSignedUrl({ callId });
+    const signedRecord = getRawObject(signedPayload);
+    const dataRecord = getRawObject(signedRecord.data);
+    const signedUrl = String(
+      signedRecord.signed_url ||
+        signedRecord.recording_url ||
+        signedRecord.call_recording_url ||
+        signedRecord.url ||
+        dataRecord.signed_url ||
+        dataRecord.recording_url ||
+        dataRecord.call_recording_url ||
+        dataRecord.url ||
+        '',
+    );
+    const audioUrl = buildAbsoluteApiUrl(signedUrl);
+    if (!audioUrl) {
+      throw new Error('Recording URL is empty.');
+    }
+    setRecordingResolvedUrl(audioUrl);
+    return audioUrl;
+  }, [recordingResolvedUrl, selectedCall, selectedCallDetails]);
+
+  const handleOpenCallRecording = useCallback(async () => {
+    if (isRecordingOpening) {
+      return;
+    }
+
+    setIsRecordingOpening(true);
+    setRecordingError(null);
+    try {
+      const existingSound = recordingSoundRef.current;
+      if (existingSound) {
+        const status = await existingSound.getStatusAsync();
+        if (status.isLoaded) {
+          if (status.isPlaying) {
+            await existingSound.pauseAsync();
+            setRecordingPlaying(false);
+          } else {
+            await existingSound.playAsync();
+            setRecordingPlaying(true);
+          }
+          return;
+        }
+        await existingSound.unloadAsync().catch(() => undefined);
+        recordingSoundRef.current = null;
+      }
+
+      const audioUrl = await resolveCallRecordingUrl();
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      const { sound, status } = await Audio.Sound.createAsync(
+        { uri: audioUrl },
+        { shouldPlay: true, progressUpdateIntervalMillis: 500 },
+      );
+
+      recordingSoundRef.current = sound;
+      sound.setOnPlaybackStatusUpdate(updateRecordingPlaybackStatus);
+      updateRecordingPlaybackStatus(status);
+    } catch (recordingError) {
+      setRecordingError(recordingError instanceof Error ? recordingError.message : 'Could not play this call recording.');
+      setRecordingPlaying(false);
+    } finally {
+      setIsRecordingOpening(false);
+    }
+  }, [isRecordingOpening, resolveCallRecordingUrl, updateRecordingPlaybackStatus]);
+
   const closeCallDetails = useCallback(() => {
     setSelectedCall(null);
     setSelectedCallDetails(null);
     setSelectedLeadDetails(null);
+    setSelectedContactCalls([]);
     setDetailsError(null);
     setIsDetailsLoading(false);
-  }, []);
+    void resetRecordingPlayback();
+  }, [resetRecordingPlayback]);
 
   const renderCall = useCallback(({ item }: { item: CallRecord }) => (
     <CallCard call={item} onPress={() => openCallDetails(item)} />
@@ -1326,6 +2379,11 @@ export default function CallsScreen() {
     </>
   ), [activeTab, appTheme, search]);
 
+  const selectedCallStatusMeta = getCallStatusDisplayMeta(
+    pickBackendValue(selectedCallDetails, 'status', 'call_status') ?? selectedCall?.callStatus,
+  );
+  const selectedCallFailed = selectedCallStatusMeta.bucket === 'failed';
+
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
       <View style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 16 }]}>
@@ -1333,10 +2391,30 @@ export default function CallsScreen() {
           <Typography variant="h1" color={appTheme.text}>Calls</Typography>
           <Typography variant="body" color={appTheme.muted}>You have {filteredCalls.length} tasks to focus on today</Typography>
         </View>
-        <TouchableOpacity style={styles.createGoalBtn} onPress={openGoalModal}>
-          <Plus color={Theme.colors.surface} size={18} />
-          <Typography variant="bodySmall" style={styles.createGoalText}>Create Goal</Typography>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity
+            style={[
+              styles.refreshCallsBtn,
+              { backgroundColor: appTheme.surface, borderColor: appTheme.border },
+              (isManualRefreshActive || isRefreshing) && { backgroundColor: appTheme.successSoft, borderColor: appTheme.primaryAccent },
+            ]}
+            onPress={() => void handleRefreshCalls()}
+            disabled={isManualRefreshActive || isRefreshing}
+            activeOpacity={0.82}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh call status"
+          >
+            {isManualRefreshActive || isRefreshing ? (
+              <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+            ) : (
+              <RefreshCw color={appTheme.text} size={20} />
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.createGoalBtn} onPress={openGoalModal}>
+            <Plus color={Theme.colors.surface} size={18} />
+            <Typography variant="bodySmall" style={styles.createGoalText}>Create Goal</Typography>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.content}>
@@ -1354,8 +2432,8 @@ export default function CallsScreen() {
           removeClippedSubviews
           onScroll={handleBottomTabScroll}
           scrollEventThrottle={16}
-          refreshing={isLoading}
-          onRefresh={() => void fetchCalls({ force: true })}
+          refreshing={isRefreshing || isManualRefreshActive}
+          onRefresh={() => void handleRefreshCalls()}
           onEndReached={() => void fetchNextCalls()}
           onEndReachedThreshold={0.35}
           ListFooterComponent={
@@ -1410,7 +2488,7 @@ export default function CallsScreen() {
             <View style={[styles.dialSheetHandle, { backgroundColor: appTheme.border }]} />
             <View style={styles.dialSheetHeader}>
               <View style={styles.dialSheetTitleBlock}>
-                <Typography variant="bodyLarge" color={appTheme.text} style={styles.dialSheetTitle}>Agent dialer</Typography>
+                <Typography variant="bodyLarge" color={appTheme.text} style={styles.dialSheetTitle}>Agent call</Typography>
                 <Typography variant="caption" color={appTheme.muted}>Enter a number and start the saved AI agent call</Typography>
               </View>
               <TouchableOpacity
@@ -1427,34 +2505,108 @@ export default function CallsScreen() {
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={[styles.dialSheetContent, isCompactDialer && styles.dialSheetContentCompact]}
             >
-              <View style={[styles.dialSheetNumberRow, { justifyContent: 'center' }]}>
+              <View style={styles.dialNumberPickerWrap}>
+              <View style={[styles.dialSheetNumberRow, { backgroundColor: appTheme.input, borderColor: appTheme.borderSoft }]}>
+                <TouchableOpacity
+                  style={[styles.countrySelector, { borderRightColor: appTheme.borderSoft }]}
+                  activeOpacity={0.75}
+                  onPress={() => setIsDialCountryPickerOpen((value) => !value)}
+                >
+                  <Image source={{ uri: selectedDialCountry.flagUri }} style={styles.countryFlagImage} resizeMode="cover" />
+                  <Typography variant="bodySmall" color={appTheme.text} style={styles.countryDialCode}>
+                    {selectedDialCountry.dialCode}
+                  </Typography>
+                  <ChevronDown color={appTheme.muted} size={15} />
+                </TouchableOpacity>
                 <TextInput
                   value={dialNumber}
-                  onChangeText={setDialNumber}
+                  onChangeText={handleDialNumberChange}
                   placeholder="Enter phone number"
                   placeholderTextColor={appTheme.disabled}
                   keyboardType="phone-pad"
+                  showSoftInputOnFocus={Platform.OS === 'web'}
+                  onFocus={() => {
+                    if (Platform.OS !== 'web') {
+                      Keyboard.dismiss();
+                    }
+                  }}
+                  maxLength={MAX_DIAL_PHONE_DIGITS}
                   style={[
                     styles.dialSheetNumberInput,
                     isCompactDialer && styles.dialSheetNumberInputCompact,
-                    { color: appTheme.text, textAlign: 'center', paddingRight: 0 },
+                    { color: appTheme.text },
                     WEB_INPUT_RESET,
                   ]}
                 />
               </View>
+              {isDialCountryPickerOpen ? (
+                <View style={[styles.countryPickerMenu, { backgroundColor: appTheme.surface, borderColor: appTheme.borderSoft }]}>
+                  {DIAL_COUNTRY_OPTIONS.map((country) => {
+                    const active = country.iso === selectedDialCountry.iso && country.dialCode === selectedDialCountry.dialCode;
+                    return (
+                      <TouchableOpacity
+                        key={`${country.iso}-${country.dialCode}`}
+                        style={[
+                          styles.countryPickerItem,
+                          { borderBottomColor: appTheme.borderSoft },
+                          active && { backgroundColor: appTheme.infoSoft },
+                        ]}
+                        activeOpacity={0.75}
+                        onPress={() => {
+                          setSelectedDialCountry(country);
+                          setIsDialCountryPickerOpen(false);
+                        }}
+                      >
+                        <Image source={{ uri: country.flagUri }} style={styles.countryFlagImage} resizeMode="cover" />
+                        <Typography variant="bodySmall" color={active ? appTheme.primaryAccent : appTheme.text} style={styles.countryName}>
+                          {country.label}
+                        </Typography>
+                        <Typography variant="bodySmall" color={active ? appTheme.primaryAccent : appTheme.muted} style={styles.countryCodeInMenu}>
+                          {country.dialCode}
+                        </Typography>
+                        {active ? (
+                          <Typography variant="bodySmall" color={appTheme.primaryAccent} style={styles.countryActiveMark}>✓</Typography>
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ) : null}
+              </View>
 
               <TextInput
                 value={dialContactName}
-                onChangeText={setDialContactName}
-                placeholder="Add Contact Name"
-                placeholderTextColor={appTheme.disabled}
+                onChangeText={(value) => {
+                  setDialContactName(value);
+                  setDialContactNameEdited(true);
+                  if (value.trim()) setShowContactNameRequired(false);
+                }}
+                placeholder="Contact Name"
+                placeholderTextColor={showContactNameRequired ? Theme.colors.error : appTheme.disabled}
                 autoCapitalize="words"
                 style={[
                   styles.dialSheetContactInput,
-                  { backgroundColor: appTheme.input, borderColor: appTheme.borderSoft, color: appTheme.text },
+                  {
+                    backgroundColor: showContactNameRequired ? 'rgba(239, 68, 68, 0.06)' : appTheme.input,
+                    borderColor: showContactNameRequired ? Theme.colors.error : appTheme.borderSoft,
+                    color: appTheme.text,
+                  },
                   WEB_INPUT_RESET,
                 ]}
               />
+              {showContactNameRequired ? (
+                <Typography variant="caption" color={Theme.colors.error} style={styles.dialSheetRequiredText}>
+                  Contact name is required.
+                </Typography>
+              ) : isDialContactLookupLoading ? (
+                <Typography variant="caption" color={appTheme.muted} style={styles.dialSheetRequiredText}>
+                  Checking existing contacts...
+                </Typography>
+              ) : dialContactSuggestion ? (
+                <Typography variant="caption" color={appTheme.primaryAccent} style={styles.dialSheetRequiredText}>
+                  Existing contact found. Editing this name updates the saved contact.
+                </Typography>
+              ) : null}
 
               <View style={[styles.phoneKeypadGrid, isCompactDialer && styles.phoneKeypadGridCompact]}>
                 {DIAL_KEY_META.map((key) => {
@@ -1469,7 +2621,7 @@ export default function CallsScreen() {
                         isBackspaceKey
                           ? () => setDialNumber('')
                           : key.digit === '0'
-                            ? () => setDialNumber((current) => `${current}+`)
+                            ? () => setDialNumber((current) => sanitizeDialNumberInput(`${current}0`).replace(/\D/g, ''))
                             : undefined
                       }
                       activeOpacity={0.68}
@@ -1516,7 +2668,7 @@ export default function CallsScreen() {
                   </View>
                 ) : (
                   <View style={styles.voiceConfigInline}>
-                    <Bot color={appTheme.primaryAccent} size={17} />
+                    <LadLogoMark size={18} color={appTheme.primaryAccent} />
                     <View style={styles.dialSheetAgentText}>
                       <Typography variant="overline" color={appTheme.muted}>AI Agent</Typography>
                       <Typography variant="bodySmall" style={[styles.voiceConfigValue, { color: appTheme.text }]} numberOfLines={1}>
@@ -1587,6 +2739,63 @@ export default function CallsScreen() {
         </View>
       </Modal>
 
+      <Modal transparent visible={Boolean(callFailureDialog)} animationType="fade" onRequestClose={() => setCallFailureDialog(null)}>
+        <View style={styles.callFailureBackdrop}>
+          <View style={[styles.callFailureCard, { backgroundColor: appTheme.surface, borderColor: appTheme.borderSoft }]}>
+            <View style={styles.callFailureTopRow}>
+              <View style={styles.callFailureIconShell}>
+                <AlertTriangle color="#DC2626" size={22} strokeWidth={2.4} />
+              </View>
+              <TouchableOpacity
+                style={[styles.callFailureClose, { backgroundColor: appTheme.softSurface }]}
+                onPress={() => setCallFailureDialog(null)}
+                activeOpacity={0.75}
+              >
+                <X color={appTheme.muted} size={18} />
+              </TouchableOpacity>
+            </View>
+            <Typography variant="h3" color={appTheme.text} style={styles.callFailureTitle}>
+              Agent call failed
+            </Typography>
+            <Typography variant="bodySmall" color={appTheme.muted} style={styles.callFailureMessage}>
+              {callFailureDialog?.message}
+            </Typography>
+            <View style={[styles.callFailureHint, { backgroundColor: appTheme.softSurface, borderColor: appTheme.borderSoft }]}>
+              <Typography variant="caption" color={appTheme.muted} style={styles.callFailureHintText}>
+                You can adjust the calling number setup or place this call through the phone app.
+              </Typography>
+            </View>
+            <View style={styles.callFailureActions}>
+              <TouchableOpacity
+                style={[styles.callFailureSecondaryButton, { borderColor: appTheme.borderSoft }]}
+                onPress={() => setCallFailureDialog(null)}
+                activeOpacity={0.8}
+              >
+                <Typography variant="bodySmall" color={appTheme.text} style={styles.callFailureSecondaryText}>
+                  Cancel
+                </Typography>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.callFailurePrimaryButton}
+                onPress={() => {
+                  const fallbackNumber = callFailureDialog?.phoneNumber;
+                  setCallFailureDialog(null);
+                  if (fallbackNumber) {
+                    void handlePhoneFallback(fallbackNumber);
+                  }
+                }}
+                activeOpacity={0.86}
+              >
+                <Phone color="#FFFFFF" size={16} fill="#FFFFFF" />
+                <Typography variant="bodySmall" color="#FFFFFF" style={styles.callFailurePrimaryText}>
+                  Phone app
+                </Typography>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal transparent visible={Boolean(selectedCall)} animationType="slide" onRequestClose={closeCallDetails}>
         <View style={styles.modalBackdrop}>
           <View style={[styles.detailsModalCard, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
@@ -1608,8 +2817,8 @@ export default function CallsScreen() {
               {selectedCall ? (
                 <>
                   <DetailSection title="Contact" appTheme={appTheme}>
-                    <DetailRow label="Name" value={getLeadDisplayName(selectedLeadDetails) || selectedCall.name} appTheme={appTheme} />
-                    <DetailRow label="Number dialed" value={selectedCall.phone || getDetailsPhone(selectedLeadDetails) || '-'} appTheme={appTheme} />
+                    <DetailRow label="Name" value={normalizeContactDisplayName(getLeadDisplayName(selectedLeadDetails) || selectedCall.name)} appTheme={appTheme} />
+                    <DetailRow label="Number called" value={selectedCall.phone || getDetailsPhone(selectedLeadDetails) || '-'} appTheme={appTheme} />
                     {selectedLeadDetails ? (
                       <>
                         <DetailRow label="Email" value={formatDetailValue(pickBackendValue(selectedLeadDetails, 'email'))} appTheme={appTheme} />
@@ -1625,12 +2834,26 @@ export default function CallsScreen() {
                   <DetailSection title="Call" appTheme={appTheme}>
                     <DetailRow label="Call type" value={formatCallTypeLabel(selectedCall.type)} appTheme={appTheme} />
                     <DetailRow label="Status" value={formatCallStatusLabel(selectedCall.callStatus)} appTheme={appTheme} />
+                    {selectedCallFailed ? (
+                      <>
+                        <DetailRow label="Message type" value="failed" appTheme={appTheme} />
+                        <DetailRow label="Failure reason" value={getCallFailureDetail(selectedCallDetails, selectedCall)} appTheme={appTheme} />
+                      </>
+                    ) : null}
                     <DetailRow label="Duration" value={`${selectedCall.duration}s`} appTheme={appTheme} />
                     <DetailRow label="Time" value={selectedCall.time} appTheme={appTheme} />
-                    <DetailRow label="From number" value={selectedCall.fromNumber?.phoneNumber || selectedCall.fromNumber?.label || '-'} appTheme={appTheme} />
+                    <DetailRow label="From number" value={getDisplayFromNumber(selectedCall, selectedCallDetails, voiceNumbers)} appTheme={appTheme} />
                     <DetailRow label="Agent" value={selectedCall.agent?.name || '-'} appTheme={appTheme} />
                   </DetailSection>
 
+                  {selectedCallFailed ? (
+                    <DetailSection title="Call failed" appTheme={appTheme}>
+                      <Typography variant="bodySmall" color={Theme.colors.error} style={styles.failedCallText}>
+                        Call failed
+                      </Typography>
+                    </DetailSection>
+                  ) : (
+                  <>
                   <DetailSection title="Contact call history" appTheme={appTheme}>
                     {selectedContactCalls.length ? (
                       selectedContactCalls.map((historyCall) => (
@@ -1653,7 +2876,7 @@ export default function CallsScreen() {
                       ))
                     ) : (
                       <Typography variant="bodySmall" color={appTheme.muted}>
-                        Backend call history will appear here when the agent interaction is stored.
+                        Call history will appear here when the agent interaction is stored.
                       </Typography>
                     )}
                   </DetailSection>
@@ -1670,98 +2893,49 @@ export default function CallsScreen() {
                       {selectedCall.transcript || 'Transcript is not available yet.'}
                     </Typography>
                   </DetailSection>
+                  </>
+                  )}
                 </>
               ) : null}
 
-              <DetailSection title="Backend call record" appTheme={appTheme}>
+              {!selectedCallFailed ? (
+              <DetailSection title="Call Recording" appTheme={appTheme}>
                 {isDetailsLoading ? (
                   <View style={styles.detailsLoading}>
                     <ActivityIndicator color={appTheme.primaryAccent} />
-                    <Typography variant="bodySmall" color={appTheme.muted}>Loading call record from LAD Frontend 2 backend...</Typography>
+                    <Typography variant="bodySmall" color={appTheme.muted}>Loading call recording...</Typography>
                   </View>
                 ) : detailsError ? (
                   <Typography variant="bodySmall" color={Theme.colors.error}>{detailsError}</Typography>
                 ) : selectedCallDetails ? (
                   <>
                     <DetailRow
-                      label="Call log ID"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'call_log_id', 'id', 'call_id'))}
+                      label="Contact"
+                      value={formatDetailValue(normalizeContactDisplayName(String(pickBackendOrMetadataValue(selectedCallDetails, 'contact_name', 'lead_name', 'manual_contact_name', 'client_name') ?? '')))}
                       appTheme={appTheme}
                     />
                     <DetailRow
-                      label="Contact name"
-                      value={formatDetailValue(pickBackendOrMetadataValue(selectedCallDetails, 'contact_name', 'lead_name', 'manual_contact_name', 'client_name'))}
+                      label="From number"
+                      value={getDisplayFromNumber(selectedCall, selectedCallDetails, voiceNumbers)}
                       appTheme={appTheme}
                     />
                     <DetailRow
-                      label="Lead ID"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'lead_id', 'leadId'))}
+                      label="To number"
+                      value={getDetailsPhone(selectedCallDetails) || selectedCall?.phone || '-'}
                       appTheme={appTheme}
                     />
                     <DetailRow
-                      label="Tenant ID"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'tenant_id', 'tenantId'))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="Initiated by"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'initiated_by_user_id', 'initiatedByUserId'))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="Agent ID"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'agent_id', 'voice_id', 'assistant_id'))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="From number ID"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'from_number_id', 'fromNumberId'))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="Direction"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'direction', 'call_type'))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="Backend status"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'status', 'call_status'))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="Display status"
+                      label="Status"
                       value={formatCallStatusLabel(pickBackendValue(selectedCallDetails, 'status', 'call_status') ?? selectedCall?.callStatus)}
                       appTheme={appTheme}
                     />
-                    <DetailRow
-                      label="Queue state"
-                      value={
-                        getCallStatusDisplayMeta(pickBackendValue(selectedCallDetails, 'status', 'call_status') ?? selectedCall?.callStatus).bucket === 'queue'
-                          ? 'in_queue'
-                          : formatDetailValue(pickBackendValue(selectedCallDetails, 'batch_status'))
-                      }
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="Status reason"
-                      value={formatDetailValue(getBackendStatusReason(selectedCallDetails))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="Outcome"
-                      value={formatDetailValue(getBackendOutcomeValue(selectedCallDetails))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="To country"
-                      value={formatDetailValue(pickBackendOrMetadataValue(selectedCallDetails, 'to_country_code', 'country_code'))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="To base number"
-                      value={formatDetailValue(pickBackendOrMetadataValue(selectedCallDetails, 'to_base_number', 'base_number'))}
-                      appTheme={appTheme}
-                    />
+                    {getCallStatusDisplayMeta(pickBackendValue(selectedCallDetails, 'status', 'call_status') ?? selectedCall?.callStatus).bucket === 'failed' ? (
+                      <DetailRow
+                        label="Failure reason"
+                        value={getCallFailureDetail(selectedCallDetails, selectedCall)}
+                        appTheme={appTheme}
+                      />
+                    ) : null}
                     <DetailRow
                       label="Started"
                       value={formatBackendDate(pickBackendValue(selectedCallDetails, 'started_at', 'created_at'))}
@@ -1778,46 +2952,76 @@ export default function CallsScreen() {
                       appTheme={appTheme}
                     />
                     <DetailRow
-                      label="Duration seconds"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'duration_seconds', 'call_duration'))}
+                      label="Duration"
+                      value={`${formatDetailValue(pickBackendValue(selectedCallDetails, 'duration_seconds', 'call_duration') ?? selectedCall?.duration)}s`}
                       appTheme={appTheme}
                     />
                     {(() => {
-                      const rawUrl = String(pickBackendValue(selectedCallDetails, 'recording_url', 'signed_recording_url', 'call_recording_url') ?? '');
-                      if (!rawUrl) return null;
-                      const audioUrl = /^https?:\/\//i.test(rawUrl)
-                        ? rawUrl
-                        : `${RESOLVED_API_URL.replace(/\/+$/, '')}/${rawUrl.replace(/^\/+/, '')}`;
+                      const audioUrl = getRecordingUrlFromDetails(selectedCallDetails);
+                      const callId = getCallIdForRecording(selectedCallDetails, selectedCall);
+                      if (!audioUrl && !callId) return null;
+                      const progressPercent = recordingDurationMs > 0
+                        ? Math.min(100, Math.max(0, (recordingPositionMs / recordingDurationMs) * 100))
+                        : 0;
                       return (
                         <View style={styles.recordingRow}>
                           <Typography variant="caption" color={appTheme.muted} style={styles.recordingLabel}>Recording</Typography>
-                          <TouchableOpacity
-                            style={[styles.recordingButton, { backgroundColor: appTheme.infoSoft }]}
-                            onPress={() => void Linking.openURL(audioUrl).catch(() => undefined)}
-                            activeOpacity={0.7}
-                          >
-                            <Typography variant="bodySmall" color={appTheme.primaryAccent} style={styles.recordingButtonText}>
-                              Play Recording (MP3)
+                          <View style={[styles.recordingPlayer, { backgroundColor: appTheme.softSurface, borderColor: appTheme.borderSoft }]}>
+                            <TouchableOpacity
+                              style={[styles.recordingPlayButton, { backgroundColor: appTheme.infoSoft }, isRecordingOpening && styles.recordingButtonDisabled]}
+                              onPress={handleOpenCallRecording}
+                              activeOpacity={0.75}
+                              disabled={isRecordingOpening}
+                            >
+                              {isRecordingOpening ? (
+                                <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+                              ) : recordingPlaying ? (
+                                <Pause color={appTheme.primaryAccent} size={18} fill={appTheme.primaryAccent} />
+                              ) : (
+                                <Play color={appTheme.primaryAccent} size={18} fill={appTheme.primaryAccent} />
+                              )}
+                            </TouchableOpacity>
+                            <View style={styles.recordingPlayerBody}>
+                              <View style={styles.recordingPlayerTop}>
+                                <Typography variant="bodySmall" color={appTheme.text} style={styles.recordingButtonText}>
+                                  Call recording
+                                </Typography>
+                                <Typography variant="caption" color={appTheme.muted}>
+                                  MP3
+                                </Typography>
+                              </View>
+                              <View style={[styles.recordingProgressTrack, { backgroundColor: appTheme.borderSoft }]}>
+                                <View
+                                  style={[
+                                    styles.recordingProgressFill,
+                                    { backgroundColor: appTheme.primaryAccent, width: `${progressPercent}%` },
+                                  ]}
+                                />
+                              </View>
+                              <View style={styles.recordingTimeRow}>
+                                <Typography variant="caption" color={appTheme.muted}>
+                                  {formatRecordingTime(recordingPositionMs)}
+                                </Typography>
+                                <Typography variant="caption" color={appTheme.muted}>
+                                  {recordingDurationMs ? formatRecordingTime(recordingDurationMs) : '--:--'}
+                                </Typography>
+                              </View>
+                            </View>
+                          </View>
+                          {recordingError ? (
+                            <Typography variant="caption" color={Theme.colors.error} style={styles.recordingErrorText}>
+                              {recordingError}
                             </Typography>
-                          </TouchableOpacity>
+                          ) : null}
                         </View>
                       );
                     })()}
-                    <DetailRow
-                      label="Cost"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'cost', 'call_cost'))}
-                      appTheme={appTheme}
-                    />
-                    <DetailRow
-                      label="Currency"
-                      value={formatDetailValue(pickBackendValue(selectedCallDetails, 'currency'))}
-                      appTheme={appTheme}
-                    />
                   </>
                 ) : (
-                  <Typography variant="bodySmall" color={appTheme.muted}>No backend call record returned yet.</Typography>
+                  <Typography variant="bodySmall" color={appTheme.muted}>No call recording returned yet.</Typography>
                 )}
               </DetailSection>
+              ) : null}
             </ScrollView>
           </View>
         </View>
@@ -1827,13 +3031,13 @@ export default function CallsScreen() {
         <View style={styles.modalBackdrop}>
           <View style={[styles.goalModalCard, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
             <View style={styles.goalModalHeader}>
-              <View style={{ flex: 1, paddingRight: 12 }}>
+              <View style={styles.goalTitleBlock}>
                 <Typography variant="h3" style={styles.goalModalTitle}>Create Call Goal</Typography>
                 <Typography variant="caption" color={appTheme.muted}>
                   Set the outcome this calling session should optimize for.
                 </Typography>
               </View>
-              <TouchableOpacity style={[styles.modalCloseButton, { backgroundColor: appTheme.softSurface }]} onPress={() => setGoalModalOpen(false)} activeOpacity={0.7}>
+              <TouchableOpacity style={[styles.goalModalCloseButton, { backgroundColor: appTheme.softSurface }]} onPress={() => setGoalModalOpen(false)} activeOpacity={0.7}>
                 <X color={appTheme.muted} size={20} />
               </TouchableOpacity>
             </View>
@@ -1921,6 +3125,20 @@ const styles = StyleSheet.create({
   titleArea: {
     flex: 1,
     minWidth: 180,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  refreshCallsBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Theme.shadows.small,
   },
   createGoalBtn: {
     flexDirection: 'row',
@@ -2318,23 +3536,80 @@ const styles = StyleSheet.create({
     minHeight: 54,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Theme.spacing.sm,
+    borderWidth: 1,
+    borderRadius: 14,
+    overflow: 'hidden',
+  },
+  dialNumberPickerWrap: {
+    position: 'relative',
+    zIndex: 30,
+    elevation: 30,
+  },
+  countrySelector: {
+    minHeight: 54,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    borderRightWidth: 1,
+    flexShrink: 0,
+  },
+  countryFlagImage: {
+    width: 24,
+    height: 16,
+    borderRadius: 2,
+    backgroundColor: '#E5E7EB',
+  },
+  countryDialCode: {
+    fontWeight: '600',
+  },
+  countryPickerMenu: {
+    position: 'absolute',
+    left: 0,
+    top: 58,
+    width: 320,
+    maxWidth: '100%',
+    borderWidth: 1,
+    borderRadius: 10,
+    overflow: 'hidden',
+    zIndex: 50,
+    ...Theme.shadows.small,
+  },
+  countryPickerItem: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+  },
+  countryName: {
+    flex: 1,
+    fontWeight: '600',
+  },
+  countryCodeInMenu: {
+    minWidth: 44,
+    textAlign: 'right',
+    fontWeight: '600',
+  },
+  countryActiveMark: {
+    fontWeight: '800',
   },
   dialSheetNumberInput: {
     flex: 1,
     minHeight: 52,
-    paddingHorizontal: 0,
+    paddingHorizontal: 14,
     borderWidth: 0,
     backgroundColor: 'transparent',
-    fontSize: 28,
-    lineHeight: 34,
+    fontSize: 22,
+    lineHeight: 28,
     fontWeight: '500',
-    textAlign: 'center',
+    textAlign: 'left',
   },
   dialSheetNumberInputCompact: {
     minHeight: 44,
-    fontSize: 24,
-    lineHeight: 28,
+    fontSize: 20,
+    lineHeight: 24,
   },
   dialSheetContactInput: {
     minHeight: 44,
@@ -2343,6 +3618,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     fontSize: 15,
     lineHeight: 20,
+  },
+  dialSheetRequiredText: {
+    marginTop: -8,
+    paddingHorizontal: 4,
+    fontWeight: '600',
   },
   dialSheetDeleteButton: {
     width: 44,
@@ -2430,6 +3710,91 @@ const styles = StyleSheet.create({
     paddingHorizontal: Theme.spacing.lg,
     justifyContent: 'center',
   },
+  callFailureBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.48)',
+    paddingHorizontal: 22,
+    justifyContent: 'center',
+  },
+  callFailureCard: {
+    borderRadius: 24,
+    borderWidth: 1,
+    padding: 20,
+    ...Theme.shadows.large,
+  },
+  callFailureTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  callFailureIconShell: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callFailureClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callFailureTitle: {
+    fontWeight: '800',
+    fontSize: 22,
+    lineHeight: 28,
+  },
+  callFailureMessage: {
+    marginTop: 8,
+    fontSize: 14,
+    lineHeight: 21,
+    fontWeight: '500',
+  },
+  callFailureHint: {
+    marginTop: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  callFailureHintText: {
+    lineHeight: 18,
+    fontWeight: '500',
+  },
+  callFailureActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 18,
+  },
+  callFailureSecondaryButton: {
+    flex: 1,
+    height: 46,
+    borderRadius: 14,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callFailurePrimaryButton: {
+    flex: 1,
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: '#0F172A',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  callFailureSecondaryText: {
+    fontWeight: '800',
+  },
+  callFailurePrimaryText: {
+    fontWeight: '800',
+  },
   goalModalCard: {
     backgroundColor: Theme.colors.surface,
     borderRadius: 18,
@@ -2445,9 +3810,22 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.md,
     marginBottom: Theme.spacing.lg,
   },
+  goalTitleBlock: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: Theme.spacing.sm,
+  },
   goalModalTitle: {
     fontSize: 20,
     lineHeight: 26,
+  },
+  goalModalCloseButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
   modalCloseButton: {
     position: 'absolute',
@@ -2532,6 +3910,9 @@ const styles = StyleSheet.create({
   transcriptText: {
     lineHeight: 20,
   },
+  failedCallText: {
+    fontWeight: '700',
+  },
   recordingRow: {
     gap: Theme.spacing.xs,
     marginBottom: Theme.spacing.sm,
@@ -2540,14 +3921,57 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     opacity: 0.7,
   },
-  recordingButton: {
-    paddingHorizontal: Theme.spacing.md,
-    paddingVertical: Theme.spacing.sm,
-    borderRadius: Theme.radius.md,
-    alignSelf: 'flex-start',
+  recordingPlayer: {
+    minHeight: 74,
+    borderWidth: 1,
+    borderRadius: Theme.radius.lg,
+    padding: Theme.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Theme.spacing.sm,
+  },
+  recordingPlayButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  recordingButtonDisabled: {
+    opacity: 0.62,
+  },
+  recordingPlayerBody: {
+    flex: 1,
+    minWidth: 0,
+    gap: 6,
+  },
+  recordingPlayerTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Theme.spacing.sm,
   },
   recordingButtonText: {
     fontWeight: '700',
+  },
+  recordingProgressTrack: {
+    height: 5,
+    borderRadius: 999,
+    overflow: 'hidden',
+  },
+  recordingProgressFill: {
+    height: '100%',
+    borderRadius: 999,
+  },
+  recordingTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Theme.spacing.sm,
+  },
+  recordingErrorText: {
+    fontWeight: '600',
   },
   detailsLoading: {
     minHeight: 58,

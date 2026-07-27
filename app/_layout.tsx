@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Stack, useRouter, useSegments } from 'expo-router';
@@ -13,6 +13,7 @@ import { clearAllScreenCache } from '@/src/utils/screenCache';
 import { connectSocket, disconnectSocket } from '@/src/services/socketService';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { FloatingAssistantButton } from '@/components/features/FloatingAssistantButton';
+import { Asset } from 'expo-asset';
 
 void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
@@ -33,6 +34,24 @@ export default function RootLayout() {
   const { token, user, isLoading, restoreToken } = useAuthStore();
   const appTheme = useAppTheme();
   const loggedInUserIdRef = useRef<string | null>(null);
+
+  const [isAssetsLoaded, setIsAssetsLoaded] = useState(false);
+
+  useEffect(() => {
+    async function loadAssets() {
+      try {
+        await Promise.all([
+          Asset.loadAsync(require('../assets/videos/hero-character-dark.mp4')),
+          Asset.loadAsync(require('../assets/videos/hero-character.webm')),
+        ]);
+      } catch (e) {
+        console.warn('Failed to load assets', e);
+      } finally {
+        setIsAssetsLoaded(true);
+      }
+    }
+    loadAssets();
+  }, []);
 
   useEffect(() => {
     restoreToken();
@@ -75,17 +94,18 @@ export default function RootLayout() {
     }
   }, [token]);
 
+  useEffect(() => {
+    if (!isLoading && isAssetsLoaded) {
+      void SplashScreen.hideAsync().catch(() => undefined);
+    }
+  }, [isLoading, isAssetsLoaded]);
+
   return (
     <QueryClientProvider client={queryClient}>
       <SafeAreaProvider>
-        <GestureHandlerRootView
-          style={{ flex: 1 }}
-          onLayout={() => {
-            void SplashScreen.hideAsync().catch(() => undefined);
-          }}
-        >
+        <GestureHandlerRootView style={{ flex: 1 }}>
           <StatusBar style={appTheme.statusBarStyle} />
-          {isLoading ? (
+          {(!isAssetsLoaded || isLoading) ? (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: appTheme.background }}>
               <ActivityIndicator color={appTheme.primaryAccent} />
             </View>

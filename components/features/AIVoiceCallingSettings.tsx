@@ -1,14 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 import { Bot, CheckCircle2, ChevronDown, Phone, RefreshCw, Save } from 'lucide-react-native';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { Logo } from '@/components/ui/Logo';
 import {
   fetchVoiceCallOptions,
-  isSavedVoiceConfigAvailable,
-  loadVoiceCallConfig,
-  phoneNumbersMatch,
   saveVoiceCallConfig,
   syncVoiceAgentCallPrompt,
   VoiceAgentOption,
@@ -83,52 +80,29 @@ export function AIVoiceCallingSettings({ darkMode = false }: AIVoiceCallingSetti
     setError(null);
 
     try {
-      const saved = await loadVoiceCallConfig();
       const voiceOptions = await fetchVoiceCallOptions({ force: options.force });
 
       setAgents(voiceOptions.agents);
       setNumbers(voiceOptions.numbers);
 
-      const savedIsValid = isSavedVoiceConfigAvailable(saved, voiceOptions.agents, voiceOptions.numbers);
-      const savedAgent = savedIsValid ? voiceOptions.agents.find((agent) => agent.id === saved?.agentId) : undefined;
-      const savedNumber = savedIsValid ? voiceOptions.numbers.find((number) => phoneNumbersMatch(number.phoneNumber, saved?.fromNumber)) : undefined;
-      const assignedSavedAgent = savedNumber?.assignedAgentId
-        ? voiceOptions.agents.find((agent) => agent.id === savedNumber.assignedAgentId)
-        : undefined;
       const firstAgent = voiceOptions.agents[0];
-      const firstNumber = voiceOptions.numbers.find((number) => number.assignedAgentId === (assignedSavedAgent?.id || savedAgent?.id || firstAgent?.id)) || voiceOptions.numbers[0];
-      const initialAgentId = assignedSavedAgent?.id || savedAgent?.id || firstNumber?.assignedAgentId || firstAgent?.id;
-
-      const initialContext = saved?.context || DEFAULT_CONTEXT;
-      const initialAgent = initialAgentId ? voiceOptions.agents.find((agent) => agent.id === initialAgentId) : undefined;
+      const firstNumber = voiceOptions.numbers.find((number) => number.assignedAgentId === firstAgent?.id) || voiceOptions.numbers[0];
+      const linkedAgent = firstNumber?.assignedAgentId
+        ? voiceOptions.agents.find((agent) => agent.id === firstNumber.assignedAgentId)
+        : undefined;
+      const initialAgentId = linkedAgent?.id || firstAgent?.id;
 
       setSelectedAgentId(initialAgentId);
-      setSelectedNumberId(savedNumber?.id || firstNumber?.id);
-      setContext(initialContext);
-
-      if (savedIsValid && initialAgent) {
-        setStatus('Saved!');
-        void syncVoiceAgentCallPrompt(initialAgent, initialContext)
-          .then((syncedAgentPrompt) => {
-            setAgents((currentAgents) => currentAgents.map((agent) => (
-              agent.id === initialAgent.id
-                ? { ...agent, ...syncedAgentPrompt }
-                : agent
-            )));
-            setError(null);
-          })
-          .catch((syncError) => {
-            const syncMessage = syncError instanceof Error ? syncError.message : 'Could not sync starter prompt.';
-            setError(syncMessage);
-          });
-        return;
-      }
+      setSelectedNumberId(firstNumber?.id);
+      setContext(DEFAULT_CONTEXT);
+      setSavedSuccess(false);
 
       setStatus(
-        saved
-          ? 'Old saved number is not available for this user. Select a listed number and save again.'
-          : 'Select a voice agent and calling number, then save.',
-      );    } catch (loadError) {
+        voiceOptions.agents.length && voiceOptions.numbers.length
+          ? 'Select a voice agent and calling number, then save.'
+          : 'No voice agent or calling number is available for this account yet.',
+      );
+    } catch (loadError) {
       const message = loadError instanceof Error ? loadError.message : 'Could not load voice call options.';
       setError(message);
       setStatus('Voice call options could not be loaded.');

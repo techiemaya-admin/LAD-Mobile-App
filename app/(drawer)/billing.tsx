@@ -354,21 +354,7 @@ export default function BillingScreen() {
                   </TouchableOpacity>
                 </View>
 
-                <View style={[styles.minimumMeterTrack, { backgroundColor: appTheme.borderSoft }]}>
-                  <View
-                    style={[
-                      styles.minimumMeterFill,
-                      {
-                        width: `${voiceProgress}%`,
-                        backgroundColor: hasVoiceCallMinimum ? Theme.colors.success : Theme.colors.error,
-                      },
-                    ]}
-                  />
-                </View>
-                <View style={styles.minimumMeterLabels}>
-                  <Typography variant="overline" color={appTheme.muted}>0 credits</Typography>
-                  <Typography variant="overline" color={appTheme.muted}>{VOICE_CALL_MINIMUM_CREDITS} credits minimum</Typography>
-                </View>
+
               </View>
 
               <View style={[styles.divider, { backgroundColor: appTheme.borderSoft }]} />
@@ -380,7 +366,8 @@ export default function BillingScreen() {
                 </View>
                 <View style={[styles.metricTile, { width: metricTileWidth, backgroundColor: appTheme.softSurface }]}>
                   <Typography variant="caption" color={appTheme.muted}>Used</Typography>
-                  <Typography variant="h3" color={appTheme.text} numberOfLines={1}>{formatCredits(billing?.monthlyUsage)}</Typography>
+                  <Typography variant="h3" color={appTheme.text} numberOfLines={1}>{formatCredits(billing?.monthlyUsage, 2)}</Typography>
+                  <Typography variant="caption" color={appTheme.muted} style={{ fontSize: 10, marginTop: -2 }}>Last 30 days</Typography>
                 </View>
               </View>
 

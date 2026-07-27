@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Animated, StyleSheet, View, ViewStyle, StyleProp } from 'react-native';
+import { Animated, StyleSheet, View, ViewStyle, StyleProp, Easing } from 'react-native';
 import { useAppTheme } from '@/src/theme/appTheme';
 
 interface SkeletonProps {
@@ -89,14 +89,194 @@ export function SkeletonActivityRow() {
   );
 }
 
-/** Skeleton for a chat message block */
-export function SkeletonMessageBlock({ isSender }: { isSender?: boolean }) {
+/** 
+ * Shimmer wave block — sweeping light animation like real WhatsApp skeleton 
+ */
+function ShimmerBubble({ style }: { style?: StyleProp<ViewStyle> }) {
   const appTheme = useAppTheme();
+  const shimmer = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(shimmer, {
+        toValue: 1,
+        duration: 1400,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [shimmer]);
+
+  const bgBase = appTheme.darkMode ? '#2A2A2A' : '#ECECEC';
+  const shimmerColor = appTheme.darkMode ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.65)';
+
+  const translateX = shimmer.interpolate({
+    inputRange: [0, 1],
+    outputRange: [-180, 220],
+  });
+
   return (
-    <View style={[styles.messageBlock, isSender ? styles.messageSender : styles.messageReceiver, { backgroundColor: isSender ? appTheme.primaryAccent + '40' : appTheme.softSurface }]}>
-      <SkeletonBlock style={{ height: 16, width: '80%', borderRadius: 6, marginBottom: 8 }} />
-      <SkeletonBlock style={{ height: 16, width: '60%', borderRadius: 6, marginBottom: 8 }} />
-      <SkeletonBlock style={{ height: 16, width: '40%', borderRadius: 6 }} />
+    <View style={[{ backgroundColor: bgBase, overflow: 'hidden' }, style]}>
+      <Animated.View
+        style={{
+          position: 'absolute',
+          top: 0,
+          bottom: 0,
+          width: 80,
+          backgroundColor: shimmerColor,
+          transform: [{ translateX }, { skewX: '-20deg' }],
+        }}
+      />
+    </View>
+  );
+}
+
+/**
+ * One skeleton chat bubble — mimics a WhatsApp message bubble with inner text lines
+ */
+function SkeletonBubble({
+  isSender,
+  lines = [0.75, 0.55],
+  avatarVisible = false,
+}: {
+  isSender: boolean;
+  lines?: number[];
+  avatarVisible?: boolean;
+}) {
+  const appTheme = useAppTheme();
+
+  const bubbleBg = isSender
+    ? appTheme.darkMode ? '#1A4731' : '#DCF8C6'
+    : appTheme.darkMode ? '#2A2A2A' : '#FFFFFF';
+
+  const shimmer = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(shimmer, {
+        toValue: 1,
+        duration: 1400,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [shimmer]);
+
+  const lineBg = appTheme.darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.1)';
+  const lineShimmer = appTheme.darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.6)';
+
+  const translateX = shimmer.interpolate({
+    inputRange: [0, 1],
+    outputRange: [-120, 200],
+  });
+
+  return (
+    <View
+      style={[
+        styles.bubbleRow,
+        isSender ? styles.bubbleRowSender : styles.bubbleRowReceiver,
+      ]}
+    >
+      {/* Avatar placeholder for received messages */}
+      {!isSender && avatarVisible && (
+        <View style={styles.bubbleAvatar}>
+          <ShimmerBubble style={{ width: 32, height: 32, borderRadius: 16 }} />
+        </View>
+      )}
+      {!isSender && !avatarVisible && <View style={{ width: 32 }} />}
+
+      {/* Bubble */}
+      <View
+        style={[
+          styles.bubbleShape,
+          isSender ? styles.bubbleSenderTail : styles.bubbleReceiverTail,
+          {
+            backgroundColor: bubbleBg,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 1 },
+            shadowOpacity: appTheme.darkMode ? 0.3 : 0.08,
+            shadowRadius: 2,
+            elevation: 1,
+            overflow: 'hidden',
+          },
+        ]}
+      >
+        {/* Shimmer sweep over the whole bubble */}
+        <Animated.View
+          style={{
+            position: 'absolute',
+            top: 0,
+            bottom: 0,
+            width: 60,
+            backgroundColor: lineShimmer,
+            transform: [{ translateX }, { skewX: '-20deg' }],
+            zIndex: 1,
+          }}
+        />
+
+        {/* Text line placeholders */}
+        {lines.map((widthFraction, idx) => (
+          <View
+            key={idx}
+            style={{
+              height: 11,
+              width: `${widthFraction * 100}%`,
+              borderRadius: 5,
+              backgroundColor: lineBg,
+              marginBottom: idx < lines.length - 1 ? 7 : 0,
+            }}
+          />
+        ))}
+
+        {/* Timestamp placeholder */}
+        <View style={[styles.bubbleTimestamp, isSender && styles.bubbleTimestampSender]}>
+          <View
+            style={{
+              height: 9,
+              width: 32,
+              borderRadius: 4,
+              backgroundColor: lineBg,
+              marginRight: isSender ? 4 : 0,
+            }}
+          />
+          {isSender && (
+            <View style={{ height: 9, width: 14, borderRadius: 4, backgroundColor: lineBg }} />
+          )}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+/** 
+ * WhatsApp-style message loading skeleton — a mix of sent/received bubbles 
+ * with shimmer animation and realistic chat bubble shapes.
+ */
+export function SkeletonMessageBlock({ isSender }: { isSender?: boolean }) {
+  // If isSender is specified, render a single bubble; otherwise render a full chat skeleton
+  if (isSender !== undefined) {
+    return (
+      <SkeletonBubble
+        isSender={isSender}
+        lines={isSender ? [0.7, 0.5] : [0.8, 0.6, 0.4]}
+        avatarVisible={!isSender}
+      />
+    );
+  }
+
+  // Full chat skeleton — mixed bubbles like a real WhatsApp conversation loading
+  return (
+    <View style={styles.chatSkeletonContainer}>
+      <SkeletonBubble isSender={false} lines={[0.78, 0.52]} avatarVisible />
+      <SkeletonBubble isSender={true} lines={[0.6]} />
+      <SkeletonBubble isSender={false} lines={[0.85, 0.65, 0.4]} avatarVisible />
+      <SkeletonBubble isSender={true} lines={[0.72, 0.48]} />
+      <SkeletonBubble isSender={false} lines={[0.55]} />
+      <SkeletonBubble isSender={true} lines={[0.8, 0.35]} />
     </View>
   );
 }
@@ -139,18 +319,61 @@ const styles = StyleSheet.create({
   activityTitle: { height: 13, width: '65%', borderRadius: 4 },
   activityMeta: { height: 10, width: '45%', borderRadius: 4 },
 
-  messageBlock: {
-    padding: 14,
-    borderRadius: 16,
-    marginBottom: 12,
-    maxWidth: '85%',
+  // WhatsApp skeleton chat container
+  chatSkeletonContainer: {
+    paddingHorizontal: 8,
+    paddingVertical: 12,
+    gap: 6,
   },
-  messageSender: {
+
+  // Per-bubble row
+  bubbleRow: {
+    flexDirection: 'row',
+    marginBottom: 4,
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  bubbleRowSender: {
+    justifyContent: 'flex-end',
+    paddingLeft: 60,
+  },
+  bubbleRowReceiver: {
+    justifyContent: 'flex-start',
+    paddingRight: 60,
+  },
+
+  // Avatar circle for received messages
+  bubbleAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    overflow: 'hidden',
+    flexShrink: 0,
     alignSelf: 'flex-end',
+  },
+
+  // Bubble shape
+  bubbleShape: {
+    borderRadius: 16,
+    padding: 10,
+    maxWidth: '100%',
+  },
+  bubbleSenderTail: {
     borderBottomRightRadius: 4,
   },
-  messageReceiver: {
-    alignSelf: 'flex-start',
+  bubbleReceiverTail: {
     borderBottomLeftRadius: 4,
+  },
+
+  // Timestamp row inside bubble
+  bubbleTimestamp: {
+    flexDirection: 'row',
+    marginTop: 5,
+    justifyContent: 'flex-start',
+    alignItems: 'center',
+    gap: 3,
+  },
+  bubbleTimestampSender: {
+    justifyContent: 'flex-end',
   },
 });

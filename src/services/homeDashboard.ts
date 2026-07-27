@@ -1,7 +1,9 @@
 import type { DashboardIconName } from '@/components/features/DashboardSection';
 import { apiGet } from '@/src/api';
-import { getCallLogs, type CallLogResponse } from '@/src/services/call-logs';
-import { getConversations, type Conversation } from '@/src/services/conversationService';
+import { getCallLogs, getCallLogsStats, type CallLogResponse, type CallLogsStats } from '@/src/services/call-logs';
+import { getActiveTenantId } from '@/src/api/storage';
+import { getConversations, getConversationStats, type Conversation } from '@/src/services/conversationService';
+import { getConnectedIntegrations } from '@/src/services/integration.service';
 import {
   getAnalyticsOverview,
   getBillingOverview,
@@ -10,6 +12,7 @@ import {
   type CampaignItem,
 } from '@/src/services/settingsHub';
 import { getUserAvailableAgents, getUserAvailableNumbers } from '@/src/services/voice-agent';
+import type { ConnectedIntegration } from '@/src/types/chat';
 
 type ApiRecord = Record<string, unknown>;
 type HomeChannel = 'linkedin' | 'whatsapp' | 'email' | 'instagram' | 'voice';
@@ -20,12 +23,20 @@ export type HomeDashboardCard = {
   count: number;
 };
 
+export type HomeDashboardSectionVariant = {
+  key: string;
+  label: string;
+  cards: HomeDashboardCard[];
+};
+
 export type HomeDashboardSection = {
   title: string;
   icon: DashboardIconName;
   channel: HomeChannel;
   accentColor: string;
   cards: HomeDashboardCard[];
+  /** When present with >1 entry, the UI renders a switcher (e.g. WhatsApp Personal vs Business API). */
+  variants?: HomeDashboardSectionVariant[];
 };
 
 export type HomeDashboardSummary = {
@@ -197,6 +208,59 @@ const activeConversationCount = (conversations: Conversation[]) =>
 const conversationTodayCount = (conversations: Conversation[]) =>
   conversations.filter((conversation) => isToday(conversation.startedAt ?? conversation.lastMessageAt)).length;
 
+const aiHandledCount = (conversations: Conversation[]) =>
+  conversations.filter((conversation) => conversation.ownerType === 'AI').length;
+
+const agentHandledCount = (conversations: Conversation[]) =>
+  conversations.filter((conversation) => conversation.ownerType === 'human_agent').length;
+
+// WhatsApp conversations arrive tagged with waBackendChannel: 'waba' (Business API)
+// or 'personal'. Untagged conversations default to personal.
+const whatsappByAccount = (conversations: Conversation[], account: 'personal' | 'waba') =>
+  conversations.filter((conversation) => (conversation.waBackendChannel ?? 'personal') === account);
+
+const buildWhatsAppCards = (conversations: Conversation[], stats?: any): HomeDashboardCard[] => {
+  const rawStats = stats?.stats || stats?.summary || stats?.data?.stats || stats?.data?.summary || stats;
+
+  const aiCount = pickNumber(
+    rawStats?.ai_handled_chats,
+    rawStats?.aiHandledChats,
+    rawStats?.ai_handled,
+    rawStats?.aiHandled,
+    rawStats?.bot_handled,
+    rawStats?.bot_handled_chats,
+    rawStats?.ai,
+    rawStats?.bot,
+    aiHandledCount(conversations)
+  );
+
+  const humanCount = pickNumber(
+    rawStats?.agent_handled_chats,
+    rawStats?.agentHandledChats,
+    rawStats?.agent_handled,
+    rawStats?.agentHandled,
+    rawStats?.human_handled,
+    rawStats?.humanHandled,
+    rawStats?.human_agent,
+    rawStats?.humanAgent,
+    rawStats?.human,
+    rawStats?.agent,
+    agentHandledCount(conversations)
+  );
+
+  return [
+    { label: 'Total Chats', icon: 'Users2', count: conversations.length },
+    { label: 'Unread', icon: 'MessageCircle', count: unreadCount(conversations) },
+    { label: 'Active Chats', icon: 'MessageSquare', count: activeConversationCount(conversations) },
+    { label: 'New Today', icon: 'Sparkles', count: conversationTodayCount(conversations) },
+    { label: 'Agent Handled Chats', icon: 'Mic', count: aiCount },
+    { label: 'Human Handled Chats', icon: 'Users', count: humanCount },
+  ];
+};
+
+const isWhatsAppAccountConnected = (integrations: ConnectedIntegration[], label: string) =>
+  integrations.some((integration) => integration.label === label && integration.connected);
+
 const countCampaignsByChannel = (campaigns: CampaignItem[], channel: HomeChannel) =>
   campaigns.filter((campaign) => getChannel(campaign.type ?? campaign.name) === channel).length;
 
@@ -217,8 +281,42 @@ const getCallStatus = (call: CallLogResponse | ApiRecord) =>
 const hasAnyStatus = (status: string, candidates: string[]) =>
   candidates.some((candidate) => status.includes(candidate));
 
-const countCallsByStatus = (calls: Array<CallLogResponse | ApiRecord>, statuses: string[]) =>
+const countCallsByStatus = (calls: (CallLogResponse | ApiRecord)[], statuses: string[]) =>
   calls.filter((call) => hasAnyStatus(getCallStatus(call), statuses)).length;
+
+const getCallLogStats = async (): Promise<CallLogsStats | null> => {
+  const tenantId = await getActiveTenantId();
+  if (!tenantId) {
+    return null;
+  }
+
+  return getCallLogsStats(tenantId);
+};
+
+const isBroadcastEmailContact = (conversation: Conversation) =>
+  String(conversation.id ?? '').startsWith('email:') && !conversation.messageCount;
+
+const isIntegrationConnected = (integrations: ConnectedIntegration[], channel: HomeChannel) => {
+  if (channel === 'voice') {
+    return true;
+  }
+
+  const matchesChannel = (integration: ConnectedIntegration) => {
+    const haystack = `${integration.channel ?? ''} ${integration.label ?? ''}`.toLowerCase();
+
+    if (channel === 'email') {
+      return ['email', 'custom-email', 'gmail', 'google', 'outlook', 'microsoft', 'smtp'].some((token) => haystack.includes(token));
+    }
+
+    if (channel === 'whatsapp') {
+      return ['whatsapp', 'wa business', 'waba', 'personal-wa', 'wapa'].some((token) => haystack.includes(token));
+    }
+
+    return haystack.includes(channel);
+  };
+
+  return integrations.some((integration) => integration.connected && matchesChannel(integration));
+};
 
 const getBookings = async () => {
   const response = await apiGet<unknown>('/api/overview/bookings', { params: { limit: 25 } });
@@ -238,7 +336,7 @@ const getLatestAt = (activity: HomeDashboardActivity) => toDate(activity.at)?.ge
 
 const buildLatestActivity = (
   conversations: Conversation[],
-  calls: Array<CallLogResponse | ApiRecord>,
+  calls: (CallLogResponse | ApiRecord)[],
   campaigns: CampaignItem[],
 ): HomeDashboardActivity[] => {
   const conversationActivities = conversations.map<HomeDashboardActivity>((conversation) => {
@@ -287,7 +385,10 @@ export async function fetchHomeDashboardData(): Promise<HomeDashboardData> {
     billing,
     teamMembers,
     conversations,
+    conversationStats,
     callLogsResponse,
+    callStats,
+    integrationsSummary,
     bookings,
     voiceAgents,
     voiceNumbers,
@@ -337,24 +438,63 @@ export async function fetchHomeDashboardData(): Promise<HomeDashboardData> {
     }, sourceErrors),
     safe('team', getTeamMembers(), [], sourceErrors),
     safe('conversations', getConversations({ limit: 100 }), [], sourceErrors),
+    safe('conversation stats', getConversationStats({ limit: 1 }), null, sourceErrors),
     safe('call logs', getCallLogs({ page: 1, limit: 100 }), { logs: [] }, sourceErrors),
+    safe('call stats', getCallLogStats(), null, sourceErrors),
+    safe('integrations', getConnectedIntegrations(), { integrations: [] }, sourceErrors),
     safe('bookings', getBookings(), [], sourceErrors),
     safe('voice agents', getUserAvailableAgents(), [], sourceErrors),
     safe('voice numbers', getUserAvailableNumbers(), [], sourceErrors),
   ]);
 
   const calls = Array.isArray(callLogsResponse.logs) ? callLogsResponse.logs : unwrapList(callLogsResponse);
-  const linkedin = channelConversations(conversations, 'linkedin');
-  const whatsapp = channelConversations(conversations, 'whatsapp');
-  const email = channelConversations(conversations, 'email');
-  const instagram = channelConversations(conversations, 'instagram');
+  const liveConversations = conversations.filter((conversation) => !isBroadcastEmailContact(conversation));
+  const whatsapp = channelConversations(liveConversations, 'whatsapp');
+  const email = channelConversations(liveConversations, 'email');
+  const instagram = channelConversations(liveConversations, 'instagram');
   const bookingsToday = bookings.filter((booking) => isToday(getBookingDate(booking))).length;
   const answeredFromLogs = countCallsByStatus(calls, ANSWERED_CALL_STATUSES);
-  const missedCalls = countCallsByStatus(calls, MISSED_CALL_STATUSES);
-  const queuedCalls = countCallsByStatus(calls, QUEUED_CALL_STATUSES);
-  const totalCalls = Math.max(analytics.totalCalls, calls.length);
-  const answeredCalls = Math.max(analytics.answeredCalls, answeredFromLogs);
+  const totalCallsFromLogs = pickNumber(callLogsResponse.pagination?.total, callLogsResponse.total, calls.length);
+
+  const rawStats = (callLogsResponse as any).stats || (callLogsResponse as any).summary || (callStats as any)?.stats || (callStats as any)?.data || callStats;
+  const totalStats = pickNumber(rawStats?.totalCalls, rawStats?.total_calls);
+  const completedStats = pickNumber(rawStats?.completedCalls, rawStats?.completed_calls);
+  const failedStats = pickNumber(rawStats?.failedCalls, rawStats?.failed_calls);
+  const queueStats = pickNumber(rawStats?.queue, rawStats?.queued);
+  const ongoingStats = pickNumber(rawStats?.ongoing, rawStats?.active);
+  const hotLeadsStats = pickNumber(rawStats?.hotLeads, rawStats?.hot_leads);
+
+  const useCallStats = totalStats > 0 || completedStats > 0;
+
+  const totalCalls = useCallStats ? totalStats : totalCallsFromLogs;
+  const answeredCalls = useCallStats ? completedStats : answeredFromLogs;
+  const missedCalls = useCallStats ? failedStats : countCallsByStatus(calls, MISSED_CALL_STATUSES);
+  const queuedCalls = useCallStats ? queueStats + ongoingStats : countCallsByStatus(calls, QUEUED_CALL_STATUSES);
+  const ongoingCalls = useCallStats ? ongoingStats : countCallsByStatus(calls, QUEUED_CALL_STATUSES);
+  const hotLeads = useCallStats ? hotLeadsStats : 0;
   const activeCampaigns = analytics.campaignStats.activeCampaigns;
+  const campaignStats = analytics.campaignStats;
+  const linkedinRateLimits = campaignStats.linkedinRateLimits;
+  const linkedinDailyLimit = pickNumber(linkedinRateLimits?.daily?.total, linkedinRateLimits?.daily?.max);
+  const linkedinWeeklyLimit = pickNumber(linkedinRateLimits?.weekly?.total, linkedinRateLimits?.weekly?.max);
+  const linkedinWeeklyUsed = pickNumber(linkedinRateLimits?.usage?.sentLast7Days);
+
+  // Split WhatsApp conversations by backend account (Business API vs Personal)
+  // and detect which accounts are actually connected so the dashboard can offer
+  // a switcher when the user runs both.
+  const integrations = Array.isArray(integrationsSummary.integrations) ? integrationsSummary.integrations : [];
+  const whatsappPersonal = whatsappByAccount(whatsapp, 'personal');
+  const whatsappBusiness = whatsappByAccount(whatsapp, 'waba');
+  const personalWaConnected = isWhatsAppAccountConnected(integrations, 'WhatsApp Personal');
+  const businessWaConnected = isWhatsAppAccountConnected(integrations, 'WhatsApp API Agent');
+
+  const whatsappVariants: HomeDashboardSectionVariant[] = [];
+  if (personalWaConnected) {
+    whatsappVariants.push({ key: 'personal', label: 'Personal', cards: buildWhatsAppCards(whatsappPersonal, conversationStats) });
+  }
+  if (businessWaConnected) {
+    whatsappVariants.push({ key: 'business', label: 'Business API', cards: buildWhatsAppCards(whatsappBusiness, conversationStats) });
+  }
 
   const sections: HomeDashboardSection[] = [
     {
@@ -363,12 +503,12 @@ export async function fetchHomeDashboardData(): Promise<HomeDashboardData> {
       channel: 'linkedin',
       accentColor: '#0077B5',
       cards: [
-        { label: 'New Connections', icon: 'UserPlus', count: conversationTodayCount(linkedin) },
-        { label: 'Service Inquiries', icon: 'Briefcase', count: activeConversationCount(linkedin) },
-        { label: 'Message Requests', icon: 'MessageCircle', count: unreadCount(linkedin) },
-        { label: 'Lead Campaigns', icon: 'FileText', count: countCampaignsByChannel(campaigns, 'linkedin') },
-        { label: 'Recommendations', icon: 'Star', count: analytics.campaignStats.totalConnected },
-        { label: 'Partner Requests', icon: 'Users', count: activeCampaignsByChannel(campaigns, 'linkedin') },
+        { label: 'Generated Leads', icon: 'Users2', count: campaignStats.totalLeads },
+        { label: 'Connection Requests Sent', icon: 'Send', count: campaignStats.totalSent },
+        { label: 'Connections Accepted', icon: 'UserPlus', count: campaignStats.totalConnected },
+        { label: 'LinkedIn Replies', icon: 'MessageCircle', count: campaignStats.totalReplied },
+        { label: 'Daily Limit', icon: 'ListOrdered', count: linkedinDailyLimit },
+        { label: linkedinWeeklyUsed > 0 ? 'Weekly Used' : 'Weekly Limit', icon: 'Clock', count: linkedinWeeklyUsed || linkedinWeeklyLimit },
       ],
     },
     {
@@ -376,14 +516,10 @@ export async function fetchHomeDashboardData(): Promise<HomeDashboardData> {
       icon: 'MessageSquare',
       channel: 'whatsapp',
       accentColor: '#25D366',
-      cards: [
-        { label: 'Order Updates', icon: 'Package', count: activeConversationCount(whatsapp) },
-        { label: 'Customer Support', icon: 'LifeBuoy', count: unreadCount(whatsapp) },
-        { label: 'Payment Receipts', icon: 'CreditCard', count: billing.transactions.length },
-        { label: 'Product Inquiries', icon: 'ShoppingBag', count: whatsapp.length },
-        { label: 'Bookings', icon: 'Calendar', count: bookings.length },
-        { label: 'Feedback Requests', icon: 'ClipboardList', count: conversationTodayCount(whatsapp) },
-      ],
+      // When both Personal and Business API accounts are connected, `variants`
+      // drives an in-section switcher; otherwise `cards` shows the single account.
+      cards: whatsappVariants[0]?.cards ?? [],
+      variants: whatsappVariants.length > 1 ? whatsappVariants : undefined,
     },
     {
       title: 'Instagram DM Hub',
@@ -419,26 +555,37 @@ export async function fetchHomeDashboardData(): Promise<HomeDashboardData> {
       channel: 'voice',
       accentColor: '#0B1957',
       cards: [
-        { label: 'Call Records', icon: 'History', count: totalCalls },
-        { label: 'Transcripts', icon: 'FileAudio', count: answeredCalls },
-        { label: 'Missed Call Logs', icon: 'PhoneMissed', count: missedCalls },
-        { label: 'AI Summaries', icon: 'Sparkles', count: answeredCalls },
-        { label: 'Call Queues', icon: 'ListOrdered', count: queuedCalls },
-        { label: 'Outbound Schedules', icon: 'Clock', count: bookings.length },
+        { label: 'Total Calls', icon: 'History', count: totalCalls },
+        { label: 'Completed', icon: 'FileAudio', count: answeredCalls },
+        { label: 'Failed / Missed', icon: 'PhoneMissed', count: missedCalls },
+        { label: 'Ongoing', icon: 'Clock', count: ongoingCalls },
+        { label: 'In Queue', icon: 'ListOrdered', count: queuedCalls },
+        { label: 'Hot Leads', icon: 'Star', count: hotLeads },
       ],
     },
   ];
 
-  const channelsWithData = sections.filter((section) => (
+  const visibleSections = sections.filter((section) => {
+    if (section.channel === 'voice') {
+      return true;
+    }
+
+    if (section.channel === 'whatsapp') {
+      return whatsappVariants.length > 0;
+    }
+
+    return isIntegrationConnected(integrations, section.channel);
+  });
+  const channelsWithData = visibleSections.filter((section) => (
     section.cards.some((card) => card.count > 0)
   )).length;
 
   return {
-    sections,
+    sections: visibleSections,
     summary: {
-      activeChannels: channelsWithData || sections.length,
-      totalConversations: conversations.length,
-      unreadConversations: unreadCount(conversations),
+      activeChannels: channelsWithData || visibleSections.length,
+      totalConversations: liveConversations.length,
+      unreadConversations: unreadCount(liveConversations),
       totalCampaigns: analytics.campaignStats.totalCampaigns,
       activeCampaigns,
       totalCalls,
@@ -451,7 +598,7 @@ export async function fetchHomeDashboardData(): Promise<HomeDashboardData> {
       voiceAgents: voiceAgents.length,
       voiceNumbers: voiceNumbers.length,
     },
-    latestActivity: buildLatestActivity(conversations, calls, campaigns),
+    latestActivity: buildLatestActivity(liveConversations, calls, campaigns),
     sourceErrors: Array.from(new Set(sourceErrors)),
     loadedAt: new Date().toISOString(),
   };

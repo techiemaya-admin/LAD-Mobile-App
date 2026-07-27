@@ -1,309 +1,331 @@
 import { Logo } from '@/components/ui/Logo';
 import { Typography } from '@/components/ui/Typography';
+import { useAppTheme } from '@/src/theme/appTheme';
+import { Audio, ResizeMode, Video } from 'expo-av';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
-import React, { useEffect, useRef } from 'react';
-import { Animated, Easing, ScrollView, StyleSheet, TouchableOpacity, View, useWindowDimensions } from 'react-native';
+import { useFocusEffect, useRouter } from 'expo-router';
+import { Volume2, VolumeX } from 'lucide-react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, Easing, Platform, ScrollView, StyleSheet, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+const heroVideoLight = require('../../assets/videos/hero-character.webm');
+const heroVideoDark = require('../../assets/videos/hero-character-dark.mp4');
 const heroImage = require('../../assets/images/hero-ai-character.png');
 
-const palette = {
-  background: '#ffffff',
-  surface: '#ffffff',
-  primary: '#0f1743',
-  text: '#111827',
-  secondary: '#545f72',
-  border: '#e2e8f0',
-  footer: '#64748b',
-};
+// Both greeting clips are 720x1280 (portrait 9:16). Locking the frame to this
+// ratio guarantees the full character is visible with no cropping.
+const HERO_VIDEO_ASPECT = 720 / 1280;
 
 export default function OnboardingScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
+  const appTheme = useAppTheme();
+  const dark = appTheme.darkMode;
   const entrance = useRef(new Animated.Value(0)).current;
-  const logoFloat = useRef(new Animated.Value(0)).current;
-  const characterFloat = useRef(new Animated.Value(0)).current;
+  const videoRef = useRef<Video>(null);
+  const [muted, setMuted] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const loopTimeoutRef = useRef<any>(null);
+
+  useFocusEffect(
+    useCallback(() => {
+      setIsPlaying(true);
+      if (videoRef.current) {
+        videoRef.current.playAsync();
+      }
+      return () => {
+        setIsPlaying(false);
+        setMuted(true); // Force mute when leaving screen to prevent ghost audio
+        if (loopTimeoutRef.current) {
+          clearTimeout(loopTimeoutRef.current);
+          loopTimeoutRef.current = null;
+        }
+        if (videoRef.current) {
+          videoRef.current.pauseAsync();
+        }
+      };
+    }, [])
+  );
+
+  const onPlaybackStatusUpdate = useCallback((status: any) => {
+    if (status.didJustFinish) {
+      if (loopTimeoutRef.current) {
+        clearTimeout(loopTimeoutRef.current);
+      }
+      loopTimeoutRef.current = setTimeout(() => {
+        setIsPlaying((currentIsPlaying) => {
+          if (currentIsPlaying && videoRef.current) {
+            videoRef.current.setPositionAsync(0);
+            videoRef.current.playAsync();
+          }
+          return currentIsPlaying;
+        });
+      }, 3000);
+    }
+  }, []);
+
+  // The light clip is WebM (VP8), which iOS AVPlayer cannot decode - fall back to the
+  // static hero image there. The dark clip is H.264 MP4 and plays everywhere.
+  const heroVideoSupported = dark || Platform.OS !== 'ios';
+
+  const colors = useMemo(() => ({
+    background: dark ? '#0F172A' : '#ffffff',
+    blob: dark ? '#1E293B' : '#E8EAF4',
+    blobSoft: dark ? '#172033' : '#EDEFF7',
+    heading: dark ? '#F8FAFC' : '#172560',
+    subtitle: dark ? '#CBD5E1' : '#545f72',
+    primaryButtonBg: dark ? '#F8FAFC' : '#0f1743',
+    primaryButtonText: dark ? '#0f1743' : '#ffffff',
+    secondaryButtonBg: dark ? '#111827' : '#ffffff',
+    secondaryButtonBorder: dark ? '#334155' : '#e2e8f0',
+    secondaryButtonText: dark ? '#F8FAFC' : '#1f2937',
+    soundButtonBg: dark ? '#1E293B' : '#ffffff',
+    soundButtonBorder: dark ? '#334155' : '#e2e8f0',
+    soundIcon: dark ? '#F8FAFC' : '#172560',
+    footerBorder: dark ? '#263244' : '#e6e9f2',
+    footerLink: dark ? '#CBD5E1' : '#475569',
+    copyright: dark ? '#8fa0b8' : '#64748b',
+  }), [dark]);
+
   const isPhone = width <= 430;
   const isDesktop = width >= 768;
-  const isSmallPhone = width <= 390;
   const isShort = height < 780;
   const isTiny = isPhone && (width <= 360 || height < 700);
-  const isMobileLayout = width < 560;
-  const horizontalPadding = isTiny ? 18 : isPhone ? 24 : isDesktop ? 34 : 28;
-  const contentWidth = Math.max(280, Math.min(width - horizontalPadding * 2, isDesktop ? 620 : isMobileLayout ? 382 : 430));
-  const heroHeight = Math.min(
-    contentWidth * (isDesktop ? 0.72 : isTiny ? 0.7 : 0.78),
-    height * (isDesktop ? 0.4 : isTiny ? 0.3 : isShort ? 0.33 : 0.36),
-    isDesktop ? 430 : isPhone ? 318 : 360,
-  );
-  const codeLogoSize = Math.min(isTiny ? 138 : isPhone ? 166 : isDesktop ? 278 : 220, contentWidth * 0.46);
-  const heroTranslateX = isDesktop ? contentWidth * 0.18 : isPhone ? contentWidth * 0.1 : 70;
-  const logoTranslateBase = codeLogoSize * -0.5;
-  const titleFontSize = isDesktop ? 43 : isTiny ? 27 : isSmallPhone ? 30 : isPhone ? 33 : 38;
-  const titleLineHeight = Math.round(titleFontSize * 1.18);
-  const subtitleFontSize = isTiny ? 14 : isSmallPhone ? 15 : isPhone ? 16 : isDesktop ? 20 : 18;
-  const subtitleLineHeight = Math.round(subtitleFontSize * 1.55);
-  const buttonHeight = isTiny ? 52 : isPhone ? 56 : 62;
-  const actionsWidth = Math.min(contentWidth, isTiny ? 304 : isMobileLayout ? 330 : 360);
-  const copyGap = isDesktop ? 52 : isTiny ? 48 : isPhone ? 78 : 58;
+  const horizontalPadding = isTiny ? 20 : isPhone ? 24 : isDesktop ? 40 : 30;
+  const contentWidth = Math.max(280, Math.min(width - horizontalPadding * 2, isDesktop ? 560 : 430));
+  
+  // Make sizes slightly smaller to ensure no scrolling
+  const titleFontSize = isDesktop ? 38 : isTiny ? 24 : isPhone ? 28 : 32;
+  const titleLineHeight = Math.round(titleFontSize * 1.2);
+  const subtitleFontSize = isTiny ? 13 : isPhone ? 14 : isDesktop ? 17 : 15;
+  const subtitleLineHeight = Math.round(subtitleFontSize * 1.5);
+  const buttonHeight = isTiny ? 46 : isPhone ? 50 : 54;
+  const logoHeight = isTiny ? 45 : 55;
+  const logoWidth = logoHeight * 3.1;
 
   useEffect(() => {
-    Animated.parallel([
-      Animated.timing(entrance, {
-        toValue: 1,
-        duration: 720,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(logoFloat, {
-            toValue: 1,
-            duration: 2400,
-            easing: Easing.inOut(Easing.sin),
-            useNativeDriver: true,
-          }),
-          Animated.timing(logoFloat, {
-            toValue: 0,
-            duration: 2400,
-            easing: Easing.inOut(Easing.sin),
-            useNativeDriver: true,
-          }),
-        ]),
-      ),
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(characterFloat, {
-            toValue: 1,
-            duration: 3000,
-            easing: Easing.inOut(Easing.sin),
-            useNativeDriver: true,
-          }),
-          Animated.timing(characterFloat, {
-            toValue: 0,
-            duration: 3000,
-            easing: Easing.inOut(Easing.sin),
-            useNativeDriver: true,
-          }),
-        ]),
-      ),
-    ]).start();
-  }, [characterFloat, entrance, logoFloat]);
+    Animated.timing(entrance, {
+      toValue: 1,
+      duration: 720,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [entrance]);
 
-  const logoMotionStyle = {
-    opacity: 1,
+  const toggleMuted = useCallback(async () => {
+    const next = !muted;
+    if (!next) {
+      // Make sure the greeting is audible even when the iOS silent switch is on.
+      await Audio.setAudioModeAsync({ playsInSilentModeIOS: true }).catch(() => {});
+      // Restart so the "Hi!" plays from the top when sound comes on.
+      await videoRef.current?.setPositionAsync(0).catch(() => {});
+    }
+    setMuted(next);
+  }, [muted]);
+
+  const entranceStyle = {
+    opacity: entrance,
     transform: [
       {
-        translateY: logoFloat.interpolate({
+        translateY: entrance.interpolate({
           inputRange: [0, 1],
-          outputRange: [logoTranslateBase - 6, logoTranslateBase + 7],
+          outputRange: [16, 0],
         }),
       },
+    ],
+  };
+
+  const heroEntranceStyle = {
+    opacity: entrance,
+    flex: 1,
+    minHeight: 150,
+    aspectRatio: HERO_VIDEO_ASPECT,
+    alignSelf: 'center' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    transform: [
       {
         scale: entrance.interpolate({
           inputRange: [0, 1],
           outputRange: [0.94, 1],
         }),
       },
-      {
-        rotate: logoFloat.interpolate({
-          inputRange: [0, 1],
-          outputRange: ['-1.2deg', '1.2deg'],
-        }),
-      },
-    ],
-  };
-
-  const characterMotionStyle = {
-    opacity: 1,
-    transform: [
-      {
-        translateX: entrance.interpolate({
-          inputRange: [0, 1],
-          outputRange: [heroTranslateX + 18, heroTranslateX],
-        }),
-      },
-      {
-        translateY: characterFloat.interpolate({
-          inputRange: [0, 1],
-          outputRange: [8, -8],
-        }),
-      },
-      {
-        scale: entrance.interpolate({
-          inputRange: [0, 1],
-          outputRange: [0.96, 1],
-        }),
-      },
     ],
   };
 
   return (
-    <ScrollView
-      style={styles.scroll}
-      contentContainerStyle={[
-        styles.container,
-        isPhone && styles.containerPhone,
-        isTiny && styles.containerTiny,
-        {
-          minHeight: height,
-          paddingTop: Math.max(insets.top, isPhone ? 12 : 0),
-          paddingHorizontal: horizontalPadding,
-          paddingBottom: Math.max(insets.bottom + 12, isTiny ? 16 : 24),
-        },
-      ]}
-      showsVerticalScrollIndicator={false}
-      bounces={false}
-    >
-      <View style={[styles.main, isDesktop && styles.mainDesktop, isPhone && styles.mainPhone, isTiny && styles.mainTiny, { width: contentWidth }]}>
-        <View style={[styles.heroFrame, isDesktop && styles.heroFrameDesktop, { width: contentWidth, height: heroHeight }]}>
-          <Animated.View
-            style={[
-              styles.logo,
-              isDesktop && styles.logoDesktop,
-              isPhone && styles.logoPhone,
-              isTiny && styles.logoTiny,
-              logoMotionStyle,
-            ]}
-          >
-            <Logo
-              variant="code"
-              width={codeLogoSize}
-              height={codeLogoSize}
-            />
+    <View style={[styles.root, { backgroundColor: colors.background }]}>
+      <View style={[styles.container, { 
+        flex: 1,
+        paddingTop: Math.max(insets.top, 10),
+        paddingHorizontal: horizontalPadding,
+        paddingBottom: Math.max(insets.bottom, 10),
+      }]}>
+        <View pointerEvents="none" style={styles.blobLayer}>
+          <View style={[styles.blob, styles.blobTopRight, { left: width * 0.74, backgroundColor: colors.blobSoft }]} />
+          <View style={[styles.blob, styles.blobBottomLeft, { top: height * 0.78, left: -width * 0.2, backgroundColor: colors.blob }]} />
+        </View>
+
+        <View style={[styles.main, { width: contentWidth, flex: 1 }]}>
+          <Animated.View style={[styles.header, entranceStyle]}>
+            <Logo variant={dark ? 'mainWhite' : 'main'} width={logoWidth} height={logoHeight} />
+          </Animated.View>
+
+          <Animated.View style={[styles.copy, entranceStyle]}>
+            <Typography
+              variant="h1"
+              style={[styles.title, { color: colors.heading, fontSize: titleFontSize, lineHeight: titleLineHeight }]}
+            >
+              Enterprise AI{'\n'}Lead Management
+            </Typography>
+            <Typography
+              variant="bodyLarge"
+              style={[styles.subtitle, { color: colors.subtitle, fontSize: subtitleFontSize, lineHeight: subtitleLineHeight }]}
+            >
+              Streamline your sales pipeline with intelligent tracking and automated follow-ups.
+            </Typography>
           </Animated.View>
 
           <Animated.View
             style={[
-              styles.heroImageWrap,
-              isDesktop && styles.heroImageWrapDesktop,
-              isPhone && styles.heroImageWrapPhone,
-              characterMotionStyle,
+              heroEntranceStyle,
+              dark && styles.heroFrameDark,
             ]}
           >
-            <Image source={heroImage} style={styles.heroImage} contentFit="contain" />
+            {heroVideoSupported ? (
+              <Video
+                key={dark ? 'hero-dark' : 'hero-light'}
+                ref={videoRef}
+                source={dark ? heroVideoDark : heroVideoLight}
+                style={styles.heroVideo}
+                videoStyle={styles.heroVideo}
+                resizeMode={ResizeMode.CONTAIN}
+                shouldPlay={isPlaying}
+                isLooping={false}
+                isMuted={muted || !isPlaying}
+                useNativeControls={false}
+                usePoster={true}
+                posterSource={heroImage}
+                posterStyle={{ width: '100%', height: '100%', resizeMode: 'contain' }}
+                onPlaybackStatusUpdate={onPlaybackStatusUpdate}
+              />
+            ) : (
+              <Image source={heroImage} style={styles.heroVideo} contentFit="contain" />
+            )}
+          </Animated.View>
+
+          <Animated.View style={[styles.actions, entranceStyle, { width: contentWidth }]}>
+            <TouchableOpacity
+              activeOpacity={0.84}
+              style={[
+                styles.primaryButton,
+                { backgroundColor: colors.primaryButtonBg, minHeight: buttonHeight, borderRadius: buttonHeight / 2 },
+              ]}
+              onPress={() => router.push('/login')}
+              accessibilityRole="button"
+            >
+              <Typography
+                variant="bodyLarge"
+                style={[styles.primaryButtonText, { color: colors.primaryButtonText, fontSize: isTiny ? 16 : 17 }]}
+              >
+                Get Started
+              </Typography>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.72}
+              style={[
+                styles.secondaryButton,
+                {
+                  backgroundColor: colors.secondaryButtonBg,
+                  borderColor: colors.secondaryButtonBorder,
+                  minHeight: buttonHeight,
+                  borderRadius: buttonHeight / 2,
+                },
+              ]}
+              onPress={() => router.push('/login')}
+              accessibilityRole="button"
+            >
+              <Typography
+                variant="bodyLarge"
+                style={[styles.secondaryButtonText, { color: colors.secondaryButtonText, fontSize: isTiny ? 16 : 17 }]}
+              >
+                Log In
+              </Typography>
+            </TouchableOpacity>
           </Animated.View>
         </View>
 
-        <View
-          style={[
-              styles.copy,
-              isDesktop && styles.copyDesktop,
-              isShort && styles.copyShort,
-              isTiny && styles.copyTiny,
-              isPhone && styles.copyPhone,
-              { marginTop: copyGap },
-            ]}
-        >
-          <Typography
-            variant="h1"
-            align="center"
-            style={[
-              styles.title,
-              {
-                fontSize: titleFontSize,
-                lineHeight: titleLineHeight,
-              },
-            ]}
-          >
-            Enterprise AI{'\n'}Lead Management
-          </Typography>
-          <Typography
-            variant="bodyLarge"
-            align="center"
-            style={[
-              styles.subtitle,
-              {
-                fontSize: subtitleFontSize,
-                lineHeight: subtitleLineHeight,
-              },
-            ]}
-          >
-            Streamline your sales pipeline with intelligent tracking and automated follow-ups.
+        <View style={[styles.footer, { width: contentWidth, borderTopColor: colors.footerBorder }]}>
+          <View style={styles.footerLinks}>
+            <TouchableOpacity activeOpacity={0.7} onPress={() => router.push('/(auth)/privacy-policy')}>
+              <Typography variant="body" style={[styles.footerLink, { color: colors.footerLink }]}>Privacy Policy</Typography>
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.7} onPress={() => router.push('/(auth)/terms-of-service')}>
+              <Typography variant="body" style={[styles.footerLink, { color: colors.footerLink }]}>Terms</Typography>
+            </TouchableOpacity>
+          </View>
+          <Typography variant="bodySmall" align="center" style={[styles.copyright, { color: colors.copyright }]}>
+            {'©'} 2024 MrLAD. All rights reserved.
           </Typography>
         </View>
+      </View>
 
-        <View
+      {heroVideoSupported ? (
+        <TouchableOpacity
+          activeOpacity={0.78}
+          onPress={() => void toggleMuted()}
           style={[
-            styles.actions,
-            isDesktop && styles.actionsDesktop,
-            isShort && styles.actionsShort,
-            isTiny && styles.actionsTiny,
-            { width: actionsWidth },
+            styles.soundButton,
+            {
+              top: Math.max(insets.top + 10, 18),
+              right: 16,
+              backgroundColor: colors.soundButtonBg,
+              borderColor: colors.soundButtonBorder,
+            },
           ]}
+          accessibilityRole="button"
+          accessibilityLabel={muted ? 'Unmute greeting' : 'Mute greeting'}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
-          <TouchableOpacity
-            activeOpacity={0.84}
-            style={[styles.primaryButton, isTiny && styles.buttonTiny, { minHeight: buttonHeight }]}
-            onPress={() => router.push('/login')}
-            accessibilityRole="button"
-          >
-            <Typography
-              variant="bodyLarge"
-              style={[styles.primaryButtonText, isTiny && styles.buttonTextTiny, { fontSize: isTiny ? 16 : isPhone ? 17 : 19 }]}
-            >
-              Get Started
-            </Typography>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            activeOpacity={0.72}
-            style={[styles.secondaryButton, isTiny && styles.buttonTiny, { minHeight: buttonHeight }]}
-            onPress={() => router.push('/login')}
-            accessibilityRole="button"
-          >
-            <Typography
-              variant="bodyLarge"
-              style={[styles.secondaryButtonText, isTiny && styles.buttonTextTiny, { fontSize: isTiny ? 16 : isPhone ? 17 : 19 }]}
-            >
-              Log In
-            </Typography>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      <View style={[styles.footer, isPhone && styles.footerPhone, isTiny && styles.footerTiny, { width: contentWidth }]}>
-        <View style={styles.footerLinks}>
-          <TouchableOpacity activeOpacity={0.7} onPress={() => router.push('/(auth)/privacy-policy')}>
-            <Typography variant="body" style={[styles.footerLink, isTiny && styles.footerLinkTiny]}>
-              Privacy Policy
-            </Typography>
-          </TouchableOpacity>
-          <TouchableOpacity activeOpacity={0.7} onPress={() => router.push('/(auth)/terms-of-service')}>
-            <Typography variant="body" style={[styles.footerLink, isTiny && styles.footerLinkTiny]}>
-              Terms
-            </Typography>
-          </TouchableOpacity>
-        </View>
-        <Typography
-          variant="bodySmall"
-          align="center"
-          style={[styles.copyright, isTiny && styles.copyrightTiny]}
-        >
-          {'\u00A9'} 2024 MrLAD. All rights reserved.
-        </Typography>
-      </View>
-    </ScrollView>
+          {muted
+            ? <VolumeX color={colors.soundIcon} size={18} />
+            : <Volume2 color={colors.soundIcon} size={18} />}
+        </TouchableOpacity>
+      ) : null}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
   scroll: {
     flex: 1,
-    backgroundColor: palette.background,
   },
   container: {
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: palette.background,
   },
-  containerPhone: {
-    justifyContent: 'flex-start',
+  blobLayer: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
   },
-  containerTiny: {
-    justifyContent: 'flex-start',
+  blob: {
+    position: 'absolute',
+    borderRadius: 999,
+  },
+  blobTopRight: {
+    top: 84,
+    width: 150,
+    height: 150,
+  },
+  blobBottomLeft: {
+    width: 260,
+    height: 260,
   },
   main: {
     flex: 1,
@@ -311,132 +333,64 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
     paddingBottom: 12,
   },
-  mainPhone: {
-    paddingBottom: 10,
-  },
-  mainTiny: {
-    paddingBottom: 8,
-  },
-  mainDesktop: {
-    paddingBottom: 10,
-  },
-  heroFrame: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-    position: 'relative',
-  },
-  heroFrameDesktop: {
-    marginTop: 4,
-  },
-  logo: {
-    position: 'absolute',
-    left: 12,
-    top: '51%',
-    zIndex: 2,
-  },
-  logoPhone: {
-    left: 10,
-    top: '50%',
-  },
-  logoTiny: {
-    left: 8,
-    top: '49%',
-  },
-  logoDesktop: {
-    left: 44,
-    top: '53%',
-  },
-  heroImageWrap: {
-    width: '96%',
-    height: '100%',
-    alignSelf: 'flex-end',
-  },
-  heroImageWrapPhone: {
-    width: '98%',
-  },
-  heroImageWrapDesktop: {
-    width: '76%',
-  },
-  heroImage: {
+  header: {
     width: '100%',
-    height: '100%',
+    alignItems: 'flex-start',
   },
   copy: {
-    marginTop: 14,
-    alignItems: 'center',
+    marginTop: 26,
     width: '100%',
-  },
-  copyPhone: {
-    marginTop: 62,
-  },
-  copyDesktop: {
-    marginTop: 18,
-  },
-  copyShort: {
-    marginTop: 44,
-  },
-  copyTiny: {
-    marginTop: 42,
+    alignItems: 'flex-start',
   },
   title: {
-    color: palette.text,
     fontWeight: '800',
-  },
-  titleDesktop: {
-    fontSize: 44,
-    lineHeight: 52,
-  },
-  titleSmallPhone: {
-    fontSize: 29,
-    lineHeight: 36,
-  },
-  titleTiny: {
-    fontSize: 25,
-    lineHeight: 31,
+    textAlign: 'left',
   },
   subtitle: {
     marginTop: 12,
-    color: palette.secondary,
     fontWeight: '400',
+    textAlign: 'left',
     maxWidth: 360,
   },
-  subtitleDesktop: {
-    fontSize: 22,
-    lineHeight: 34,
+  heroFrame: {
+    marginTop: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  subtitleSmallPhone: {
-    fontSize: 16,
-    lineHeight: 24,
+  // Rounded corners hide any slight shade difference between the dark clip's
+  // background and the page background.
+  heroFrameDark: {
+    borderRadius: 24,
+    overflow: 'hidden',
   },
-  subtitleTiny: {
-    marginTop: 8,
-    fontSize: 14,
-    lineHeight: 20,
+  heroVideo: {
+    width: '100%',
+    height: '100%',
+  },
+  soundButton: {
+    position: 'absolute',
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#0f1743',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 4,
+    zIndex: 10,
   },
   actions: {
-    marginTop: 24,
-    gap: 12,
-  },
-  actionsDesktop: {
-    maxWidth: 526,
-    marginTop: 34,
-  },
-  actionsShort: {
     marginTop: 18,
-    gap: 10,
-  },
-  actionsTiny: {
-    marginTop: 14,
-    gap: 8,
+    gap: 12,
   },
   primaryButton: {
     width: '100%',
-    borderRadius: 13,
-    backgroundColor: palette.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: palette.primary,
+    shadowColor: '#0f1743',
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.22,
     shadowRadius: 18,
@@ -444,48 +398,23 @@ const styles = StyleSheet.create({
   },
   secondaryButton: {
     width: '100%',
-    borderRadius: 13,
-    backgroundColor: palette.surface,
     borderWidth: 1,
-    borderColor: palette.border,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  buttonTiny: {
-    minHeight: 52,
-    borderRadius: 11,
-  },
   primaryButtonText: {
-    color: palette.surface,
-    fontSize: 20,
-    lineHeight: 28,
+    lineHeight: 26,
     fontWeight: '800',
   },
   secondaryButtonText: {
-    color: '#1f2937',
-    fontSize: 20,
-    lineHeight: 28,
+    lineHeight: 26,
     fontWeight: '700',
-  },
-  buttonTextTiny: {
-    fontSize: 17,
-    lineHeight: 24,
   },
   footer: {
     borderTopWidth: 1,
-    borderTopColor: '#edf2f7',
     alignItems: 'center',
-    paddingTop: 18,
-    paddingBottom: 18,
-  },
-  footerPhone: {
-    marginTop: 8,
-    paddingTop: 14,
-    paddingBottom: 10,
-  },
-  footerTiny: {
     paddingTop: 16,
-    paddingBottom: 16,
+    paddingBottom: 14,
   },
   footerLinks: {
     flexDirection: 'row',
@@ -494,25 +423,14 @@ const styles = StyleSheet.create({
     gap: 34,
   },
   footerLink: {
-    color: '#475569',
-    fontSize: 16,
-    lineHeight: 24,
+    fontSize: 15,
+    lineHeight: 22,
     fontWeight: '700',
   },
-  footerLinkTiny: {
-    fontSize: 14,
-    lineHeight: 20,
-  },
   copyright: {
-    marginTop: 16,
-    color: palette.footer,
-    fontSize: 14,
-    lineHeight: 20,
-    fontWeight: '500',
-  },
-  copyrightTiny: {
-    marginTop: 10,
-    fontSize: 12,
+    marginTop: 12,
+    fontSize: 13,
     lineHeight: 18,
+    fontWeight: '500',
   },
 });

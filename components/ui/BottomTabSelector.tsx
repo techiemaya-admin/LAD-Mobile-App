@@ -29,7 +29,7 @@ const tabs: {
   label: string;
   route: string;
   routeName: string;
-  icon: typeof House;
+  icon: any;
 }[] = [
     { key: 'home', label: 'Home', route: '/(tabs)', routeName: 'index', icon: House },
     { key: 'crm', label: 'CRM', route: '/(tabs)/crm', routeName: 'crm', icon: BriefcaseBusiness },

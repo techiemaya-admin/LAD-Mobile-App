@@ -79,6 +79,10 @@ export type BroadcastGroup = {
   color?: string;
   description?: string | null;
   waBackendChannel?: 'waba' | 'personal';
+  /** Saved broadcast set (metadata.is_broadcast_list) — groups-of-groups, shown as "N groups" */
+  isBroadcastList?: boolean;
+  /** Number of member chat groups in a saved broadcast set (metadata.member_group_ids) */
+  memberGroupCount?: number;
 };
 
 export type BroadcastGroupMember = {
@@ -88,10 +92,18 @@ export type BroadcastGroupMember = {
 };
 
 export type BroadcastTemplateSendPayload = {
+  templateId?: string;
   templateName: string;
   languageCode?: string;
   parameters?: string[];
   nameFormat?: 'first' | 'full';
+  headerParamCount?: number;
+  headerType?: string;
+  headerUrl?: string;
+  body?: string;
+  mediaUrl?: string | null;
+  mediaType?: string | null;
+  mediaFilename?: string | null;
 };
 
 export type StarredMessageRecord = {
@@ -163,6 +175,7 @@ const instagramConversationIds = new Set<string>();
 const emailContactIdsByConversation = new Map<string, string>();
 const emailProvidersByConversation = new Map<string, string>();
 type WhatsAppBackendChannel = 'waba' | 'personal';
+type ConversationRouteChannel = WhatsAppBackendChannel | 'linkedin';
 
 const isRecord = (value: unknown): value is RawRecord =>
   Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -806,6 +819,14 @@ const getConversationBackendChannel = async (conversationId?: string): Promise<W
   return getWhatsAppBackendChannel();
 };
 
+const getConversationRouteChannel = async (conversationId?: string): Promise<ConversationRouteChannel> => {
+  if (conversationId && linkedinConversationIds.has(conversationId)) {
+    return 'linkedin';
+  }
+
+  return getConversationBackendChannel(conversationId);
+};
+
 const stripInternalPrefix = (value: string) => value.replace(/^\s*\[internal\]\s*/i, '').trim();
 
 const normalizeConversationNote = (value: unknown, index = 0): ConversationNote | null => {
@@ -922,7 +943,18 @@ const normalizeAssignmentHistory = (payload: unknown): ConversationAssignmentHis
   const history = historyItems
     .map((item, index) => normalizeAssignmentRecord(item, index))
     .filter((item): item is ConversationAssignmentRecord => Boolean(item));
-  const current = normalizeAssignmentRecord(currentSource) ?? history[0] ?? normalizeAssignmentRecord(record) ?? null;
+
+  // When the backend explicitly returns a current-assignment field (even null),
+  // it is authoritative — a null means the conversation is unassigned. Only when
+  // no current field is present at all do we infer it from the latest history
+  // entry or a flat record. Previously we always fell back to history[0], which
+  // made an unassigned conversation reappear as assigned after a refresh.
+  const hasCurrentField =
+    isRecord(record) &&
+    ('current' in record || 'current_assignment' in record);
+  const current = hasCurrentField
+    ? normalizeAssignmentRecord(currentSource)
+    : normalizeAssignmentRecord(currentSource) ?? history[0] ?? normalizeAssignmentRecord(record) ?? null;
 
   return { current, history };
 };
@@ -1083,6 +1115,59 @@ const parseMetadata = (value: unknown): RawRecord => {
   return {};
 };
 
+const compactMetadataRecord = (value: RawRecord): RawRecord => {
+  const entries = Object.entries(value).filter(([, item]) => {
+    if (item === undefined || item === null || item === '') {
+      return false;
+    }
+
+    if (Array.isArray(item)) {
+      return item.length > 0;
+    }
+
+    if (isRecord(item)) {
+      return Object.keys(item).length > 0;
+    }
+
+    return true;
+  });
+
+  return Object.fromEntries(entries);
+};
+
+const mergeMetadataRecords = (...values: unknown[]) =>
+  compactMetadataRecord(Object.assign({}, ...values.map((value) => parseMetadata(value))));
+
+const getConversationMetadata = (item: RawRecord, lead: RawRecord = {}) =>
+  mergeMetadataRecords(
+    item.metadata,
+    item.conversation_metadata,
+    item.conversationMetadata,
+    lead.conversation_metadata,
+    lead.conversationMetadata,
+  );
+
+const getContactMetadata = (item: RawRecord, lead: RawRecord = {}) =>
+  mergeMetadataRecords(
+    item.contact_metadata,
+    item.contactMetadata,
+    item.lead_metadata,
+    item.leadMetadata,
+    item.customer_metadata,
+    item.customerMetadata,
+    item.profile_metadata,
+    item.profileMetadata,
+    item.custom_fields,
+    item.customFields,
+    item.attributes,
+    lead.metadata,
+    lead.contact_metadata,
+    lead.contactMetadata,
+    lead.custom_fields,
+    lead.customFields,
+    lead.attributes,
+  );
+
 // Known WhatsApp placeholder texts for media messages (the text sent when no caption)
 const WA_MEDIA_PLACEHOLDERS = new Set([
   '\u{1F4F7} Photo', '\u{1F4F8} Photo', 'Photo',
@@ -1142,6 +1227,10 @@ const normalizeBniMessage = (item: ApiMessage | RawRecord, fallbackConversationI
   if (!mediaId && inferredMediaType && rawContent.startsWith('http')) {
     mediaId = rawContent;
   }
+  // Outbound media rows sometimes echo the bare Meta media id (15-16 digits) as content
+  if (!mediaId && inferredMediaType && /^\d{10,}$/.test(rawContent.trim())) {
+    mediaId = rawContent.trim();
+  }
 
   const mediaMimeType = metadata.mime_type ?? item.mime_type ?? item.content_type ?? item.media_mime_type
     ? String(metadata.mime_type ?? item.mime_type ?? item.content_type ?? item.media_mime_type)
@@ -1187,6 +1276,38 @@ const normalizeBniMessage = (item: ApiMessage | RawRecord, fallbackConversationI
   };
 };
 
+const normalizeOwnerType = (type: unknown): 'AI' | 'human_agent' | undefined => {
+  if (typeof type !== 'string') return undefined;
+  const lower = type.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!lower) return undefined;
+  if (
+    lower === 'ai' ||
+    lower === 'bot' ||
+    lower === 'assistant' ||
+    lower === 'ai_agent' ||
+    lower === 'agent_ai' ||
+    lower === 'mr_lad' ||
+    lower.includes('ai_agent') ||
+    lower.includes('bot') ||
+    lower.includes('assistant') ||
+    lower.includes('automation')
+  ) {
+    return 'AI';
+  }
+  if (
+    lower === 'human' ||
+    lower === 'human_agent' ||
+    lower === 'manual' ||
+    lower === 'user' ||
+    lower.includes('human') ||
+    lower.includes('manual') ||
+    lower.includes('team_member')
+  ) {
+    return 'human_agent';
+  }
+  return undefined;
+};
+
 const normalizeBniConversation = (item: RawRecord, backendChannel?: WhatsAppBackendChannel): ChatConversation | null => {
   const id = getId(item);
 
@@ -1194,11 +1315,13 @@ const normalizeBniConversation = (item: RawRecord, backendChannel?: WhatsAppBack
     return null;
   }
 
-  const company = item.lead_company ?? item.company ?? item.company_name ?? item.contact_company;
-  const phone = item.lead_phone ?? item.phone ?? item.contact_phone;
-  const email = item.lead_email ?? item.email ?? item.contact_email;
+  const metadata = getConversationMetadata(item);
+  const contactMetadata = getContactMetadata(item);
+  const company = item.lead_company ?? item.company ?? item.company_name ?? item.contact_company ?? contactMetadata.company ?? contactMetadata.company_name ?? metadata.company ?? metadata.company_name;
+  const phone = item.lead_phone ?? item.phone ?? item.contact_phone ?? contactMetadata.phone ?? contactMetadata.phone_e164 ?? contactMetadata.contact_phone ?? metadata.phone ?? metadata.contact_phone;
+  const email = item.lead_email ?? item.email ?? item.contact_email ?? contactMetadata.email ?? contactMetadata.contact_email ?? metadata.email ?? metadata.contact_email;
   const combinedName = [item.lead_first_name, item.lead_last_name].filter(Boolean).join(' ').trim();
-  const name = [item.lead_name, item.contact_name, item.name, combinedName, phone, email]
+  const name = [item.lead_name, item.contact_name, item.name, contactMetadata.name, contactMetadata.full_name, metadata.name, combinedName, phone, email]
     .find((value) => typeof value === 'string' && Boolean(value.trim())) || 'Unknown lead';
   const lastMessage = item.last_message_content ?? item.lastMessageText ?? item.last_message ?? item.preview ?? item.message;
   const inlineMessages = getArrayPayload(item.messages ?? [], ['messages', 'data', 'items'])
@@ -1211,6 +1334,72 @@ const normalizeBniConversation = (item: RawRecord, backendChannel?: WhatsAppBack
 
   const tags = [company, item.owner_name ?? item.owner, item.context_status]
     .filter((value): value is string => typeof value === 'string' && Boolean(value.trim()));
+
+  const rawOwner = item.owner ?? item.conversation_owner ?? item.handler ?? item.assigned_to ?? metadata.owner ?? metadata.owner_type ?? metadata.handler;
+  const rawOwnerName = item.ownerName ?? item.owner_name ?? item.assigned_agent_name ?? metadata.ownerName ?? metadata.owner_name ?? metadata.assigned_agent_name;
+  const isExplicitAi =
+    item.is_ai_handled === true ||
+    item.ai_handled === true ||
+    item.bot_handled === true ||
+    item.bot_active === true ||
+    item.ai_active === true ||
+    item.ai_agent_active === true ||
+    item.agent_connected === true ||
+    item.ai_agent_connected === true ||
+    item.is_bot === true ||
+    item.is_ai === true ||
+    metadata.is_ai_handled === true ||
+    metadata.ai_handled === true ||
+    metadata.bot_handled === true ||
+    metadata.bot_active === true ||
+    metadata.ai_active === true ||
+    metadata.ai_agent_active === true ||
+    metadata.agent_connected === true ||
+    metadata.ai_agent_connected === true ||
+    metadata.is_bot === true ||
+    metadata.is_ai === true;
+  const isExplicitHuman =
+    item.is_human_handled === true ||
+    item.human_handled === true ||
+    item.human_agent_active === true ||
+    item.manual_mode === true ||
+    Boolean(item.humanAgentId ?? item.human_agent_id ?? metadata.humanAgentId ?? metadata.human_agent_id) ||
+    metadata.is_human_handled === true ||
+    metadata.human_handled === true ||
+    metadata.human_agent_active === true ||
+    metadata.manual_mode === true;
+  
+  const explicitOwnerType = normalizeOwnerType(item.owner_type ?? item.ownerType ?? metadata.owner_type ?? metadata.ownerType);
+  let derivedOwnerType: 'AI' | 'human_agent' | undefined;
+  if (explicitOwnerType) {
+    derivedOwnerType = explicitOwnerType;
+  } else if (isExplicitAi) {
+    derivedOwnerType = 'AI';
+  } else if (isExplicitHuman) {
+    derivedOwnerType = 'human_agent';
+  } else if (normalizeOwnerType(rawOwner) === 'human_agent' || normalizeOwnerType(rawOwnerName) === 'human_agent') {
+    derivedOwnerType = 'human_agent';
+  } else if (normalizeOwnerType(rawOwner) === 'AI' || normalizeOwnerType(rawOwnerName) === 'AI') {
+    derivedOwnerType = 'AI';
+  } else {
+    // Aggressive JSON stringification fallback
+    const jsonStr = JSON.stringify({ ...item, messages: undefined, last_message_content: undefined, lastMessageText: undefined, last_message: undefined, message: undefined, preview: undefined }).toLowerCase();
+    if (jsonStr.includes('"is_bot":true') || jsonStr.includes('"bot_handled":true') || jsonStr.includes('"ai_handled":true') || jsonStr.includes('"is_ai_handled":true') || jsonStr.includes('"ai_active":true')) {
+      derivedOwnerType = 'AI';
+    } else if (jsonStr.includes('"is_human":true') || jsonStr.includes('"human_handled":true') || jsonStr.includes('"human_agent_active":true')) {
+      derivedOwnerType = 'human_agent';
+    }
+  }
+  const ownerType = derivedOwnerType;
+  const ownerLabel = rawOwnerName
+    ? String(rawOwnerName)
+    : ownerType === 'human_agent'
+      ? 'Human Agent'
+      : ownerType === 'AI'
+        ? 'AI Agent'
+        : rawOwner
+          ? String(rawOwner)
+          : undefined;
 
   return {
     id,
@@ -1236,12 +1425,18 @@ const normalizeBniConversation = (item: RawRecord, backendChannel?: WhatsAppBack
     startedAt: item.started_at || item.created_at || item.createdAt
       ? asDateString(item.started_at ?? item.created_at ?? item.createdAt)
       : undefined,
-    owner: item.owner_name || item.owner ? String(item.owner_name ?? item.owner) : undefined,
+    owner: ownerLabel,
+    ownerType,
     conversationState: item.context_status || item.conversation_status || item.status
       ? String(item.context_status ?? item.conversation_status ?? item.status)
       : undefined,
     messageCount: Number(item.message_count ?? item.messages_count ?? item.total_messages ?? inlineMessages.length),
+    metadata,
+    contactMetadata,
     waBackendChannel: backendChannel,
+    accountId: item.account_id ?? item.accountId ?? item.phone_number_id ?? item.phoneNumberId ?? item.waba_account_id
+      ? String(item.account_id ?? item.accountId ?? item.phone_number_id ?? item.phoneNumberId ?? item.waba_account_id)
+      : undefined,
   };
 };
 
@@ -1347,6 +1542,7 @@ const normalizeEmailContactConversation = (item: RawRecord): ChatConversation | 
   const name = item.contact_name ?? item.contactName ?? item.name ?? item.email ?? 'Email contact';
   const company = item.company ?? item.company_name;
   const metadata = parseMetadata(item.metadata);
+  const contactMetadata = getContactMetadata(item);
   const lastMessage = item.last_message ?? item.lastMessage ?? item.preview_text ?? metadata.last_message;
   const lastMessageAt = item.last_message_at ?? item.lastMessageAt ?? item.updated_at ?? item.created_at;
 
@@ -1370,6 +1566,8 @@ const normalizeEmailContactConversation = (item: RawRecord): ChatConversation | 
     startedAt: item.created_at || item.createdAt ? asDateString(item.created_at ?? item.createdAt) : undefined,
     conversationState: provider,
     messageCount: Number(item.message_count ?? item.messages_count ?? 0),
+    metadata,
+    contactMetadata,
   };
 };
 
@@ -1464,6 +1662,32 @@ const getConversationsFromLinkedInSource = async (params: ConversationPageParams
   conversations.forEach((conversation) => linkedinConversationIds.add(conversation.id));
 
   return filterConversations(conversations, params);
+};
+
+export const getConversationStats = async (params: ConversationPageParams = {}) => {
+  const channel = params.channel ?? 'whatsapp';
+  try {
+    if (channel === 'whatsapp') {
+      try {
+        const channels = await getWhatsAppBackendChannels();
+        const waba = channels.includes('waba') ? 'waba' : channels[0];
+        if (waba) {
+          const payload = await bniRequest('GET', '/api/conversations', undefined, {
+            backendChannel: waba,
+            params: { limit: 1 },
+          });
+          return payload;
+        }
+      } catch (e) {
+        // Ignore
+      }
+    }
+    const response = await apiGet<any>('/api/conversations', { params: { limit: 1, channel } });
+    return response.data;
+  } catch (e) {
+    // Silent fail
+  }
+  return null;
 };
 
 const getConversationsFromEmailSource = async (params: ConversationPageParams = {}) => {
@@ -1660,24 +1884,74 @@ export const normalizeConversation = (item: ApiConversation | RawRecord): ChatCo
     lastInlineMessage ??
     {};
   const lead = item.lead ?? item.contact ?? item.customer ?? item.participant ?? item.participants?.[0] ?? {};
+  const metadata = getConversationMetadata(item, lead);
+  const contactMetadata = getContactMetadata(item, lead);
   const lastMessageRecord = isRecord(lastMessage) ? lastMessage : {};
   const name = getDisplayName(item, lead);
-  const email = item.email ?? item.contact_email ?? item.lead_email ?? lead.email;
-  const phone = item.phone ?? item.contact_phone ?? item.lead_phone ?? lead.phone;
-  const company = item.company ?? item.company_name ?? item.contact_company ?? item.lead_company ?? lead.company ?? lead.company_name;
-  const rawOwner = item.owner ?? item.conversation_owner ?? item.handler ?? item.assigned_to;
-  const rawOwnerName = item.ownerName ?? item.owner_name ?? item.assigned_agent_name;
-  const ownerType = /human_agent|human/i.test(String(rawOwner ?? rawOwnerName ?? ''))
-    ? 'human_agent'
-    : /ai|agent/i.test(String(rawOwner ?? ''))
-      ? 'AI'
-      : undefined;
+  const email = item.email ?? item.contact_email ?? item.lead_email ?? lead.email ?? contactMetadata.email ?? contactMetadata.contact_email ?? metadata.email ?? metadata.contact_email;
+  const phone = item.phone ?? item.contact_phone ?? item.lead_phone ?? lead.phone ?? contactMetadata.phone ?? contactMetadata.phone_e164 ?? contactMetadata.contact_phone ?? metadata.phone ?? metadata.contact_phone;
+  const company = item.company ?? item.company_name ?? item.contact_company ?? item.lead_company ?? lead.company ?? lead.company_name ?? contactMetadata.company ?? contactMetadata.company_name ?? metadata.company ?? metadata.company_name;
+  const rawOwner = item.owner ?? item.conversation_owner ?? item.handler ?? item.assigned_to ?? metadata.owner ?? metadata.owner_type ?? metadata.handler;
+  const rawOwnerName = item.ownerName ?? item.owner_name ?? item.assigned_agent_name ?? metadata.ownerName ?? metadata.owner_name ?? metadata.assigned_agent_name;
+  const isExplicitAi =
+    item.is_ai_handled === true ||
+    item.ai_handled === true ||
+    item.bot_handled === true ||
+    item.bot_active === true ||
+    item.ai_active === true ||
+    item.ai_agent_active === true ||
+    item.agent_connected === true ||
+    item.ai_agent_connected === true ||
+    item.is_bot === true ||
+    item.is_ai === true ||
+    metadata.is_ai_handled === true ||
+    metadata.ai_handled === true ||
+    metadata.bot_handled === true ||
+    metadata.bot_active === true ||
+    metadata.ai_active === true ||
+    metadata.ai_agent_active === true ||
+    metadata.agent_connected === true ||
+    metadata.ai_agent_connected === true ||
+    metadata.is_bot === true ||
+    metadata.is_ai === true;
+  const isExplicitHuman =
+    item.is_human_handled === true ||
+    item.human_handled === true ||
+    item.human_agent_active === true ||
+    item.manual_mode === true ||
+    Boolean(item.humanAgentId ?? item.human_agent_id ?? metadata.humanAgentId ?? metadata.human_agent_id) ||
+    metadata.is_human_handled === true ||
+    metadata.human_handled === true ||
+    metadata.human_agent_active === true ||
+    metadata.manual_mode === true;
+  
+  const explicitOwnerType = normalizeOwnerType(item.owner_type ?? item.ownerType ?? metadata.owner_type ?? metadata.ownerType);
+  let derivedOwnerType: 'AI' | 'human_agent' | undefined;
+  if (explicitOwnerType) {
+    derivedOwnerType = explicitOwnerType;
+  } else if (isExplicitAi) {
+    derivedOwnerType = 'AI';
+  } else if (isExplicitHuman) {
+    derivedOwnerType = 'human_agent';
+  } else if (normalizeOwnerType(rawOwner) === 'human_agent' || normalizeOwnerType(rawOwnerName) === 'human_agent') {
+    derivedOwnerType = 'human_agent';
+  } else if (normalizeOwnerType(rawOwner) === 'AI' || normalizeOwnerType(rawOwnerName) === 'AI') {
+    derivedOwnerType = 'AI';
+  } else {
+    const jsonStr = JSON.stringify({ ...item, messages: undefined, last_message_content: undefined, lastMessageText: undefined, last_message: undefined, message: undefined, preview: undefined }).toLowerCase();
+    if (jsonStr.includes('"is_bot":true') || jsonStr.includes('"bot_handled":true') || jsonStr.includes('"ai_handled":true') || jsonStr.includes('"is_ai_handled":true') || jsonStr.includes('"ai_active":true')) {
+      derivedOwnerType = 'AI';
+    } else if (jsonStr.includes('"is_human":true') || jsonStr.includes('"human_handled":true') || jsonStr.includes('"human_agent_active":true')) {
+      derivedOwnerType = 'human_agent';
+    }
+  }
+  const ownerType = derivedOwnerType;
   const ownerLabel = rawOwnerName
     ? String(rawOwnerName)
     : ownerType === 'human_agent'
       ? 'Human Agent'
       : ownerType === 'AI'
-        ? 'AI'
+        ? 'AI Agent'
         : rawOwner
           ? String(rawOwner)
           : undefined;
@@ -1728,6 +2002,11 @@ export const normalizeConversation = (item: ApiConversation | RawRecord): ChatCo
       ? String(item.conversationState ?? item.conversation_state ?? item.context_status ?? item.status)
       : undefined,
     messageCount: Number(item.messageCount ?? item.message_count ?? item.messages_count ?? inlineMessages.length),
+    metadata,
+    contactMetadata,
+    accountId: item.accountId ?? item.account_id ?? item.phone_number_id ?? item.phoneNumberId
+      ? String(item.accountId ?? item.account_id ?? item.phone_number_id ?? item.phoneNumberId)
+      : undefined,
   };
 };
 
@@ -1750,13 +2029,29 @@ export const normalizeMessage = (item: ApiMessage | RawRecord, fallbackConversat
         : 'lead';
 
   const rawType = String(item.type ?? item.message_type ?? metadata.message_type ?? metadata.media_type ?? item.mediaType ?? item.media_type ?? '').toLowerCase();
-  const inferredMediaType = rawType === 'image' || rawType === 'video' || rawType === 'audio' || rawType === 'document' ? rawType : undefined;
+  let inferredMediaType = rawType === 'image' || rawType === 'video' || rawType === 'audio' || rawType === 'document' ? rawType : undefined;
 
   let mediaId = metadata.media_id ?? item.media_id ?? item.mediaId ?? item.file_url ?? item.url ?? metadata.url;
   const contentStr = String(item.content ?? item.text ?? item.body ?? item.message ?? '');
 
-  if (!mediaId && inferredMediaType && contentStr.startsWith('http')) {
-    mediaId = contentStr;
+  // Outbound media rows sometimes echo the bare Meta media id (15-16 digits) as content
+  if (!mediaId && inferredMediaType && /^\d{10,}$/.test(contentStr.trim())) {
+    mediaId = contentStr.trim();
+  }
+
+  if (!mediaId && contentStr.startsWith('http')) {
+    const isImage = /\.(jpe?g|png|gif|webp|heic|bmp)(?:\?.*)?$/i.test(contentStr);
+    const isVideo = /\.(mp4|mov|avi|mkv|webm|3gp)(?:\?.*)?$/i.test(contentStr);
+    
+    if (inferredMediaType) {
+      mediaId = contentStr;
+    } else if (isImage) {
+      mediaId = contentStr;
+      inferredMediaType = 'image';
+    } else if (isVideo) {
+      mediaId = contentStr;
+      inferredMediaType = 'video';
+    }
   }
 
   const latitude = metadata.latitude !== undefined ? Number(metadata.latitude) : (item.latitude !== undefined ? Number(item.latitude) : undefined);
@@ -1956,11 +2251,21 @@ class ChatService {
 
   async getConversation(id: string): Promise<ConversationDetail> {
     if (bniConversationIds.has(id)) {
+      const backendChannel = await getConversationBackendChannel(id);
       const cachedMessages = bniMessagesByConversation.get(id);
-      const messages = cachedMessages?.length ? cachedMessages : await getMessagesFromBniSource(id, 1, 100);
+      const [messagesResult, detailResult] = await Promise.allSettled([
+        cachedMessages?.length ? Promise.resolve(cachedMessages) : getMessagesFromBniSource(id, 1, 100),
+        bniRequest('GET', `/api/conversations/${id}`, undefined, { backendChannel }),
+      ]);
+      const messages = messagesResult.status === 'fulfilled' ? messagesResult.value : [];
+      const detailPayload = detailResult.status === 'fulfilled' ? detailResult.value : null;
+      const source = getRecordPayload(detailPayload, ['conversation', 'data', 'result']) ?? (isRecord(detailPayload) ? detailPayload : null);
+      const conversation = isRecord(source)
+        ? normalizeBniConversation({ ...source, id: getId(source) || id, conversation_id: source.conversation_id ?? id }, backendChannel) ?? undefined
+        : undefined;
 
       return {
-        conversation: undefined,
+        conversation,
         messages,
       };
     }
@@ -2074,6 +2379,10 @@ class ChatService {
     mediaId,
     mediaType,
     mediaFilename,
+    latitude,
+    longitude,
+    locationName,
+    locationAddress,
   }: SendMessageParams) {
     const sender = currentUser ?? { id: humanAgentId, name: 'Agent' };
     const messageText = content ?? message;
@@ -2099,6 +2408,13 @@ class ChatService {
       payload.mediaFilename = mediaFilename;
       payload.media_filename = mediaFilename;
     }
+    
+    if (type === 'location') {
+      payload.latitude = latitude;
+      payload.longitude = longitude;
+      if (locationName) payload.location_name = locationName;
+      if (locationAddress) payload.location_address = locationAddress;
+    }
 
     if (bniConversationIds.has(conversationId)) {
       const bniPayload: any = {
@@ -2112,6 +2428,13 @@ class ChatService {
         bniPayload.media_type = mediaType;
         bniPayload.media_filename = mediaFilename;
         bniPayload.url = mediaId;
+      }
+      
+      if (type === 'location') {
+        bniPayload.latitude = latitude;
+        bniPayload.longitude = longitude;
+        if (locationName) bniPayload.location_name = locationName;
+        if (locationAddress) bniPayload.location_address = locationAddress;
       }
 
       const response = await bniRequest(
@@ -2139,6 +2462,13 @@ class ChatService {
         linkedinPayload.media_type = mediaType;
         linkedinPayload.media_filename = mediaFilename;
         linkedinPayload.url = mediaId;
+      }
+      
+      if (type === 'location') {
+        linkedinPayload.latitude = latitude;
+        linkedinPayload.longitude = longitude;
+        if (locationName) linkedinPayload.location_name = locationName;
+        if (locationAddress) linkedinPayload.location_address = locationAddress;
       }
 
       const response = await bniRequest(
@@ -2307,8 +2637,10 @@ class ChatService {
   }
 
   async getConversationNotes(conversationId: string) {
-    const backendChannel = await getConversationBackendChannel(conversationId);
-    const paths = backendChannel === 'waba'
+    const backendChannel = await getConversationRouteChannel(conversationId);
+    const paths = backendChannel === 'linkedin'
+      ? [`/api/conversations/${conversationId}/notes`]
+      : backendChannel === 'waba'
       ? [`/api/notes/conversations/${conversationId}`, `/api/conversations/${conversationId}/notes`]
       : [`/api/conversations/${conversationId}/notes`, `/api/notes/conversations/${conversationId}`];
     let lastError: unknown;
@@ -2332,7 +2664,7 @@ class ChatService {
     content: string,
     options: { authorName?: string; internal?: boolean } = {},
   ) {
-    const backendChannel = await getConversationBackendChannel(conversationId);
+    const backendChannel = await getConversationRouteChannel(conversationId);
     const noteContent = options.internal ? `[Internal] ${content}` : content;
     const payload = await bniRequest(
       'POST',
@@ -2501,6 +2833,12 @@ class ChatService {
           seen.add(id);
           broadcastGroupChannelById.set(id, backendChannel);
           const metadata = isRecord(g.metadata) ? g.metadata : {};
+          // Saved broadcast sets are groups-of-groups: mirror lad-frontend-2 and
+          // surface their member_group_ids count as "N groups" instead of members.
+          const isBroadcastList = Boolean(metadata.is_broadcast_list);
+          const memberGroupCount = Array.isArray(metadata.member_group_ids)
+            ? metadata.member_group_ids.length
+            : 0;
           groups.push({
             id,
             name: String(g.name || 'Unnamed Group'),
@@ -2512,6 +2850,8 @@ class ChatService {
                 g.conversationCount ??
                 0,
             ),
+            isBroadcastList,
+            memberGroupCount,
             avatar: g.avatar ? String(g.avatar) : undefined,
             color: g.color ? String(g.color) : undefined,
             description: g.description !== undefined && g.description !== null ? String(g.description) : null,
@@ -2642,6 +2982,76 @@ class ChatService {
     return { sent: Number(isRecord(response) ? response.sent ?? conversationIds.length : conversationIds.length) };
   }
 
+  // Mirrors lad-frontend-2's one-chat template flow. Its Next.js bulk-action
+  // route ultimately forwards template sends to /bulk/send-template; calling
+  // that backend route directly avoids the local proxy's /bulk 405 on web.
+  // LinkedIn templates are saved snippets with optional media, so they ride
+  // through the LinkedIn conversation message route.
+  async sendTemplateToConversation(
+    conversation: { id: string; channel?: ChatChannel; waBackendChannel?: WhatsAppBackendChannel },
+    payload: BroadcastTemplateSendPayload,
+  ) {
+    const conversationId = conversation.id;
+    if (!conversationId) {
+      throw new Error('Cannot send template without a conversation ID.');
+    }
+
+    if (conversation.channel === 'linkedin') {
+      const response = await bniRequest(
+        'POST',
+        `/api/conversations/${conversationId}/messages`,
+        {
+          template_id: payload.templateId || undefined,
+          templateId: payload.templateId || undefined,
+          content: payload.body ?? '',
+          media_url: payload.mediaUrl || undefined,
+          media_type: payload.mediaType || undefined,
+          media_filename: payload.mediaFilename || undefined,
+        },
+        { backendChannel: 'linkedin' },
+      );
+      const newMessage = (isRecord(response) ? response.data ?? response.message ?? response : response) as ApiMessage;
+      const normalizedMessage = normalizeLinkedInMessage(newMessage, conversationId);
+      this.notifyMessageListeners(conversationId, newMessage);
+      return { sent: 1, message: normalizedMessage };
+    }
+
+    const backendChannel = conversation.waBackendChannel ?? await getConversationBackendChannel(conversationId);
+    const templatePayload = {
+      conversation_ids: [conversationId],
+      template_name: payload.templateName,
+      language_code: payload.languageCode || 'en',
+      parameters: payload.parameters ?? [],
+      name_format: payload.nameFormat ?? 'first',
+      batch_size: 5,
+      delay_min: 120,
+      delay_random: 30,
+      daily_limit: 250,
+      header_param_count: payload.headerParamCount ?? 0,
+      header_type: payload.headerType || '',
+      header_url: payload.headerUrl || '',
+    };
+
+    const response = await bniRequest(
+      'POST',
+      '/api/conversations/bulk/send-template',
+      templatePayload,
+      { backendChannel },
+    );
+
+    if (isRecord(response)) {
+      const sent = Number(response.sent ?? (response.success ? 1 : 0));
+      const failed = Number(response.failed ?? 0);
+      if (response.success === false || failed > 0 || sent < 1) {
+        const firstResult = Array.isArray(response.results) ? response.results.find(isRecord) : undefined;
+        throw new Error(String(firstResult?.error ?? response.error ?? 'Template was not sent.'));
+      }
+      return { sent };
+    }
+
+    return { sent: 1 };
+  }
+
   async bulkConversationsAction(action: 'delete' | 'status' | 'labels', body: Record<string, unknown>) {
     return bniRequest('POST', `/api/conversations/bulk/${action}`, body);
   }
@@ -2765,6 +3175,24 @@ class ChatService {
 
     return labels;
   }
+
+  // Message templates are stored per connected account on the channel-specific
+  // microservice (waba → BNI /api/conversations/templates, personal → WAPA
+  // /api/whatsapp-conversations/conversations/templates), mirroring
+  // lad-frontend-2's templates proxy. The main backend 404s these, which is why
+  // a direct fetch returned nothing for the connected (e.g. Frontdesk) account.
+  async getWhatsAppTemplates(
+    backendChannel?: WhatsAppBackendChannel,
+    accountId?: string,
+  ): Promise<RawRecord[]> {
+    const channel = backendChannel ?? await getWhatsAppBackendChannel();
+    const payload = await bniRequest('GET', '/api/conversations/templates', undefined, {
+      backendChannel: channel,
+      params: accountId ? { account_id: accountId } : undefined,
+    });
+
+    return getArrayPayload(payload, ['data', 'templates', 'items', 'results']).filter(isRecord);
+  }
 }
 
 const chatService = new ChatService();
@@ -2779,6 +3207,74 @@ export const getOlderMessages = (conversationId: string, page?: number, limit?: 
 export const sendChatMessage = (payload: SendMessageParams) => chatService.sendMessage(payload);
 export const sendChannelMessage = (payload: SendChannelMessageParams | Record<string, unknown>) =>
   chatService.sendChannelMessage(payload);
+// ── Lead import (mirrors lad-frontend-2's /api/whatsapp-conversations/leads proxies) ──
+
+export type ImportLeadPayload = {
+  name: string;
+  phone?: string | null;
+  email?: string | null;
+  company?: string | null;
+  linkedin_url?: string | null;
+  instagram_url?: string | null;
+  source?: string | null;
+};
+
+export type ImportLeadsResult = {
+  total: number;
+  imported: number;
+  conversationsCreated: number;
+  errors: { name: string; phone?: string; error: string }[];
+  skipped: { name: string; phone?: string; reason: string }[];
+  duplicates: { name: string; phone?: string; reason: string }[];
+};
+
+export const importLeads = async (
+  leads: ImportLeadPayload[],
+  chatGroupIds?: string[],
+): Promise<ImportLeadsResult> => {
+  const payload = await bniRequest('POST', '/api/leads/import', {
+    leads,
+    chat_group_ids: chatGroupIds && chatGroupIds.length ? chatGroupIds : null,
+  });
+  const data = isRecord(payload) && isRecord(payload.data) ? payload.data : (isRecord(payload) ? payload : {});
+  return {
+    total: Number(data.total ?? leads.length),
+    imported: Number(data.imported ?? 0),
+    conversationsCreated: Number(data.conversations_created ?? 0),
+    errors: Array.isArray(data.errors) ? data.errors : [],
+    skipped: Array.isArray(data.skipped) ? data.skipped : [],
+    duplicates: Array.isArray(data.duplicates) ? data.duplicates : [],
+  };
+};
+
+export type ScrapedLead = {
+  name: string;
+  phone: string;
+  email: string;
+  company: string;
+  linkedin_url: string;
+  instagram_url: string;
+  source: string;
+};
+
+export const scrapeLeadsFromUrl = async (url: string): Promise<{ leads: ScrapedLead[]; scrapedChars: number }> => {
+  const payload = await bniRequest('POST', '/api/leads/scrape', { url });
+  const data = isRecord(payload) && isRecord(payload.data) ? payload.data : (isRecord(payload) ? payload : {});
+  const rawLeads = Array.isArray(data.leads) ? data.leads : [];
+  return {
+    leads: rawLeads.filter(isRecord).map((c) => ({
+      name: String(c.name ?? '').trim(),
+      phone: String(c.phone ?? '').trim(),
+      email: String(c.email ?? '').trim(),
+      company: String(c.company ?? '').trim(),
+      linkedin_url: String(c.linkedin_url ?? '').trim(),
+      instagram_url: String(c.instagram_url ?? '').trim(),
+      source: String(c.source ?? '').trim() || 'url_scrape',
+    })),
+    scrapedChars: Number(data.scraped_chars ?? 0),
+  };
+};
+
 export const getBroadcastGroups = () => chatService.getBroadcastGroups();
 export const createBroadcastGroup = (name: string, color?: string, description?: string) =>
   chatService.createBroadcastGroup(name, color, description);
@@ -2794,6 +3290,10 @@ export const sendTemplateToBroadcastGroups = (groupIds: string[], payload: Broad
   chatService.sendTemplateToBroadcastGroups(groupIds, payload);
 export const sendTemplateToConversations = (conversationIds: string[], payload: BroadcastTemplateSendPayload) =>
   chatService.sendTemplateToConversations(conversationIds, payload);
+export const sendTemplateToConversation = (
+  conversation: { id: string; channel?: ChatChannel; waBackendChannel?: 'waba' | 'personal' },
+  payload: BroadcastTemplateSendPayload,
+) => chatService.sendTemplateToConversation(conversation, payload);
 export const bulkConversationsAction = (action: 'delete' | 'status' | 'labels', body: Record<string, unknown>) =>
   chatService.bulkConversationsAction(action, body);
 export const getStarredMessages = () => chatService.getStarredMessages();
@@ -2805,6 +3305,8 @@ export const sendEmailReply = (
 export const updateWabaChatSettings = (updates: Record<string, unknown>) =>
   chatService.updateWabaChatSettings(updates);
 export const getWhatsAppLabels = () => chatService.getWhatsAppLabels();
+export const getWhatsAppTemplates = (backendChannel?: 'waba' | 'personal', accountId?: string) =>
+  chatService.getWhatsAppTemplates(backendChannel, accountId);
 export const createWhatsAppLabel = (name: string, color?: string) => chatService.createWhatsAppLabel(name, color);
 export const sendMessageWithAttachment = (formData: FormData) => chatService.sendMessageWithAttachment(formData);
 export const markConversationReadRequest = (conversationId: string) => chatService.markAsRead(conversationId);

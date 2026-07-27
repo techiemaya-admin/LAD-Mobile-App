@@ -10,6 +10,7 @@ export {
   getConversationNotes,
   getConversationTeamWorkload,
   getConversations,
+  getConversationStats,
   getErrorMessage,
   getMindBodyPaymentLink,
   getOlderMessages,

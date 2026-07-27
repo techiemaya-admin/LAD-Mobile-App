@@ -67,6 +67,12 @@ export type ConnectedEmailAccount = {
   status: string;
 };
 
+export type EmailBroadcastRecipient = {
+  email: string;
+  name?: string;
+  metadata?: Record<string, unknown>;
+};
+
 const request = async (
   method: string,
   path: string,
@@ -212,16 +218,40 @@ export async function getConnectedEmailAccounts(): Promise<ConnectedEmailAccount
   }));
 }
 
-export async function sendEmailBroadcastToGroup(body: {
+export async function sendEmailBroadcast(body: {
   fromEmailAccountId: string;
   subject: string;
   bodyHtml: string;
-  groupId: string;
+  bodyText?: string | null;
+  templateId?: string | null;
+  groupId?: string;
+  recipients?: EmailBroadcastRecipient[];
 }) {
   return request('POST', '/broadcast/send', {
     from_email_account_id: body.fromEmailAccountId,
     subject: body.subject,
     body_html: body.bodyHtml,
-    group_id: body.groupId,
+    ...(body.bodyText !== undefined ? { body_text: body.bodyText } : {}),
+    ...(body.templateId ? { template_id: body.templateId } : {}),
+    ...(body.groupId ? { group_id: body.groupId } : {}),
+    ...(body.recipients?.length ? { recipients: body.recipients } : {}),
+  });
+}
+
+export async function sendEmailBroadcastToGroup(body: {
+  fromEmailAccountId: string;
+  subject: string;
+  bodyHtml: string;
+  bodyText?: string | null;
+  templateId?: string | null;
+  groupId: string;
+}) {
+  return sendEmailBroadcast({
+    fromEmailAccountId: body.fromEmailAccountId,
+    subject: body.subject,
+    bodyHtml: body.bodyHtml,
+    bodyText: body.bodyText,
+    templateId: body.templateId,
+    groupId: body.groupId,
   });
 }

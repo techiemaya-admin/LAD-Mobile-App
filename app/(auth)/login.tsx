@@ -20,6 +20,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Logo } from '../../components/ui/Logo';
 import { Typography } from '../../components/ui/Typography';
 import useAuthStore from '../../src/store/authStore';
+import { useAppTheme } from '../../src/theme/appTheme';
 
 const palette = {
   background: '#f7fafc',
@@ -38,6 +39,7 @@ const webInputReset = Platform.select({
   web: {
     outlineStyle: 'none',
     outlineWidth: 0,
+    backgroundColor: 'transparent',
   } as unknown as TextStyle,
   default: {},
 });
@@ -76,6 +78,20 @@ export default function LoginScreen() {
   const router = useRouter();
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  const appTheme = useAppTheme();
+  const dark = appTheme.darkMode;
+  const colors = {
+    background: dark ? '#0F172A' : palette.background,
+    card: dark ? '#111827' : palette.card,
+    title: dark ? '#F8FAFC' : palette.primary,
+    secondary: dark ? '#A7B3C7' : palette.secondary,
+    outline: dark ? '#334155' : palette.outline,
+    inputBg: dark ? '#172033' : palette.card,
+    inputText: dark ? '#F8FAFC' : palette.primary,
+    submitBg: dark ? '#F8FAFC' : palette.primary,
+    submitText: dark ? '#0f1743' : palette.card,
+    error: dark ? '#FCA5A5' : palette.error,
+  };
   const scrollRef = useRef<ScrollView>(null);
   const emailRef = useRef<TextInput>(null);
   const passwordRef = useRef<TextInput>(null);
@@ -126,6 +142,12 @@ export default function LoginScreen() {
         box-shadow: none !important;
         -webkit-appearance: none !important;
         appearance: none !important;
+        background-color: transparent !important;
+      }
+      #lad-login-email:-webkit-autofill,
+      #lad-login-password:-webkit-autofill {
+        -webkit-box-shadow: 0 0 0 1000px transparent inset !important;
+        transition: background-color 5000s ease-in-out 0s;
       }
     `;
     document.head.appendChild(style);
@@ -167,7 +189,7 @@ export default function LoginScreen() {
   }, [email, password, router, signIn]);
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]} edges={['top', 'bottom']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={keyboardVerticalOffset}
@@ -201,12 +223,13 @@ export default function LoginScreen() {
               {
                 width: cardWidth,
                 paddingHorizontal: cardPadding,
+                backgroundColor: colors.card,
               },
             ]}
           >
             <View style={styles.header}>
               <Logo
-                variant="main"
+                variant={dark ? 'mainWhite' : 'main'}
                 width={logoWidth}
                 height={logoHeight}
                 style={[styles.logo, isCompact && styles.logoCompact, isTinyPhone && styles.logoTinyPhone]}
@@ -218,6 +241,7 @@ export default function LoginScreen() {
                   {
                     fontSize: titleFontSize,
                     lineHeight: titleLineHeight,
+                    color: colors.title,
                   },
                 ]}
               >
@@ -230,6 +254,7 @@ export default function LoginScreen() {
                   {
                     fontSize: subtitleFontSize,
                     lineHeight: subtitleLineHeight,
+                    color: colors.secondary,
                   },
                 ]}
               >
@@ -245,19 +270,19 @@ export default function LoginScreen() {
                 isTinyPhone && styles.formTinyPhone,
               ]}
             >
-              <Typography variant="body" style={[styles.fieldLabel, isPhone && styles.fieldLabelPhone, { fontSize: labelFontSize }]}>
+              <Typography variant="body" style={[styles.fieldLabel, isPhone && styles.fieldLabelPhone, { fontSize: labelFontSize, color: colors.secondary }]}>
                 Email Address
               </Typography>
               <Pressable
-                style={[styles.inputBox, isPhone && styles.inputBoxPhone, isTinyPhone && styles.inputBoxTinyPhone, { height: inputHeight }]}
+                style={[styles.inputBox, isPhone && styles.inputBoxPhone, isTinyPhone && styles.inputBoxTinyPhone, { height: inputHeight, borderColor: colors.outline, backgroundColor: colors.inputBg }]}
                 onPress={() => emailRef.current?.focus()}
               >
-                <Mail color={palette.secondary} size={isPhone ? 20 : 22} strokeWidth={2} />
+                <Mail color={colors.secondary} size={isPhone ? 20 : 22} strokeWidth={2} />
                 <TextInput
                   ref={emailRef}
-                  style={[styles.input, isPhone && styles.inputPhone, isTinyPhone && styles.inputTinyPhone, { fontSize: inputFontSize }, webInputReset]}
+                  style={[styles.input, isPhone && styles.inputPhone, isTinyPhone && styles.inputTinyPhone, { fontSize: inputFontSize, color: colors.inputText }, webInputReset]}
                   placeholder="name@company.com"
-                  placeholderTextColor={palette.secondary}
+                  placeholderTextColor={colors.secondary}
                   value={email}
                   onChangeText={setEmail}
                   keyboardType={Platform.OS === 'web' ? 'default' : 'email-address'}
@@ -284,21 +309,21 @@ export default function LoginScreen() {
                   isCompact && styles.passwordLabelCompact,
                   isPhone && styles.fieldLabelPhone,
                   isTinyPhone && styles.passwordLabelTinyPhone,
-                  { fontSize: labelFontSize },
+                  { fontSize: labelFontSize, color: colors.secondary },
                 ]}
               >
                 Password
               </Typography>
               <Pressable
-                style={[styles.inputBox, isPhone && styles.inputBoxPhone, isTinyPhone && styles.inputBoxTinyPhone, { height: inputHeight }]}
+                style={[styles.inputBox, isPhone && styles.inputBoxPhone, isTinyPhone && styles.inputBoxTinyPhone, { height: inputHeight, borderColor: colors.outline, backgroundColor: colors.inputBg }]}
                 onPress={() => passwordRef.current?.focus()}
               >
-                <Lock color={palette.secondary} size={isPhone ? 20 : 22} strokeWidth={2} />
+                <Lock color={colors.secondary} size={isPhone ? 20 : 22} strokeWidth={2} />
                 <TextInput
                   ref={passwordRef}
-                  style={[styles.input, isPhone && styles.inputPhone, isTinyPhone && styles.inputTinyPhone, { fontSize: inputFontSize }, webInputReset]}
+                  style={[styles.input, isPhone && styles.inputPhone, isTinyPhone && styles.inputTinyPhone, { fontSize: inputFontSize, color: colors.inputText }, webInputReset]}
                   placeholder="Enter your password"
-                  placeholderTextColor={palette.secondary}
+                  placeholderTextColor={colors.secondary}
                   value={password}
                   onChangeText={setPassword}
                   secureTextEntry={!isPasswordVisible}
@@ -321,15 +346,15 @@ export default function LoginScreen() {
                   accessibilityLabel={isPasswordVisible ? 'Hide password' : 'Show password'}
                 >
                   {isPasswordVisible ? (
-                    <EyeOff color={palette.secondary} size={isPhone ? 20 : 22} strokeWidth={2} />
+                    <EyeOff color={colors.secondary} size={isPhone ? 20 : 22} strokeWidth={2} />
                   ) : (
-                    <Eye color={palette.secondary} size={isPhone ? 20 : 22} strokeWidth={2} />
+                    <Eye color={colors.secondary} size={isPhone ? 20 : 22} strokeWidth={2} />
                   )}
                 </TouchableOpacity>
               </Pressable>
 
               {authError && (
-                <Typography variant="caption" style={styles.errorText} align="center">
+                <Typography variant="caption" style={[styles.errorText, { color: colors.error }]} align="center">
                   {authError}
                 </Typography>
               )}
@@ -340,7 +365,7 @@ export default function LoginScreen() {
                   isCompact && styles.submitButtonCompact,
                   isTinyPhone && styles.submitButtonTinyPhone,
                   isSubmitting && styles.submitButtonDisabled,
-                  { minHeight: submitHeight },
+                  { minHeight: submitHeight, backgroundColor: colors.submitBg },
                 ]}
                 onPress={handleLogin}
                 disabled={isSubmitting}
@@ -348,11 +373,11 @@ export default function LoginScreen() {
                 accessibilityRole="button"
               >
                 {isSubmitting ? (
-                  <ActivityIndicator color={palette.card} />
+                  <ActivityIndicator color={colors.submitText} />
                 ) : (
                   <Typography
                     variant="bodyLarge"
-                    style={[styles.submitText, isPhone && styles.submitTextPhone, isTinyPhone && styles.submitTextTinyPhone, { fontSize: isTinyPhone ? 18 : isPhone ? 19 : 21 }]}
+                    style={[styles.submitText, isPhone && styles.submitTextPhone, isTinyPhone && styles.submitTextTinyPhone, { fontSize: isTinyPhone ? 18 : isPhone ? 19 : 21, color: colors.submitText }]}
                   >
                     Sign In
                   </Typography>

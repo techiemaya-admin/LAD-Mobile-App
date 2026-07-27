@@ -6,6 +6,7 @@ import {
   getCRMLeadById,
   type CRMActivity,
   type CRMLead,
+  type CRMStats,
 } from '@/src/services/pipelineService';
 
 export type LifecycleStage =
@@ -197,6 +198,7 @@ export interface ProspectCRMData {
   prospects: ProspectState[];
   contacts: CrmContact[];
   kanbanLeads: KanbanLead[];
+  stageCounts?: Record<string, number>;
   counts: {
     all: number;
     prospects: number;
@@ -425,6 +427,75 @@ const prospectMatchesId = (prospect: ProspectState, id: string) => {
     raw.core_lead_id,
   ].map((value) => String(value || '')).filter(Boolean);
   return ids.includes(target);
+};
+
+const crmIdentityKeys = (prospect: ProspectState) => {
+  const raw = asRecord(prospect);
+  return [
+    prospect.id,
+    prospect.core_lead_id,
+    raw.id,
+    raw._id,
+    raw.prospect_id,
+    raw.prospectId,
+    raw.lead_id,
+    raw.leadId,
+    raw.contact_id,
+    raw.contactId,
+    raw.core_lead_id,
+    prospect.email ? `email:${String(prospect.email).trim().toLowerCase()}` : '',
+    prospect.phone_e164 ? `phone:${String(prospect.phone_e164).replace(/\D/g, '')}` : '',
+    prospect.linkedin_url ? `linkedin:${String(prospect.linkedin_url).trim().toLowerCase()}` : '',
+    prospect.waba_wa_id ? `wa:${String(prospect.waba_wa_id).trim()}` : '',
+  ].map((value) => String(value || '')).filter(Boolean);
+};
+
+const isProspectsRecord = (prospect: ProspectState) => {
+  const source = String(prospect.crm_source || prospect.backend_source || '').toLowerCase();
+  return source.includes('prospect') && !prefersPipelineSource(source);
+};
+
+const mergeProspectSources = (...sources: ProspectState[][]) => {
+  const merged: ProspectState[] = [];
+  const keyToIndex = new Map<string, number>();
+
+  sources.flat().forEach((prospect) => {
+    const keys = crmIdentityKeys(prospect);
+    const existingIndex = keys.map((key) => keyToIndex.get(key)).find((index) => index !== undefined);
+
+    if (existingIndex === undefined) {
+      const nextIndex = merged.length;
+      merged.push(prospect);
+      keys.forEach((key) => keyToIndex.set(key, nextIndex));
+      return;
+    }
+
+    const current = merged[existingIndex];
+    const shouldReplace = isProspectsRecord(prospect) && !isProspectsRecord(current);
+    if (shouldReplace) {
+      merged[existingIndex] = {
+        ...current,
+        ...prospect,
+        channel_rollups: {
+          ...asRecord(current.channel_rollups),
+          ...asRecord(prospect.channel_rollups),
+        },
+      };
+    } else {
+      merged[existingIndex] = {
+        ...prospect,
+        ...current,
+        channel_rollups: {
+          ...asRecord(prospect.channel_rollups),
+          ...asRecord(current.channel_rollups),
+        },
+      };
+    }
+
+    crmIdentityKeys(merged[existingIndex]).forEach((key) => keyToIndex.set(key, existingIndex));
+  });
+
+  return merged;
 };
 
 export function initialsOf(name: string): string {
@@ -1023,23 +1094,85 @@ export function buildCounts(contacts: CrmContact[]) {
   };
 }
 
+function buildStageCounts(contacts: CrmContact[]) {
+  return contacts.reduce<Record<string, number>>((counts, contact) => {
+    counts[contact.stage] = (counts[contact.stage] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function countsFromStageCounts(stageCounts: Record<string, number>, fallbackAll = 0) {
+  const prospects = toNumber(stageCounts.new)
+    + toNumber(stageCounts.contacted)
+    + toNumber(stageCounts.engaged)
+    + toNumber(stageCounts.archived);
+  const leads = toNumber(stageCounts.qualified)
+    + toNumber(stageCounts.sah)
+    + toNumber(stageCounts.lost);
+  const clients = toNumber(stageCounts.won);
+  const allFromStages = Object.values(stageCounts).reduce((sum, value) => sum + toNumber(value), 0);
+  const all = Math.max(fallbackAll, allFromStages, prospects + leads + clients);
+
+  return {
+    all,
+    prospects: Math.max(prospects, all > 0 && prospects + leads + clients === 0 ? all : 0),
+    leads,
+    clients,
+  };
+}
+
+function backendStageCountsFromStats(stats?: CRMStats | null) {
+  const raw = stats?.leads_by_stage;
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+
+  return Object.entries(raw).reduce<Record<string, number>>((counts, [key, value]) => {
+    const stage = normalizeStage(key);
+    counts[stage] = (counts[stage] || 0) + toNumber(value);
+    return counts;
+  }, {});
+}
+
+function mergeCountsWithBackend(contacts: CrmContact[], stats?: CRMStats | null, totalHint = 0) {
+  const visibleCounts = buildCounts(contacts);
+  const backendStageCounts = backendStageCountsFromStats(stats);
+  const backendTotal = toNumber(stats?.total_leads, totalHint);
+  const backendCounts = countsFromStageCounts(backendStageCounts, backendTotal);
+
+  if (backendCounts.all <= visibleCounts.all) {
+    return visibleCounts;
+  }
+
+  return {
+    all: backendCounts.all,
+    prospects: Math.max(backendCounts.prospects, visibleCounts.prospects),
+    leads: Math.max(backendCounts.leads, visibleCounts.leads),
+    clients: Math.max(backendCounts.clients, visibleCounts.clients),
+  };
+}
+
 export async function listProspects(params: {
   lifecycle_stage?: LifecycleStage;
   channel?: ChannelKey;
   limit?: number;
   offset?: number;
+  search?: string;
 } = {}): Promise<ProspectState[]> {
+  const limit = params.limit ?? 200;
   try {
     const response = await apiGet<unknown>('/api/prospects', { params });
+    // Cap raw rows before the (heavy) normalization pass in case the backend ignores `limit`.
     return getArrayPayload(response.data, ['prospects', 'data', 'items', 'results'])
+      .slice(0, limit)
       .map((item) => normalizeProspect(withBackendSource(item, 'prospects')));
   } catch (error) {
     if (!shouldFallbackToDealsPipeline(error)) throw error;
-    const crmData = await fetchCRMData({ page: 1, limit: params.limit ?? 200 });
+    const crmData = await fetchCRMData({ page: 1, limit, search: params.search });
     const contacts = params.lifecycle_stage
       ? crmData.leads.filter((lead) => normalizeStage(lead.stage || lead.status) === params.lifecycle_stage)
       : crmData.leads;
-    return contacts.map(pipelineLeadToProspect);
+    return contacts.slice(0, limit).map(pipelineLeadToProspect);
   }
 }
 
@@ -1195,13 +1328,42 @@ export async function runProspectSearch(input: {
   return response.data;
 }
 
-export async function fetchProspectCRMData(params: { limit?: number; offset?: number } = {}): Promise<ProspectCRMData> {
-  const prospects = await listProspects({ limit: params.limit ?? 200, offset: params.offset ?? 0 });
+export async function fetchProspectCRMData(params: { limit?: number; offset?: number; search?: string } = {}): Promise<ProspectCRMData> {
+  const limit = params.limit ?? 200;
+  const offset = params.offset ?? 0;
+  const search = params.search?.trim();
+  const [prospectsResult, pipelineResult] = await Promise.allSettled([
+    listProspects({ limit, offset, search }),
+    fetchCRMData({ page: Math.floor(offset / Math.max(limit, 1)) + 1, limit, search }),
+  ]);
+
+  const prospectRows = prospectsResult.status === 'fulfilled' ? prospectsResult.value : [];
+  const pipelineRows = pipelineResult.status === 'fulfilled'
+    ? pipelineResult.value.leads.slice(0, limit).map(pipelineLeadToProspect)
+    : [];
+  // Both sources are already limited, but the merge can still yield up to 2x rows.
+  const prospects = mergeProspectSources(pipelineRows, prospectRows).slice(0, limit);
+
+  if (!prospects.length && prospectsResult.status === 'rejected' && pipelineResult.status === 'rejected') {
+    throw prospectsResult.reason ?? pipelineResult.reason;
+  }
+
   const contacts = toCrmContacts(prospects);
+  const pipelineData = pipelineResult.status === 'fulfilled' ? pipelineResult.value : null;
+  const paginationTotal = pipelineData?.pagination?.total ?? 0;
+  const visibleStageCounts = buildStageCounts(contacts);
+  const backendStageCounts = backendStageCountsFromStats(pipelineData?.stats);
+  const stageCounts = search
+    ? visibleStageCounts
+    : Object.keys(backendStageCounts).length
+      ? { ...visibleStageCounts, ...backendStageCounts }
+      : visibleStageCounts;
+
   return {
     prospects,
     contacts,
     kanbanLeads: toKanbanLeads(prospects),
-    counts: buildCounts(contacts),
+    stageCounts,
+    counts: search ? buildCounts(contacts) : mergeCountsWithBackend(contacts, pipelineData?.stats, paginationTotal),
   };
 }

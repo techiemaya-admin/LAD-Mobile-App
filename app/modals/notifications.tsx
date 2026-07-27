@@ -192,9 +192,6 @@ export default function NotificationsModal() {
           <View style={[styles.emptyState, { borderColor: appTheme.border, backgroundColor: appTheme.surface }]}>
             <Bell color={appTheme.muted} size={26} />
             <Typography variant="bodySmall" color={appTheme.text} style={styles.emptyTitle}>No new notifications</Typography>
-            <Typography variant="caption" color={appTheme.muted} style={styles.emptyCopy}>
-              Incoming backend conversation updates will appear here in real time.
-            </Typography>
           </View>
         ) : null}
 

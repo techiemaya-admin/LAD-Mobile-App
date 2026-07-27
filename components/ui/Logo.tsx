@@ -2,7 +2,7 @@ import React from 'react';
 import { Image, ImageProps } from 'expo-image';
 import { ImageStyle, StyleProp } from 'react-native';
 
-export type LogoVariant = 'main' | 'icon' | 'code';
+export type LogoVariant = 'main' | 'mainWhite' | 'icon' | 'code';
 
 interface LogoProps extends Omit<ImageProps, 'source'> {
   variant?: LogoVariant;
@@ -14,6 +14,7 @@ interface LogoProps extends Omit<ImageProps, 'source'> {
 
 const LOGOS = {
   main: require('../../app/MrLAD-logo.svg'),
+  mainWhite: require('../../app/MrLAD-logo-white.svg'),
   icon: require('../../app/logo.svg'),
   code: require('../../app/MrLad-code.svg'),
 };

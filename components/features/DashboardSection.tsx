@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { View, StyleSheet, TouchableOpacity, useWindowDimensions } from 'react-native';
 import FontAwesome5 from '@expo/vector-icons/FontAwesome5';
 import Animated, { FadeInUp } from 'react-native-reanimated';
@@ -75,12 +75,20 @@ export interface DashboardCard {
   icon: DashboardIconName;
 }
 
+export interface DashboardSectionVariant {
+  key: string;
+  label: string;
+  cards: DashboardCard[];
+}
+
 export interface DashboardSectionProps {
   title: string;
   icon: DashboardIconName;
   channel?: 'linkedin' | 'whatsapp' | 'email' | 'voice' | 'instagram';
   accentColor?: string;
   cards: DashboardCard[];
+  /** When present with >1 entry, a segmented switcher lets the user swap card sets (e.g. WhatsApp Personal vs Business API). */
+  variants?: DashboardSectionVariant[];
   onCardPress?: (card: DashboardCard, index: number) => void;
 }
 
@@ -140,10 +148,19 @@ export function DashboardSection({
   channel,
   accentColor = Theme.colors.primary,
   cards,
+  variants,
   onCardPress,
 }: DashboardSectionProps) {
   const { width } = useWindowDimensions();
   const appTheme = useAppTheme();
+
+  const hasVariants = Array.isArray(variants) && variants.length > 1;
+  const [activeVariantKey, setActiveVariantKey] = useState(() => variants?.[0]?.key);
+  const activeVariant = useMemo(
+    () => (hasVariants ? variants!.find((v) => v.key === activeVariantKey) ?? variants![0] : undefined),
+    [hasVariants, variants, activeVariantKey],
+  );
+  const visibleCards = activeVariant?.cards ?? cards;
 
   // Responsive grid logic
   const numColumns = width > 768 ? 3 : 2;
@@ -163,8 +180,35 @@ export function DashboardSection({
         </View>
       </View>
 
+      {hasVariants && (
+        <View style={[styles.switcher, { backgroundColor: appTheme.surface, borderColor: appTheme.borderSoft }]}>
+          {variants!.map((variant) => {
+            const isActive = variant.key === (activeVariant?.key ?? variants![0].key);
+            return (
+              <TouchableOpacity
+                key={variant.key}
+                activeOpacity={0.8}
+                onPress={() => setActiveVariantKey(variant.key)}
+                style={[
+                  styles.switcherTab,
+                  isActive && { backgroundColor: accentColor },
+                ]}
+              >
+                <Typography
+                  variant="caption"
+                  color={isActive ? Theme.colors.surface : appTheme.muted}
+                  style={styles.switcherLabel}
+                >
+                  {variant.label}
+                </Typography>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      )}
+
       <View style={styles.grid}>
-        {cards.map((card, index) => {
+        {visibleCards.map((card, index) => {
           const CardIcon = ICONS[card.icon];
           return (
             <Animated.View 
@@ -183,7 +227,7 @@ export function DashboardSection({
                       </Typography>
                     )}
                   </View>
-                  <Typography variant="bodySmall" color={appTheme.text} style={styles.cardLabel} numberOfLines={1}>
+                  <Typography variant="bodySmall" color={appTheme.text} style={styles.cardLabel} numberOfLines={2}>
                     {card.label}
                   </Typography>
                 </GlassCard>
@@ -220,6 +264,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  switcher: {
+    flexDirection: 'row',
+    alignSelf: 'flex-start',
+    padding: 3,
+    borderRadius: 10,
+    borderWidth: 1,
+    marginBottom: Theme.spacing.md,
+    gap: 2,
+  },
+  switcherTab: {
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+  },
+  switcherLabel: {
+    fontWeight: '600',
+  },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -227,7 +288,7 @@ const styles = StyleSheet.create({
   },
   card: {
     padding: Theme.spacing.md,
-    height: 100,
+    minHeight: 108,
     justifyContent: 'space-between',
     borderWidth: 1,
     borderColor: Theme.colors.borderLight,
@@ -252,5 +313,6 @@ const styles = StyleSheet.create({
   cardLabel: {
     fontWeight: '500',
     marginTop: Theme.spacing.sm,
+    lineHeight: 18,
   },
 });

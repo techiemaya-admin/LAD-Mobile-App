@@ -18,6 +18,8 @@ const CALL_RECONCILE_PAGE_SIZE = 100;
 const CALL_ALL_PAGES_LIMIT = 1000;
 const OPTIMISTIC_CALL_TTL_MS = 5 * 60 * 1000;
 const MANUAL_DIAL_PENDING_WINDOW_MS = 3 * 60 * 1000;
+const MANUAL_DIAL_BACKEND_MATCH_WINDOW_MS = 10 * 60 * 1000;
+const MANUAL_DIAL_BACKEND_DUPLICATE_WINDOW_MS = 60 * 1000;
 const MANUAL_DIAL_PENDING_CALL_TTL_MS = 24 * 60 * 60 * 1000;
 const MANUAL_DIAL_OVERRIDES_KEY = 'lad.manualDialCallOverrides.v1';
 const MANUAL_DIAL_PENDING_CALLS_KEY = 'lad.pendingManualDialCalls.v1';
@@ -25,6 +27,7 @@ const MANUAL_DIAL_PENDING_CALLS_KEY = 'lad.pendingManualDialCalls.v1';
 interface CallState {
   calls: CallRecord[];
   isLoading: boolean;
+  isRefreshing: boolean;
   isLoadingMore: boolean;
   error: string | null;
   page: number;
@@ -33,7 +36,7 @@ interface CallState {
 
   initializeRealtime: () => void;
   disposeRealtime: () => void;
-  fetchCalls: (options?: { force?: boolean }) => Promise<void>;
+  fetchCalls: (options?: { force?: boolean; replace?: boolean }) => Promise<void>;
   fetchNextCalls: () => Promise<void>;
   setCalls: (calls: CallRecord[]) => void;
   prependCall: (call: CallRecord) => void;
@@ -54,6 +57,29 @@ const pendingManualCalls = new Map<string, CallRecord>();
 
 const isLiveCallStatus = (status: CallStatus) =>
   status === 'queued' || status === 'ringing' || status === 'in_progress';
+
+const normalizeContactDisplayName = (value: unknown) => {
+  const text = String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s+(manual\s+)?dial$/i, '')
+    .trim();
+  if (!text) {
+    return '';
+  }
+
+  const parts = text.split(' ');
+  if (parts.length % 2 === 0) {
+    const mid = parts.length / 2;
+    const first = parts.slice(0, mid).join(' ').toLowerCase();
+    const second = parts.slice(mid).join(' ').toLowerCase();
+    if (first === second) {
+      return parts.slice(0, mid).join(' ');
+    }
+  }
+
+  return text;
+};
 
 // Purge any client-only optimistic / pending manual-dial records (in memory and
 // on disk). The call list now mirrors LAD-Frontend-2: it shows ONLY records the
@@ -209,28 +235,33 @@ const getLeadName = (log: CallLogResponse) => {
   const contactFullName = [contact.first_name ?? contact.firstName, contact.last_name ?? contact.lastName].filter(Boolean).join(' ').trim();
   const leadFullName = [lead.first_name ?? lead.firstName, lead.last_name ?? lead.lastName].filter(Boolean).join(' ').trim();
   const dialedNumber = getDialedNumber(rawLog);
-  const directName = log.lead_name ||
-    rawLog.contact_name ||
+  const directName =
+    contact.contact_name ||
+    contact.contactName ||
+    contact.name ||
+    contact.full_name ||
+    contactFullName ||
+    lead.contact_name ||
+    lead.contactName ||
+    lead.name ||
+    lead.full_name ||
+    leadFullName ||
     metadata.contact_name ||
     metadata.lead_name ||
     metadata.manual_contact_name ||
     metadata.client_name ||
-    fullName ||
-    contact.name ||
-    contact.full_name ||
-    contactFullName ||
-    lead.name ||
-    lead.full_name ||
-    leadFullName;
+    rawLog.contact_name ||
+    log.lead_name ||
+    fullName;
 
   const nameIsUsable = directName && !isCodeLikeValue(directName) && !isPhoneLikeValue(directName);
 
   // Never show a phone number or UUID as a contact name regardless of call type.
   if (!nameIsUsable) {
-    return 'Manual Dial';
+    return 'Unknown Contact';
   }
 
-  return String(directName);
+  return normalizeContactDisplayName(directName);
 };
 
 const stringifyTranscriptPayload = (value: unknown): string => {
@@ -420,14 +451,17 @@ const mergeCallPreservingManualDial = (existing: CallRecord, incoming: CallRecor
     isManualDialPending(existing) &&
     (incoming.callStatus === 'failed' || incoming.callStatus === 'no-answer' || incoming.callStatus === 'dropped') &&
     incoming.duration <= 1;
+  const existingContactName = getManualDialContactName(existing);
+  const incomingContactName = getManualDialContactName(incoming);
 
   return {
     ...existing,
     ...incoming,
-    name: existing.name === existing.phone || existing.name === localDialedNumber ? existing.name : incoming.name || existing.name,
+    name: existingContactName || incomingContactName || (isGenericCallDisplayName(incoming.name) ? existing.name : normalizeContactDisplayName(incoming.name)) || existing.name,
     phone: localDialedNumber || incoming.phone || existing.phone,
     type: 'manual-dial' as CallType,
-    callStatus: incomingLooksPrematurelyFailed ? existing.callStatus : incoming.callStatus,
+    duration: Math.max(existing.duration, incoming.duration),
+    callStatus: incomingLooksPrematurelyFailed ? existing.callStatus : preferCallStatus(existing, incoming),
     backendDetails: mergedDetails,
   };
 };
@@ -528,16 +562,74 @@ const callsShareBackendCorrelation = (left: CallRecord, right: CallRecord) => {
 
 const getPhoneKey = (value?: string) => String(value ?? '').replace(/\D/g, '').slice(-10);
 
-const getBackendStartedAt = (call: CallRecord) => {
-  const details = getRawDetails(call);
-  const value = details.started_at ?? details.created_at ?? details.updated_at;
-  const time = value ? Date.parse(String(value)) : 0;
+const parseTimestamp = (value: unknown) => {
+  if (!value) {
+    return 0;
+  }
+
+  const time = Date.parse(String(value));
   return Number.isNaN(time) ? 0 : time;
 };
 
+const getBackendStartedAt = (call: CallRecord) => {
+  const details = getRawDetails(call);
+  const metadata = getMetadataObject(details);
+  return parseTimestamp(
+    details.started_at ??
+      details.startedAt ??
+      metadata.started_at ??
+      metadata.startedAt ??
+      details.created_at ??
+      details.createdAt ??
+      metadata.created_at ??
+      metadata.createdAt ??
+      details.updated_at ??
+      details.updatedAt ??
+      metadata.updated_at ??
+      metadata.updatedAt,
+  );
+};
+
+const getCallSortTimestamp = (call: CallRecord) => {
+  const details = getRawDetails(call);
+  const metadata = getMetadataObject(details);
+  return getLocalStartedAt(details) ||
+    getOptimisticCallCreatedAt(call) ||
+    getBackendStartedAt(call) ||
+    parseTimestamp(details.ended_at ?? details.endedAt ?? metadata.ended_at ?? metadata.endedAt);
+};
+
+const sortCallsNewestFirst = (calls: CallRecord[]) =>
+  [...calls].sort((left, right) => {
+    const diff = getCallSortTimestamp(right) - getCallSortTimestamp(left);
+    return diff || String(right.id).localeCompare(String(left.id));
+  });
+
 const isGenericCallDisplayName = (name?: string) => {
   const lower = String(name ?? '').trim().toLowerCase();
-  return !lower || lower === 'unknown lead' || lower === '+15555555555' || lower === 'manual dial';
+  return !lower ||
+    lower === 'unknown lead' ||
+    lower === 'unknown contact' ||
+    lower === '+15555555555' ||
+    lower === 'manual dial' ||
+    /\s+(manual\s+)?dial$/i.test(lower) ||
+    isPhoneLikeValue(lower) ||
+    isCodeLikeValue(lower);
+};
+
+const getManualDialContactName = (call: CallRecord) => {
+  const details = getRawDetails(call);
+  const metadata = getMetadataObject(details);
+  const name = normalizeContactDisplayName(
+    metadata.contact_name ||
+      metadata.lead_name ||
+      metadata.manual_contact_name ||
+      details.contact_name ||
+      details.lead_name ||
+      call.name ||
+      '',
+  );
+  return isGenericCallDisplayName(name) ? '' : name;
 };
 
 const getManualDialPhone = (call: CallRecord) => {
@@ -599,7 +691,7 @@ const manualDialTimesAreCompatible = (pendingCall: CallRecord, backendCall: Call
   }
 
   return backendStartedAt >= pendingStartedAt - 2 * 60 * 1000
-    && backendStartedAt <= pendingStartedAt + MANUAL_DIAL_PENDING_CALL_TTL_MS;
+    && backendStartedAt <= pendingStartedAt + MANUAL_DIAL_BACKEND_MATCH_WINDOW_MS;
 };
 
 const callsLikelySameManualDialWithoutPhone = (pendingCall: CallRecord, backendCall: CallRecord) => {
@@ -654,7 +746,7 @@ const callsMatchPendingManualDial = (pendingCall: CallRecord, backendCall: CallR
   }
 
   return backendStartedAt >= pendingStartedAt - 60 * 1000
-    && backendStartedAt <= pendingStartedAt + MANUAL_DIAL_PENDING_CALL_TTL_MS;
+    && backendStartedAt <= pendingStartedAt + MANUAL_DIAL_BACKEND_MATCH_WINDOW_MS;
 };
 
 const isResolvedBackendCall = (call: CallRecord) => {
@@ -750,10 +842,12 @@ const rememberManualDialOverrideFromPending = (backendCall: CallRecord, pendingC
   if (!phone) {
     return;
   }
+  const contactName = getManualDialContactName(pendingCall);
 
   manualDialOverrides.set(backendCall.id, {
     phone,
     startedAt: getManualDialStartedAtIso(pendingCall),
+    contactName: contactName || undefined,
   });
   saveManualDialOverrides();
 };
@@ -770,10 +864,11 @@ const applyPendingManualDialDetailsToBackend = (backendCall: CallRecord, pending
   const pendingMetadata = getMetadataObject(pendingDetails);
   const startedAt = getManualDialStartedAtIso(pendingCall);
   const clientCallId = getClientCallId(pendingCall);
+  const contactName = getManualDialContactName(pendingCall);
 
   return {
     ...backendCall,
-    name: isGenericCallDisplayName(backendCall.name) ? phone : backendCall.name,
+    name: isGenericCallDisplayName(backendCall.name) ? (contactName || phone) : backendCall.name,
     phone,
     type: 'manual-dial' as CallType,
     backendDetails: {
@@ -789,6 +884,11 @@ const applyPendingManualDialDetailsToBackend = (backendCall: CallRecord, pending
         lad_app_dialed_number: phone,
         to_number: phone,
         ...(clientCallId ? { client_call_id: clientCallId } : {}),
+        ...(contactName ? {
+          contact_name: contactName,
+          lead_name: contactName,
+          manual_contact_name: contactName,
+        } : {}),
       },
     },
   };
@@ -804,20 +904,19 @@ const getManualDialMatchScore = (pendingCall: CallRecord, backendCall: CallRecor
     return 1;
   }
 
+  const pendingStartedAt = getManualDialStartedAt(pendingCall);
+  const backendStartedAt = getBackendStartedAt(backendCall);
+  const timeDistance = pendingStartedAt && backendStartedAt
+    ? Math.abs(backendStartedAt - pendingStartedAt)
+    : Number.MAX_SAFE_INTEGER;
   const pendingPhone = getPhoneKey(getManualDialPhone(pendingCall));
   const backendPhoneValue = backendCall.phone || getLocalDialedNumber(getRawDetails(backendCall)) || backendCall.name;
   const backendPhone = getPhoneKey(backendPhoneValue);
   if (pendingPhone && backendPhone && pendingPhone === backendPhone) {
-    return 2;
+    return 2 + timeDistance;
   }
 
-  const pendingStartedAt = getManualDialStartedAt(pendingCall);
-  const backendStartedAt = getBackendStartedAt(backendCall);
-  if (!pendingStartedAt || !backendStartedAt) {
-    return Number.MAX_SAFE_INTEGER;
-  }
-
-  return Math.abs(backendStartedAt - pendingStartedAt);
+  return timeDistance;
 };
 
 const applyPendingManualDialReplacements = (fetchedCalls: CallRecord[], pendingCalls: CallRecord[]) => {
@@ -925,6 +1024,62 @@ const clearPendingCallsMatchedByBackend = (fetchedCalls: CallRecord[]) => {
 
 const isOptimisticCallId = (id: string) => /^manual-agent-call-\d+$/.test(id);
 
+const isClientOnlyManualDialCall = (call: CallRecord) =>
+  call.type === 'manual-dial' && (isOptimisticCallId(call.id) || pendingManualCalls.has(call.id));
+
+const callStatusRank = (status: CallStatus) => {
+  if (status === 'completed' || status === 'ended') return 5;
+  if (status === 'in_progress') return 4;
+  if (status === 'ringing') return 3;
+  if (status === 'failed' || status === 'no-answer' || status === 'dropped') return 2;
+  return 1;
+};
+
+const preferCallStatus = (existing: CallRecord, incoming: CallRecord) =>
+  callStatusRank(incoming.callStatus) >= callStatusRank(existing.callStatus)
+    ? incoming.callStatus
+    : existing.callStatus;
+
+const preferCallName = (existing: CallRecord, incoming: CallRecord) =>
+  getManualDialContactName(existing) ||
+  getManualDialContactName(incoming) ||
+  (isGenericCallDisplayName(incoming.name) ? existing.name : normalizeContactDisplayName(incoming.name)) ||
+  normalizeContactDisplayName(existing.name) ||
+  existing.name;
+
+const getDedupPhoneKey = (call: CallRecord) => {
+  const details = getRawDetails(call);
+  return getPhoneKey(call.phone || getLocalDialedNumber(details) || getDialedNumber(details as CallLogResponse & RawRecord) || call.name);
+};
+
+const callsLikelySameBackendDialAction = (left: CallRecord, right: CallRecord) => {
+  if (isClientOnlyManualDialCall(left) || isClientOnlyManualDialCall(right)) {
+    return false;
+  }
+
+  const leftPhone = getDedupPhoneKey(left);
+  const rightPhone = getDedupPhoneKey(right);
+  if (!leftPhone || !rightPhone || leftPhone !== rightPhone) {
+    return false;
+  }
+
+  const leftStartedAt = getBackendStartedAt(left);
+  const rightStartedAt = getBackendStartedAt(right);
+  if (!leftStartedAt || !rightStartedAt || Math.abs(leftStartedAt - rightStartedAt) > MANUAL_DIAL_BACKEND_DUPLICATE_WINDOW_MS) {
+    return false;
+  }
+
+  const leftName = normalizeContactDisplayName(getManualDialContactName(left) || left.name).toLowerCase();
+  const rightName = normalizeContactDisplayName(getManualDialContactName(right) || right.name).toLowerCase();
+  const namesMatch = Boolean(leftName && rightName && leftName === rightName);
+  const hasOneRealName = Boolean(
+    (leftName && !isGenericCallDisplayName(leftName) && isGenericCallDisplayName(rightName)) ||
+    (rightName && !isGenericCallDisplayName(rightName) && isGenericCallDisplayName(leftName)),
+  );
+
+  return namesMatch || hasOneRealName || isManualDialBackendCandidate(left) || isManualDialBackendCandidate(right);
+};
+
 const isFreshOptimisticCall = (call: CallRecord) => {
   const createdAt = getOptimisticCallCreatedAt(call);
   return Boolean(createdAt) && Date.now() - createdAt < OPTIMISTIC_CALL_TTL_MS;
@@ -993,12 +1148,80 @@ const mergeFetchedCalls = (currentCalls: CallRecord[], fetchedCalls: CallRecord[
     return existing ? mergeCallPreservingManualDial(existing, call) : call;
   });
 
-  return [...pendingCalls, ...preservedOptimisticCalls, ...mergedFetchedCalls]
-    .filter((call, index, array) => (
-      array.findIndex((candidate) => candidate.id === call.id) === index
-    ))
-    .filter((call) => !shouldHideBackendPlaceholderCall(call));
+  return sortCallsNewestFirst(
+    collapseDuplicateCalls([...pendingCalls, ...preservedOptimisticCalls, ...mergedFetchedCalls])
+      .filter((call) => !shouldHideBackendPlaceholderCall(call)),
+  );
 };
+
+const callsRepresentSameCall = (left: CallRecord, right: CallRecord) => {
+  if (left.id && right.id && left.id === right.id) {
+    return true;
+  }
+
+  const leftClientCallId = getClientCallId(left);
+  const rightClientCallId = getClientCallId(right);
+  if (leftClientCallId && rightClientCallId && leftClientCallId === rightClientCallId) {
+    return true;
+  }
+
+  if (callsShareBackendCorrelation(left, right)) {
+    return true;
+  }
+
+  if (isClientOnlyManualDialCall(left) && isManualDialBackendCandidate(right)) {
+    return callsMatchPendingManualDial(left, right);
+  }
+
+  if (isClientOnlyManualDialCall(right) && isManualDialBackendCandidate(left)) {
+    return callsMatchPendingManualDial(right, left);
+  }
+
+  if (callsLikelySameBackendDialAction(left, right)) {
+    return true;
+  }
+
+  return false;
+};
+
+const mergeRelatedCalls = (existing: CallRecord, incoming: CallRecord) => {
+  if (existing.type === 'manual-dial') {
+    return mergeCallPreservingManualDial(existing, incoming);
+  }
+  if (incoming.type === 'manual-dial') {
+    return mergeCallPreservingManualDial(incoming, existing);
+  }
+
+  return {
+    ...existing,
+    ...incoming,
+    name: preferCallName(existing, incoming),
+    phone: incoming.phone || existing.phone,
+    callStatus: preferCallStatus(existing, incoming),
+    duration: Math.max(existing.duration, incoming.duration),
+    backendDetails: {
+      ...getRawDetails(existing),
+      ...getRawDetails(incoming),
+      metadata: {
+        ...getMetadataObject(getRawDetails(existing)),
+        ...getMetadataObject(getRawDetails(incoming)),
+      },
+    },
+  };
+};
+
+const collapseDuplicateCalls = (calls: CallRecord[]) =>
+  calls.reduce<CallRecord[]>((merged, call) => {
+    const existingIndex = merged.findIndex((candidate) => callsRepresentSameCall(candidate, call));
+    if (existingIndex === -1) {
+      merged.push(call);
+      return merged;
+    }
+
+    const next = [...merged];
+    next[existingIndex] = mergeRelatedCalls(next[existingIndex], call);
+    return next;
+  }, []);
 
 const applyManualDialOverride = (call: CallRecord) => {
   const override = manualDialOverrides.get(call.id);
@@ -1032,6 +1255,11 @@ const applyManualDialOverride = (call: CallRecord) => {
         local_dialed_number: override.phone,
         lad_app_dialed_number: override.phone,
         to_number: override.phone,
+        ...(override.contactName ? {
+          contact_name: override.contactName,
+          lead_name: override.contactName,
+          manual_contact_name: override.contactName,
+        } : {}),
       },
     },
   };
@@ -1164,12 +1392,12 @@ export const normalizeCallLog = (log: CallLogResponse): CallRecord => {
   };
 };
 
-const loadAllCallPages = async (): Promise<CallRecord[]> => {
+const loadAllCallPages = async (options?: { force?: boolean }): Promise<CallRecord[]> => {
   const all: CallRecord[] = [];
   let page = 1;
 
   while (all.length < CALL_ALL_PAGES_LIMIT) {
-    const response = await getCallLogs({ page, limit: CALL_RECONCILE_PAGE_SIZE });
+    const response = await getCallLogs({ page, limit: CALL_RECONCILE_PAGE_SIZE }, { force: options?.force });
     const raw = response as Record<string, any>;
     const pagination = (raw.pagination ?? {}) as Record<string, any>;
     const serverTotal: number | undefined =
@@ -1209,9 +1437,10 @@ const loadAllCallPages = async (): Promise<CallRecord[]> => {
   return all;
 };
 
-export const useCallStore = create<CallState>((set) => ({
+export const useCallStore = create<CallState>((set, get) => ({
   calls: [],
   isLoading: false,
+  isRefreshing: false,
   isLoadingMore: false,
   error: null,
   page: 1,
@@ -1231,9 +1460,8 @@ export const useCallStore = create<CallState>((set) => ({
     const applyStreamPatch = (rawPayload: RawRecord) => {
       const id = String(rawPayload.call_log_id ?? rawPayload.id ?? rawPayload.call_id ?? '');
       if (!id) return;
-      const newStatus = normalizeCallStatus(
-        String(rawPayload.status || rawPayload.call_status || rawPayload.status_text || ''),
-      );
+      const rawStatus = rawPayload.status ?? rawPayload.call_status ?? rawPayload.status_text ?? rawPayload.current_status;
+      const newStatus = rawStatus ? normalizeCallStatus(String(rawStatus)) : null;
       set((state) => ({
         calls: state.calls.map((c) => {
           if (c.id !== id) return c;
@@ -1320,7 +1548,7 @@ export const useCallStore = create<CallState>((set) => ({
               call.duration <= 1;
             return isPrematurelyFailed ? c : { ...c, callStatus: payloadStatus };
           });
-          return { calls: updatedCalls };
+          return { calls: sortCallsNewestFirst(updatedCalls) };
         });
         return;
       }
@@ -1353,9 +1581,9 @@ export const useCallStore = create<CallState>((set) => ({
     // React Query refetching while calls are active.
     if (!liveCallPollTimer) {
       liveCallPollTimer = setInterval(() => {
-        const hasLive = useCallStore.getState().calls.some((c) => isLiveCallStatus(c.callStatus));
+        const hasLive = get().calls.some((c) => isLiveCallStatus(c.callStatus));
         if (hasLive) {
-          void useCallStore.getState().fetchCalls({ force: true });
+          void get().fetchCalls({ force: true });
         }
       }, LIVE_CALL_POLL_INTERVAL_MS);
     }
@@ -1377,11 +1605,25 @@ export const useCallStore = create<CallState>((set) => ({
   },
 
   fetchCalls: async (options = {}) => {
+    // Only an explicit user pull-to-refresh passes `replace: true` — every other
+    // caller (the 15s live-call poll, the pending-manual-dial poll, and the
+    // post-dial scheduled refreshes) passes `force: true` alone to revalidate
+    // silently. Tying the pull-to-refresh spinner to those background fetches
+    // made it pop up constantly while any call was queued/ringing/in-progress.
+    const isUserRefresh = Boolean(options.replace);
+
     if (fetchCallsInFlight) {
-      return fetchCallsInFlight;
+      if (isUserRefresh) {
+        set({ calls: [], isRefreshing: true, isLoadingMore: false, error: null });
+      }
+      await fetchCallsInFlight;
+      if (options.force || options.replace) {
+        return get().fetchCalls({ ...options, force: true });
+      }
+      return;
     }
 
-    const state = useCallStore.getState();
+    const state = get();
     // Mirror LAD-Frontend-2's React Query staleTime: 30000ms. If we have cached
     // calls and the last fetch was less than 30s ago, skip. Otherwise re-fetch
     // even when the store has data, so navigating back to the screen surfaces
@@ -1389,42 +1631,43 @@ export const useCallStore = create<CallState>((set) => ({
     const STALE_TIME_MS = 30000;
     const isStillFresh = state.lastFetchedAt != null && Date.now() - state.lastFetchedAt < STALE_TIME_MS;
     if (!options.force && state.calls.length && isStillFresh) {
-      set({ isLoading: false, error: null });
+      set({ isLoading: false, isRefreshing: false, error: null });
       return;
     }
 
+    const isInitialLoad = !isUserRefresh && state.calls.length === 0;
+
     fetchCallsInFlight = (async () => {
-      set({ isLoading: true, error: null });
+      const replaceFromBackend = Boolean(options.replace);
+      set({
+        ...(replaceFromBackend ? { calls: [] } : {}),
+        ...(isInitialLoad ? { isLoading: true } : {}),
+        ...(isUserRefresh ? { isRefreshing: true } : {}),
+        isLoadingMore: false,
+        error: null,
+      });
       try {
         await loadManualDialOverrides();
-        clearOptimisticArtifacts();
-        const fetchedCalls = await loadAllCallPages();
-
-        // Preserve any live-status calls we prepended locally (via prependCall after
-        // makeCall returned) that the backend hasn't propagated to the list endpoint
-        // yet. Without this, the freshly-dialed "queued" entry disappears on the
-        // first refresh before the DB write is visible to the read path.
-        const currentCalls = useCallStore.getState().calls;
-        const backendIds = new Set(fetchedCalls.map((c) => c.id));
-        const localLiveCalls = currentCalls.filter(
-          (c) => isLiveCallStatus(c.callStatus) && !backendIds.has(c.id),
-        );
-
-        const calls = [
-          ...localLiveCalls,
-          ...fetchedCalls,
-        ].filter((call, idx, arr) => arr.findIndex((c) => c.id === call.id) === idx);
+        if (!replaceFromBackend) {
+          await loadPendingManualCalls();
+        }
+        const fetchedCalls = await loadAllCallPages({ force: Boolean(options.force || options.replace) });
+        const calls = replaceFromBackend
+          ? sortCallsNewestFirst(collapseDuplicateCalls(fetchedCalls).filter((call) => !shouldHideBackendPlaceholderCall(call)))
+          : mergeFetchedCalls(get().calls, fetchedCalls);
 
         set({
           calls,
           page: 1,
           hasMore: fetchedCalls.length >= CALL_ALL_PAGES_LIMIT,
           isLoading: false,
+          isRefreshing: false,
           lastFetchedAt: Date.now(),
         });
       } catch {
         set({
           isLoading: false,
+          isRefreshing: false,
           hasMore: false,
           error: 'Unable to load real call logs from the backend.',
         });
@@ -1439,7 +1682,7 @@ export const useCallStore = create<CallState>((set) => ({
   },
 
   fetchNextCalls: async () => {
-    const state = useCallStore.getState();
+    const state = get();
     if (!state.hasMore || state.isLoading || state.isLoadingMore) {
       return;
     }
@@ -1454,13 +1697,9 @@ export const useCallStore = create<CallState>((set) => ({
         .map((item) => normalizeCallLog(item as CallLogResponse))
         .map(applyManualDialOverride)
         .filter((call) => call.id && !shouldHideBackendPlaceholderCall(call));
-      const incomingIds = new Set(calls.map((call) => call.id));
 
       set((current) => ({
-        calls: [
-          ...current.calls.filter((call) => !incomingIds.has(call.id)),
-          ...calls,
-        ],
+        calls: sortCallsNewestFirst(collapseDuplicateCalls([...current.calls, ...calls])),
         page: nextPage,
         hasMore: calls.length >= CALL_PAGE_SIZE,
         isLoadingMore: false,
@@ -1473,16 +1712,15 @@ export const useCallStore = create<CallState>((set) => ({
     }
   },
 
-  setCalls: (calls) => set({ calls }),
+  setCalls: (calls) => set({ calls: sortCallsNewestFirst(collapseDuplicateCalls(calls)) }),
 
   prependCall: (call) => set((state) => ({
-    calls: [call, ...state.calls.filter((item) => item.id !== call.id)],
+    calls: sortCallsNewestFirst(collapseDuplicateCalls([call, ...state.calls])),
   })),
 
   prependCalls: (calls) => set((state) => {
-    const incomingIds = new Set(calls.map((call) => call.id));
     return {
-      calls: [...calls, ...state.calls.filter((item) => !incomingIds.has(item.id))],
+      calls: sortCallsNewestFirst(collapseDuplicateCalls([...calls, ...state.calls])),
     };
   }),
 
@@ -1494,6 +1732,7 @@ export const useCallStore = create<CallState>((set) => ({
     set({
       calls: [],
       isLoading: false,
+      isRefreshing: false,
       isLoadingMore: false,
       error: null,
       page: 1,

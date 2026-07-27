@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { Platform } from 'react-native';
 
-import { getAuthToken } from '@/src/api';
+import { getAuthToken, safeStorage } from '@/src/api';
 import { getSocket } from '@/src/services/socketService';
 import useAuthStore from '@/src/store/authStore';
 import {
@@ -66,9 +66,10 @@ interface ChatState {
   syncConversations: (options?: { silent?: boolean; force?: boolean }) => Promise<void>;
   startConversationAutoSync: () => void;
   stopConversationAutoSync: () => void;
-  setActiveConversation: (conversationId: string, options?: { force?: boolean }) => Promise<void>;
+  setActiveConversation: (conversationId: string, options?: { force?: boolean; silent?: boolean }) => Promise<void>;
   getOlderMessages: () => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
+  sendLocationMessage: (latitude: number, longitude: number, locationName: string, locationAddress?: string) => Promise<void>;
   sendAttachment: (asset: AttachmentAsset, caption?: string) => Promise<void>;
   sendChannelMessage: (payload: Record<string, unknown>) => Promise<void>;
   emitTypingState: (isTyping: boolean) => void;
@@ -95,6 +96,58 @@ let conversationSyncTimer: ReturnType<typeof setInterval> | null = null;
 // Conversations the user has marked read locally; used to preserve read state across force syncs
 // until the backend confirms the update. Cleared when a new incoming message arrives for that conversation.
 const localReadOverrides = new Set<string>();
+
+// Media fields for attachments sent from this device, keyed by server message id.
+// The WABA backend returns outbound media rows as bare text ("Image") without a
+// media_id, and its media-download endpoint 502s for outbound media ids — so any
+// refetch downgrades a sent image bubble to plain text. Like WhatsApp, prefer the
+// sender's local copy: re-apply these fields whenever a fetched row for the same
+// message id comes back without usable media info.
+const sentMediaOverlays = new Map<string, Partial<ChatMessage>>();
+const SENT_MEDIA_OVERLAYS_KEY = 'chat.sentMediaOverlays';
+const SENT_MEDIA_OVERLAYS_MAX = 200;
+
+// Best-effort persistence so previews survive app restarts on native, where the
+// picked file's cache URI stays valid. Web blob: URLs die with the session, so
+// stale entries there just fall back to the backend URL path.
+void (async () => {
+  try {
+    const raw = await safeStorage.getItem(SENT_MEDIA_OVERLAYS_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Record<string, Partial<ChatMessage>>;
+    for (const [id, overlay] of Object.entries(parsed)) {
+      // blob: object URLs never survive a reload — drop them
+      if (typeof overlay?.mediaId === 'string' && !overlay.mediaId.startsWith('blob:') && !sentMediaOverlays.has(id)) {
+        sentMediaOverlays.set(id, overlay);
+      }
+    }
+  } catch {
+    // Non-critical cache — ignore corrupt/missing data
+  }
+})();
+
+const persistSentMediaOverlays = () => {
+  try {
+    const entries = [...sentMediaOverlays.entries()].slice(-SENT_MEDIA_OVERLAYS_MAX);
+    void safeStorage.setItem(SENT_MEDIA_OVERLAYS_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // Non-critical cache — ignore write failures
+  }
+};
+
+const rememberSentMediaOverlay = (messageId: string, overlay: Partial<ChatMessage>) => {
+  sentMediaOverlays.set(messageId, overlay);
+  persistSentMediaOverlays();
+};
+
+const applySentMediaOverlay = (message: ChatMessage): ChatMessage => {
+  const overlay = sentMediaOverlays.get(message.id);
+  // attachments cleared so stale backend-built attachment URLs can't shadow the local copy
+  return overlay ? { ...message, ...overlay, attachments: undefined } : message;
+};
+
+const applySentMediaOverlays = (messages: ChatMessage[]) =>
+  sentMediaOverlays.size === 0 ? messages : messages.map(applySentMediaOverlay);
 
 const sortMessages = (messages: ChatMessage[]) =>
   [...messages].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
@@ -345,7 +398,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
 
-      const message = getMessagePayload(payload, conversationId);
+      const message = applySentMediaOverlay(getMessagePayload(payload, conversationId));
       const rawMessage = payload.message && typeof payload.message === 'object' ? payload.message as RawRecord : payload;
       const isOwnMessage = isMessageFromCurrentAgent(message, rawMessage);
 
@@ -391,7 +444,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     socket.on('message:new', (payload) => {
       const activeConversationId = get().activeConversationId;
-      const message = normalizeMessage(payload, activeConversationId ?? '');
+      const message = applySentMediaOverlay(normalizeMessage(payload, activeConversationId ?? ''));
       if (!message.conversationId) {
         return;
       }
@@ -631,8 +684,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     void get().syncConversations({ silent: true });
+    const activeConversationId = get().activeConversationId;
+    if (activeConversationId) {
+      void get().setActiveConversation(activeConversationId, { force: true, silent: true });
+    }
+    
     conversationSyncTimer = setInterval(() => {
       void get().syncConversations({ silent: true });
+      const currentActiveId = get().activeConversationId;
+      if (currentActiveId) {
+        void get().setActiveConversation(currentActiveId, { force: true, silent: true });
+      }
     }, 20_000); // 20 s — silent background sync, no visible spinner
   },
 
@@ -698,9 +760,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const hasCachedMessages = Object.prototype.hasOwnProperty.call(get().messagesByConversationId, conversationId);
     set({
       activeConversationId: conversationId,
-      activeMessages: hasCachedMessages && !options.force ? cachedMessages : [],
-      isLoadingMessages: options.force || !hasCachedMessages,
-      hasOlderMessages: options.force || !hasCachedMessages,
+      activeMessages: options.silent ? (get().activeConversationId === conversationId ? get().activeMessages : cachedMessages) : (hasCachedMessages && !options.force ? cachedMessages : []),
+      isLoadingMessages: options.silent ? false : (options.force || !hasCachedMessages),
+      hasOlderMessages: options.silent ? get().hasOlderMessages : (options.force || !hasCachedMessages),
       error: null,
     });
 
@@ -713,7 +775,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const detail = await getConversation(conversationId).catch(() => null);
       const messages = await loadAllMessagePages(conversationId, detail?.messages ?? []);
-      const sortedMessages = sortMessages(messages);
+      const sortedMessages = applySentMediaOverlays(sortMessages(messages));
 
       if (requestId !== activeMessageRequest) {
         return;
@@ -759,10 +821,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
 
       set((state) => ({
-        activeMessages: [...sortMessages(olderMessages), ...state.activeMessages],
+        activeMessages: [...applySentMediaOverlays(sortMessages(olderMessages)), ...state.activeMessages],
         messagesByConversationId: {
           ...state.messagesByConversationId,
-          [activeConversationId]: [...sortMessages(olderMessages), ...state.activeMessages],
+          [activeConversationId]: [...applySentMediaOverlays(sortMessages(olderMessages)), ...state.activeMessages],
         },
         hasOlderMessages: olderMessages.length >= PAGE_SIZE,
         isLoadingOlderMessages: false,
@@ -860,6 +922,75 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  
+  sendLocationMessage: async (latitude, longitude, locationName, locationAddress) => {
+    const activeConversationId = get().activeConversationId;
+    if (!activeConversationId) return;
+
+    const clientId = `local-${Date.now()}`;
+    const locationUrl = `https://maps.google.com/?q=${latitude},${longitude}`;
+    
+    const optimisticMessage = {
+      id: clientId,
+      conversationId: activeConversationId,
+      content: locationUrl,
+      sender: "agent" as const,
+      channel: get().conversations.find((c) => c.id === activeConversationId)?.channel || "whatsapp",
+      status: "sending" as const,
+      createdAt: new Date().toISOString(),
+      type: "location",
+      latitude,
+      longitude,
+      locationName,
+      locationAddress,
+    };
+
+    set((state) => ({
+      isSending: true,
+      activeMessages: [...state.activeMessages, optimisticMessage],
+    }));
+
+    try {
+      const currentUser = useAuthStore.getState().user;
+      const returnedMsg = await sendChatMessage({
+        conversationId: activeConversationId,
+        message: "Location shared",
+        content: locationUrl,
+        type: "location",
+        latitude,
+        longitude,
+        locationName,
+        locationAddress,
+        humanAgentId: currentUser?.id,
+        currentUser: (currentUser as any) || undefined,
+        role: "user",
+      });
+
+      set((state) => {
+        const newActiveMessages = state.activeMessages.filter(m => m.id !== clientId);
+        if (returnedMsg) newActiveMessages.push(returnedMsg);
+        
+        const convMessages = (state.messagesByConversationId[activeConversationId] || []).filter(m => m.id !== clientId);
+        if (returnedMsg) convMessages.push(returnedMsg);
+
+        return {
+          isSending: false,
+          activeMessages: newActiveMessages,
+          messagesByConversationId: {
+            ...state.messagesByConversationId,
+            [activeConversationId]: convMessages,
+          },
+        };
+      });
+    } catch (error) {
+      set((state) => ({
+        isSending: false,
+        activeMessages: state.activeMessages.filter(m => m.id !== clientId),
+        error: getErrorMessage(error, "Location failed to send."),
+      }));
+    }
+  },
+
   sendAttachment: async (asset, caption?: string) => {
     const activeConversationId = get().activeConversationId;
     if (!activeConversationId || !asset.uri) {
@@ -867,19 +998,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const optimisticMessageId = `optimistic-${Date.now()}`;
-    const optimisticMessage: ChatMessage = {
+    const optimisticMessage = {
       id: optimisticMessageId,
       conversationId: activeConversationId,
-      content: caption || asset.name || 'Attachment',
-      sender: 'agent',
-      channel: get().conversations.find((c) => c.id === activeConversationId)?.channel || 'whatsapp',
-      status: 'sending',
+      content: caption || asset.name || "Attachment",
+      sender: "agent" as const,
+      channel: get().conversations.find((c) => c.id === activeConversationId)?.channel || "whatsapp",
+      status: "sending" as const,
       createdAt: new Date().toISOString(),
-      mediaId: asset.uri, // Use local URI for preview
-      mediaType: asset.mimeType?.startsWith('image/') ? 'image' 
-               : asset.mimeType?.startsWith('video/') ? 'video' 
-               : asset.mimeType?.startsWith('audio/') ? 'audio' 
-               : 'document',
+      mediaId: asset.uri,
+      mediaType: asset.mimeType?.startsWith("image/") ? "image" 
+               : asset.mimeType?.startsWith("video/") ? "video" 
+               : asset.mimeType?.startsWith("audio/") ? "audio" 
+               : "document",
       mediaMimeType: asset.mimeType ?? undefined,
       mediaFilename: asset.name,
       mediaCaption: caption,
@@ -893,50 +1024,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       const conversation = get().conversations.find((c) => c.id === activeConversationId);
-      const rawChannel = conversation?.waBackendChannel || 'personal';
-      const apiChannel = rawChannel === 'waba' ? 'waba' : 'personal';
+      const rawChannel = conversation?.waBackendChannel || "personal";
+      const apiChannel = rawChannel === "waba" ? "waba" : "personal";
 
-      let mediaType = 'document';
-      if (asset.mimeType?.startsWith('image/')) mediaType = 'image';
-      else if (asset.mimeType?.startsWith('video/')) mediaType = 'video';
-      else if (asset.mimeType?.startsWith('audio/')) mediaType = 'audio';
+      let mediaType = "document";
+      if (asset.mimeType?.startsWith("image/")) mediaType = "image";
+      else if (asset.mimeType?.startsWith("video/")) mediaType = "video";
+      else if (asset.mimeType?.startsWith("audio/")) mediaType = "audio";
 
-      if (Platform.OS !== 'web') {
-        // Native: XMLHttpRequest with { uri, name, type } FormData entry.
-        // React Native's OkHttp layer reads file:// URIs natively — no extra package needed.
-        // copyToCacheDirectory:true in the picker guarantees a file:// URI.
+      if (require("react-native").Platform.OS !== "web") {
         const token = await getAuthToken();
-        const wapaBase = (process.env.EXPO_PUBLIC_WAPA_SERVICE_URL || 'https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app').replace(/\/+$/, '');
-        const bniBase = (process.env.EXPO_PUBLIC_BNI_SERVICE_URL || process.env.EXPO_PUBLIC_WHATSAPP_API_URL || 'https://lad-waba-comms-develop-asia-160078175457.asia-south1.run.app').replace(/\/+$/, '');
-        const uploadBase = apiChannel === 'waba' ? bniBase : wapaBase;
-        const uploadPath = apiChannel === 'waba'
-          ? '/api/conversations/upload-media'
-          : '/api/whatsapp-conversations/conversations/upload-media';
+        const wapaBase = (process.env.EXPO_PUBLIC_WAPA_SERVICE_URL || "https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app").replace(/\/+$/, "");
+        const bniBase = (process.env.EXPO_PUBLIC_BNI_SERVICE_URL || process.env.EXPO_PUBLIC_WHATSAPP_API_URL || "https://lad-waba-comms-develop-asia-160078175457.asia-south1.run.app").replace(/\/+$/, "");
+        const uploadBase = apiChannel === "waba" ? bniBase : wapaBase;
+        const uploadPath = apiChannel === "waba"
+          ? "/api/conversations/upload-media"
+          : "/api/whatsapp-conversations/conversations/upload-media";
         const uploadUrl = `${uploadBase}${uploadPath}?channel=${apiChannel}`;
 
         const nativeForm = new FormData();
-        nativeForm.append('file', {
+        nativeForm.append("file", {
           uri: asset.uri,
           name: asset.name || `attachment-${Date.now()}`,
-          type: asset.mimeType || 'application/octet-stream',
+          type: asset.mimeType || "application/octet-stream",
         } as any);
-        nativeForm.append('conversationId', activeConversationId);
-        nativeForm.append('type', mediaType);
-        if (caption) nativeForm.append('caption', caption);
+        nativeForm.append("conversationId", activeConversationId);
+        nativeForm.append("type", mediaType);
+        if (caption) nativeForm.append("caption", caption);
 
         const uploadResult = await new Promise<{ status: number; body: string }>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
-          xhr.open('POST', uploadUrl);
-          if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+          xhr.open("POST", uploadUrl);
+          if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
           xhr.timeout = 60000;
           xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText });
-          xhr.onerror = () => reject(new Error('Network error during upload'));
-          xhr.ontimeout = () => reject(new Error('Upload timed out'));
+          xhr.onerror = () => reject(new Error("Network error during upload"));
+          xhr.ontimeout = () => reject(new Error("Upload timed out"));
           xhr.send(nativeForm);
         });
 
         if (uploadResult.status >= 400) {
-          let errMsg = 'Failed to upload media.';
+          let errMsg = "Failed to upload media.";
           try {
             const errBody = JSON.parse(uploadResult.body) as Record<string, unknown>;
             errMsg = String(errBody.message || errBody.error || errMsg);
@@ -947,60 +1075,102 @@ export const useChatStore = create<ChatState>((set, get) => ({
         let uploadData: Record<string, unknown> = {};
         try { uploadData = JSON.parse(uploadResult.body) as Record<string, unknown>; } catch {}
         const nested = uploadData?.data as Record<string, unknown> | undefined;
-        const uploadedMediaId = String(nested?.media_id ?? uploadData?.media_id ?? uploadData?.url ?? '');
+        const uploadedMediaId = String(nested?.media_id ?? uploadData?.media_id ?? uploadData?.url ?? "");
 
         if (!uploadedMediaId) {
-          throw new Error('Media upload did not return a media ID.');
+          throw new Error("Media upload did not return a media ID.");
         }
 
-        await sendChatMessage({
+        const returnedMsg = await sendChatMessage({
           conversationId: activeConversationId,
-          message: caption || asset.name || 'Media',
+          message: caption || asset.name || "Media",
           content: uploadedMediaId,
-          role: 'user',
-          type: mediaType as any,
+          role: "user",
+          type: mediaType,
           mediaId: uploadedMediaId,
-          mediaType: mediaType as any,
+          mediaType: mediaType,
           mediaFilename: asset.name || `attachment-${Date.now()}`,
           mediaCaption: caption || undefined,
         });
+
+        let confirmedMsg = returnedMsg;
+        if (returnedMsg?.id) {
+          const localMedia: Partial<ChatMessage> = {
+            mediaId: asset.uri,
+            mediaType: optimisticMessage.mediaType,
+            mediaMimeType: asset.mimeType ?? undefined,
+            mediaFilename: asset.name,
+            mediaCaption: caption,
+            attachments: undefined,
+          };
+          rememberSentMediaOverlay(String(returnedMsg.id), localMedia);
+          confirmedMsg = { ...returnedMsg, ...localMedia };
+        }
+
+        set((state) => {
+          const newActiveMessages = state.activeMessages.filter(m => m.id !== optimisticMessageId);
+          if (confirmedMsg) newActiveMessages.push(confirmedMsg);
+          const convMessages = (state.messagesByConversationId[activeConversationId] || []).filter(m => m.id !== optimisticMessageId);
+          if (confirmedMsg) convMessages.push(confirmedMsg);
+          return {
+            isUploadingAttachment: false,
+            activeMessages: newActiveMessages,
+            messagesByConversationId: {
+              ...state.messagesByConversationId,
+              [activeConversationId]: convMessages,
+            },
+          };
+        });
       } else {
-        // Web: use FormData + fetch approach via the local proxy
         const formData = new FormData();
-        formData.append('conversationId', activeConversationId);
-        formData.append('channel', apiChannel);
-        if (caption) formData.append('caption', caption);
-        formData.append('type', mediaType);
+        formData.append("conversationId", activeConversationId);
+        formData.append("channel", apiChannel);
+        if (caption) formData.append("caption", caption);
+        formData.append("type", mediaType);
 
         let fileData: any = (asset as any).file;
         if (!fileData) {
           const response = await fetch(asset.uri);
           const blob = await response.blob();
-          const effectiveMimeType = blob.type || asset.mimeType || asset.type || 'application/octet-stream';
+          const effectiveMimeType = blob.type || asset.mimeType || asset.type || "application/octet-stream";
           let fileName = asset.name || `attachment-${Date.now()}`;
-          if (effectiveMimeType.startsWith('audio/webm') && fileName.endsWith('.m4a')) {
-            fileName = fileName.replace(/\.m4a$/, '.webm');
-          } else if (effectiveMimeType.startsWith('audio/ogg') && fileName.endsWith('.m4a')) {
-            fileName = fileName.replace(/\.m4a$/, '.ogg');
+          if (effectiveMimeType.startsWith("audio/webm") && fileName.endsWith(".m4a")) {
+            fileName = fileName.replace(/\.m4a$/, ".webm");
+          } else if (effectiveMimeType.startsWith("audio/ogg") && fileName.endsWith(".m4a")) {
+            fileName = fileName.replace(/\.m4a$/, ".ogg");
           }
           fileData = new File([blob], fileName, { type: effectiveMimeType });
         }
-        formData.append('file', fileData);
-        await sendMessageWithAttachment(formData);
+        formData.append("file", fileData);
+        const sentMessage = await sendMessageWithAttachment(formData) as ChatMessage | RawRecord | undefined;
+
+        // Remember the local copy keyed by the server message id so refetches
+        // (which return outbound media rows as bare "Image" text) keep the preview.
+        const sentId = sentMessage && typeof sentMessage === 'object'
+          ? (sentMessage as RawRecord).id ?? ((sentMessage as RawRecord).message as RawRecord | undefined)?.id
+          : undefined;
+        if (sentId) {
+          rememberSentMediaOverlay(String(sentId), {
+            mediaId: asset.uri,
+            mediaType: optimisticMessage.mediaType,
+            mediaMimeType: asset.mimeType ?? undefined,
+            mediaFilename: asset.name,
+            mediaCaption: caption,
+            attachments: undefined,
+          });
+        }
+
+        set((state) => ({
+          isUploadingAttachment: false,
+          activeMessages: state.activeMessages.filter(m => m.id !== optimisticMessageId)
+        }));
+        await get().setActiveConversation(activeConversationId, { force: true });
       }
-      
-      // Cleanup optimistic message (it will be replaced by socket message, but we also refresh)
-      set((state) => ({
-        isUploadingAttachment: false,
-        activeMessages: state.activeMessages.filter(m => m.id !== optimisticMessageId)
-      }));
-      
-      await get().setActiveConversation(activeConversationId, { force: true });
     } catch (error) {
       set((state) => ({
         isUploadingAttachment: false,
         activeMessages: state.activeMessages.filter(m => m.id !== optimisticMessageId),
-        error: getErrorMessage(error, 'Attachment failed to upload.'),
+        error: getErrorMessage(error, "Attachment failed to upload."),
       }));
     }
   },

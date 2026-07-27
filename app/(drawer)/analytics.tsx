@@ -11,6 +11,13 @@ import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 
 const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
 const formatPercent = (value: number) => `${Math.round((value || 0) * 10) / 10}%`;
+const formatTrendDate = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value.slice(5) || value;
+  }
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
 const ANALYTICS_CACHE_KEY = 'drawer.analytics';
 
 export default function AnalyticsScreen() {
@@ -50,30 +57,38 @@ export default function AnalyticsScreen() {
 
   const channelPerformance = useMemo(() => {
     const stats = analytics?.campaignStats;
+    const totalSent = stats?.totalSent || 0;
+    const totalConnected = stats?.totalConnected || 0;
+    const totalReplied = stats?.totalReplied || 0;
     return [
-      { label: 'Connections', value: stats?.avgConnectionRate || 0, color: Theme.colors.primary },
-      { label: 'Replies', value: stats?.avgReplyRate || 0, color: Theme.colors.success },
-      { label: 'Calls Answered', value: analytics?.callAnswerRate || 0, color: Theme.colors.info },
+      { label: 'Connections', value: stats?.avgConnectionRate || 0, count: totalConnected, total: totalSent, color: Theme.colors.primary },
+      { label: 'Replies', value: stats?.avgReplyRate || 0, count: totalReplied, total: totalSent, color: Theme.colors.success },
+      { label: 'Calls Answered', value: analytics?.callAnswerRate || 0, count: analytics?.answeredCalls || 0, total: analytics?.totalCalls || 0, color: Theme.colors.info },
     ];
   }, [analytics]);
 
-  const chartValues = useMemo(() => {
+  const chartPoints = useMemo(() => {
     const breakdown = analytics?.campaignStats.dailyBreakdown || [];
     if (breakdown.length > 0) {
-      return breakdown.slice(-7).map((item) => Math.max(item.count, 4));
+      return breakdown.slice(-7).map((item) => ({
+        label: formatTrendDate(item.date),
+        value: item.count,
+        series: 'Connections',
+      }));
     }
     return [
-      analytics?.campaignStats.totalSent || 4,
-      analytics?.campaignStats.totalDelivered || 4,
-      analytics?.campaignStats.totalConnected || 4,
-      analytics?.campaignStats.totalReplied || 4,
-      analytics?.totalCalls || 4,
-      analytics?.answeredCalls || 4,
-      analytics?.creditsUsed30d || 4,
+      { label: 'Sent', value: analytics?.campaignStats.totalSent || 0, series: 'Campaign' },
+      { label: 'Delivered', value: analytics?.campaignStats.totalDelivered || 0, series: 'Campaign' },
+      { label: 'Connected', value: analytics?.campaignStats.totalConnected || 0, series: 'Campaign' },
+      { label: 'Replies', value: analytics?.campaignStats.totalReplied || 0, series: 'Campaign' },
+      { label: 'Calls', value: analytics?.totalCalls || 0, series: 'Voice' },
+      { label: 'Answered', value: analytics?.answeredCalls || 0, series: 'Voice' },
+      { label: 'Credits', value: analytics?.creditsUsed30d || 0, series: 'Billing' },
     ];
   }, [analytics]);
 
-  const maxChartValue = Math.max(...chartValues, 1);
+  const hasDailyBreakdown = Boolean(analytics?.campaignStats.dailyBreakdown?.length);
+  const maxChartValue = Math.max(...chartPoints.map((point) => point.value), 1);
 
   return (
     <ScrollView
@@ -109,16 +124,16 @@ export default function AnalyticsScreen() {
             </GlassCard>
             <GlassCard style={styles.statCard}>
               <Users color={appTheme.primaryAccent} size={24} />
-              <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.campaignStats.totalLeads || 0)}</Typography>
-              <Typography variant="caption" color={appTheme.muted}>Total Leads</Typography>
+              <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.campaignStats.activeCampaigns || 0)}</Typography>
+              <Typography variant="caption" color={appTheme.muted}>Active Campaigns</Typography>
             </GlassCard>
           </View>
 
           <View style={styles.grid}>
             <GlassCard style={styles.statCard}>
               <PhoneCall color={Theme.colors.info} size={24} />
-              <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.totalCalls || 0)}</Typography>
-              <Typography variant="caption" color={appTheme.muted}>Voice Calls</Typography>
+              <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.answeredCalls || 0)}</Typography>
+              <Typography variant="caption" color={appTheme.muted}>Calls Answered</Typography>
             </GlassCard>
             <GlassCard style={styles.statCard}>
               <Wallet color={Theme.colors.warning} size={24} />
@@ -129,11 +144,45 @@ export default function AnalyticsScreen() {
 
           <GlassCard style={styles.chartCard}>
             <Typography variant="h3" style={styles.cardTitle}>Activity Trend</Typography>
-            <View style={styles.mockChart}>
-              {chartValues.map((value, index) => (
-                <View key={`${value}-${index}`} style={[styles.bar, { height: Math.max(18, (value / maxChartValue) * 110) }]} />
-              ))}
+            <View style={styles.chartLegendRow}>
+              <View style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: Theme.colors.primary }]} />
+                <Typography variant="caption" color={appTheme.muted}>
+                  {hasDailyBreakdown ? 'Connections by day' : 'Current totals by metric'}
+                </Typography>
+              </View>
+              <Typography variant="caption" color={appTheme.muted}>Max {formatNumber(maxChartValue)}</Typography>
             </View>
+            <View style={styles.chartArea}>
+              <View style={styles.yAxisLabels}>
+                <Typography variant="caption" color={appTheme.muted}>{formatNumber(maxChartValue)}</Typography>
+                <Typography variant="caption" color={appTheme.muted}>0</Typography>
+              </View>
+              <View style={styles.mockChart}>
+                {chartPoints.map((point, index) => (
+                  <View key={`${point.label}-${index}`} style={styles.barColumn}>
+                    <Typography variant="caption" color={appTheme.muted} style={styles.barValue} numberOfLines={1}>
+                      {formatNumber(point.value)}
+                    </Typography>
+                    <View
+                      style={[
+                        styles.bar,
+                        {
+                          height: point.value > 0 ? Math.max(8, (point.value / maxChartValue) * 96) : 2,
+                          opacity: point.value > 0 ? 1 : 0.35,
+                        },
+                      ]}
+                    />
+                    <Typography variant="caption" color={appTheme.muted} style={styles.xAxisLabel} numberOfLines={1}>
+                      {point.label}
+                    </Typography>
+                  </View>
+                ))}
+              </View>
+            </View>
+            <Typography variant="caption" color={appTheme.muted} style={styles.axisTitle}>
+              Y-axis: count - X-axis: {hasDailyBreakdown ? 'date' : 'metric'}
+            </Typography>
           </GlassCard>
 
           <GlassCard style={styles.activityCard}>
@@ -144,7 +193,12 @@ export default function AnalyticsScreen() {
                 <View style={[styles.progressBg, { backgroundColor: appTheme.softSurface }]}>
                   <View style={[styles.progressFill, { width: `${Math.min(item.value, 100)}%`, backgroundColor: item.color }]} />
                 </View>
-                <Typography variant="bodySmall" style={styles.percentLabel}>{formatPercent(item.value)}</Typography>
+                <View style={styles.channelValue}>
+                  <Typography variant="bodySmall" style={styles.percentLabel}>{formatPercent(item.value)}</Typography>
+                  <Typography variant="caption" color={appTheme.muted} style={styles.countLabel}>
+                    {formatNumber(item.count)} / {formatNumber(item.total)}
+                  </Typography>
+                </View>
               </View>
             ))}
           </GlassCard>
@@ -200,14 +254,85 @@ const styles = StyleSheet.create({
   statValue: { marginTop: 8 },
   chartCard: { padding: Theme.spacing.md, marginBottom: Theme.spacing.md },
   cardTitle: { marginBottom: 16 },
-  mockChart: { height: 130, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', paddingHorizontal: 10 },
+  chartLegendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Theme.spacing.sm,
+    gap: Theme.spacing.sm,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+  },
+  legendDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+  },
+  chartArea: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 8,
+  },
+  yAxisLabels: {
+    width: 34,
+    height: 146,
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    paddingTop: 12,
+    paddingBottom: 22,
+  },
+  mockChart: {
+    height: 146,
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    gap: 6,
+    paddingHorizontal: 4,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: Theme.colors.borderLight,
+  },
+  barColumn: {
+    flex: 1,
+    minWidth: 0,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 4,
+  },
+  barValue: {
+    fontSize: 9,
+    minHeight: 12,
+  },
   bar: { width: 20, backgroundColor: Theme.colors.primary, borderRadius: 4 },
+  xAxisLabel: {
+    fontSize: 9,
+    textAlign: 'center',
+    minHeight: 18,
+    maxWidth: 54,
+  },
+  axisTitle: {
+    marginTop: Theme.spacing.sm,
+    textAlign: 'center',
+  },
   activityCard: { padding: Theme.spacing.md, marginBottom: Theme.spacing.md },
   channelRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 12 },
-  channelLabel: { width: 94 },
+  channelLabel: { width: 96 },
   progressBg: { flex: 1, height: 8, backgroundColor: Theme.colors.border, borderRadius: 4, overflow: 'hidden' },
   progressFill: { height: '100%', borderRadius: 4 },
-  percentLabel: { width: 42, textAlign: 'right' },
+  channelValue: {
+    width: 64,
+    alignItems: 'flex-end',
+  },
+  percentLabel: { textAlign: 'right' },
+  countLabel: {
+    fontSize: 10,
+    marginTop: 1,
+  },
   usageRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

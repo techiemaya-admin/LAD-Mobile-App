@@ -17,6 +17,13 @@ type RawRecord = Record<string, any>;
 const asRecord = (value: unknown): RawRecord =>
   value && typeof value === 'object' && !Array.isArray(value) ? value as RawRecord : {};
 
+const normalizeContactName = (value: unknown) =>
+  String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s+(manual\s+)?dial$/i, '')
+    .trim();
+
 const parseRecord = (value: unknown): RawRecord => {
   if (!value) {
     return {};
@@ -38,6 +45,8 @@ const normalizeCallLogItem = (item: unknown) => {
   const record = asRecord(item);
   const metadataSource = record.metadata ?? record.meta_data ?? record.meta;
   const metadata = parseRecord(metadataSource);
+  const contact = parseRecord(record.contact);
+  const lead = parseRecord(record.lead);
   const sipTrail = parseRecord(metadata.sip_trail);
   const analysis = parseRecord(record.analysis);
   const rawAnalysis = parseRecord(analysis.raw_analysis);
@@ -54,8 +63,33 @@ const normalizeCallLogItem = (item: unknown) => {
     dispositionFull.disposition ||
     'N/A';
 
+  const leadName = normalizeContactName(
+    record.lead_name ||
+      record.contact_name ||
+      metadata.lead_name ||
+      metadata.contact_name ||
+      metadata.manual_contact_name ||
+      lead.name ||
+      lead.full_name ||
+      contact.name ||
+      contact.full_name,
+  );
+  const contactName = normalizeContactName(
+    record.contact_name ||
+      record.lead_name ||
+      metadata.contact_name ||
+      metadata.lead_name ||
+      metadata.manual_contact_name ||
+      contact.name ||
+      contact.full_name ||
+      lead.name ||
+      lead.full_name,
+  );
+
   return {
     ...record,
+    lead_name: leadName || record.lead_name,
+    contact_name: contactName || record.contact_name,
     metadata: metadataSource,
     status_reason: statusReason,
     disposition,
@@ -97,6 +131,9 @@ const extractPagination = (data: unknown): RawRecord => {
 const CALL_LOGS_CACHE_MS = 3000;
 const callLogsCache = new Map<string, { fetchedAt: number; value: CallLogsResponse }>();
 const callLogsInFlight = new Map<string, Promise<CallLogsResponse>>();
+interface GetCallLogsOptions {
+  force?: boolean;
+}
 
 const getParamsKey = (params?: GetCallLogsParams) =>
   JSON.stringify(Object.entries(params || {}).sort(([first], [second]) => first.localeCompare(second)));
@@ -116,8 +153,14 @@ const fetchAndNormalizeCallLogs = async (params?: GetCallLogsParams) => {
   } as CallLogsResponse;
 };
 
-export async function getCallLogs(params?: GetCallLogsParams) {
+export async function getCallLogs(params?: GetCallLogsParams, options?: GetCallLogsOptions) {
   const key = getParamsKey(params);
+  if (options?.force) {
+    const value = await fetchAndNormalizeCallLogs(params);
+    callLogsCache.set(key, { value, fetchedAt: Date.now() });
+    return value;
+  }
+
   const cached = callLogsCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < CALL_LOGS_CACHE_MS) {
     return cached.value;

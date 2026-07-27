@@ -9,10 +9,10 @@ import useAuthStore from '@/src/store/authStore';
 import { useChatStore } from '@/src/store/chatStore';
 import { useOverlayStore } from '@/src/store/overlayStore';
 import { useAppTheme } from '@/src/theme/appTheme';
-import { LadLogoMark } from '@/components/ui/LadLogoMark';
+import { Logo } from '@/components/ui/Logo';
 
 const BUTTON_SIZE = 54;
-const STORAGE_PREFIX = 'lad.floatingAssistant.position.';
+const STORAGE_PREFIX = 'lad.floatingAssistant.position.v3.';
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 export function FloatingAssistantButton() {
@@ -35,8 +35,8 @@ export function FloatingAssistantButton() {
   const isCallsRoute = pathname.includes('/calls') || segments.includes('calls');
   const isChatsRoute = pathname.includes('/chats') || segments.includes('chats');
   const bottomOffset = Math.max(insets.bottom, 0) + (isCallsRoute ? 166 : 104);
-  const bottomEdgeReserve = Math.max(insets.bottom + 2, 6);
-  const visibleTabReserve = Math.max(insets.bottom, 10) + 68 + 2;
+  const bottomEdgeReserve = Math.max(insets.bottom, 10) + 12;
+  const visibleTabReserve = Math.max(insets.bottom, 10) + 76;
   const iconColor = appTheme.darkMode ? '#F8FAFC' : '#0B1958';
   const storageKey = `${STORAGE_PREFIX}${pathname || 'home'}`;
   const fullScreenBounds = useMemo(() => ({
@@ -57,9 +57,9 @@ export function FloatingAssistantButton() {
     y: clamp(position.y, activeBounds.minY, activeBounds.maxY),
   }), [activeBounds.maxX, activeBounds.maxY, activeBounds.minX, activeBounds.minY]);
   const defaultPosition = useMemo(() => ({
-    x: fullScreenBounds.maxX - (isCallsRoute ? 12 : Theme.spacing.lg - 8),
-    y: clamp(height - bottomOffset - BUTTON_SIZE, fullScreenBounds.minY, fullScreenBounds.maxY),
-  }), [bottomOffset, fullScreenBounds.maxX, fullScreenBounds.maxY, fullScreenBounds.minY, height, isCallsRoute]);
+    x: fullScreenBounds.minX + 8,
+    y: height,
+  }), [fullScreenBounds.minX, height]);
 
   useEffect(() => {
     let mounted = true;
@@ -127,9 +127,10 @@ export function FloatingAssistantButton() {
           x: clamp(value.x, activeBounds.minX, activeBounds.maxX),
           y: clamp(value.y, activeBounds.minY, activeBounds.maxY),
         };
+        const isNearBottom = value.y >= activeBounds.maxY - 10;
         const desired = {
           x: clamp(value.x, fullScreenBounds.minX, fullScreenBounds.maxX),
-          y: clamp(value.y, fullScreenBounds.minY, fullScreenBounds.maxY),
+          y: isNearBottom ? height : clamp(value.y, fullScreenBounds.minY, fullScreenBounds.maxY),
         };
         desiredPositionRef.current = desired;
         positionRef.current = next;
@@ -162,7 +163,7 @@ export function FloatingAssistantButton() {
       ]}
     >
       <TouchableOpacity activeOpacity={0.84} onPress={() => router.push('/ai-assistant')} style={styles.pressTarget}>
-        <LadLogoMark color={iconColor} size={36} />
+        <Logo variant="icon" size={34} tintColor={iconColor} />
       </TouchableOpacity>
     </Animated.View>
   );

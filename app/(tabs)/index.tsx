@@ -17,6 +17,7 @@ import { Avatar } from '@/components/ui/Avatar';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { DashboardSection } from '@/components/features/DashboardSection';
+import { SalesFunnelSection } from '@/components/features/SalesFunnelSection';
 import { SkeletonSummaryCard, SkeletonActivityRow } from '@/components/ui/SkeletonLoader';
 import { fetchHomeDashboardData, type HomeDashboardData, type HomeDashboardSection } from '@/src/services/homeDashboard';
 import useAuthStore from '@/src/store/authStore';
@@ -25,6 +26,9 @@ import { useAppTheme } from '@/src/theme/appTheme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
+
+const HOME_DASHBOARD_CACHE_KEY = 'tabs.home.dashboard';
+const BACKGROUND_POLL_INTERVAL = 60_000; // 60 s
 
 const relTime = (from?: string) => {
   if (!from) return '';
@@ -51,9 +55,6 @@ const CHANNEL_COLORS = {
   team: '#0891B2',
   billing: '#F59E0B',
 } as const;
-
-const HOME_DASHBOARD_CACHE_KEY = 'tabs.home.dashboard';
-const BACKGROUND_POLL_INTERVAL = 60_000; // 60 s
 
 const formatNumber = (value: number) => {
   if (!Number.isFinite(value)) return '0';
@@ -137,6 +138,7 @@ export default function HomeDashboard() {
   // Silent background polling while screen is focused
   useFocusEffect(
     useCallback(() => {
+      void loadDashboard(false, true);
       pollRef.current = setInterval(() => {
         void loadDashboard(false, true);
       }, BACKGROUND_POLL_INTERVAL);
@@ -170,7 +172,7 @@ export default function HomeDashboard() {
       {
         label: 'Voice Calls',
         value: formatNumber(summary?.totalCalls ?? 0),
-        detail: `${formatNumber(summary?.answeredCalls ?? 0)} answered`,
+        detail: `${formatNumber(summary?.answeredCalls ?? 0)} done · ${formatNumber(summary?.missedCalls ?? 0)} failed`,
         icon: PhoneCall,
         color: appTheme.darkMode ? '#F8FAFC' : CHANNEL_COLORS.voice,
       },
@@ -185,24 +187,16 @@ export default function HomeDashboard() {
   }, [appTheme.darkMode, dashboard]);
 
   const openSection = (section: HomeDashboardSection) => {
+    if (section.channel === 'linkedin') {
+      router.push('/campaigns');
+      return;
+    }
     if (section.channel === 'voice') {
       router.push('/calls');
       return;
     }
     router.push('/chats');
   };
-
-  const headerStatus = error
-    ? 'Data unavailable'
-    : dashboard?.sourceErrors.length
-      ? 'Partial sync'
-      : isLoading
-        ? 'Syncing…'
-        : 'System Active';
-
-  const introText = dashboard
-    ? `${formatNumber(dashboard.summary.totalConversations)} conversations · ${formatNumber(dashboard.summary.activeCampaigns)} campaigns · ${formatNumber(dashboard.summary.totalCalls)} calls`
-    : 'Loading your live workspace data…';
 
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
@@ -212,8 +206,7 @@ export default function HomeDashboard() {
           <View style={styles.userInfo}>
             <Avatar fallback={getInitials(user?.name, user?.email)} size="md" />
             <View style={styles.welcomeText}>
-              <Typography variant="caption" color={appTheme.muted}>{headerStatus}</Typography>
-              <Typography variant="h3" color={appTheme.text} style={styles.hubTitle}>Communication Hub</Typography>
+              <Typography variant="h2" color={appTheme.text} style={styles.hubTitle}>Dashboard</Typography>
             </View>
           </View>
           <View style={styles.headerActions}>
@@ -242,13 +235,6 @@ export default function HomeDashboard() {
         }
       >
         <View style={styles.contentMaxWidth}>
-          {/* Intro */}
-          <Animated.View entering={FadeInDown.delay(60).duration(400)} style={styles.intro}>
-            <Typography variant="h2" color={appTheme.text} style={styles.title}>Dashboard</Typography>
-            <Typography variant="bodySmall" color={appTheme.muted}>{introText}</Typography>
-          </Animated.View>
-
-          {/* Summary grid */}
           <View style={styles.summaryGrid}>
             {isLoading
               ? Array.from({ length: columns }).map((_, i) => (
@@ -300,7 +286,6 @@ export default function HomeDashboard() {
             </Animated.View>
           )}
 
-          {/* Activity feed — with skeleton while loading */}
           {isLoading ? (
             <Animated.View entering={FadeIn.delay(120).duration(300)} style={styles.activitySection}>
               <View style={styles.activityTitleRow}>
@@ -348,6 +333,11 @@ export default function HomeDashboard() {
             </Animated.View>
           ) : null}
 
+          {/* Sales funnel — cross-channel lead journey, mirrors web overview */}
+          <Animated.View entering={FadeInDown.delay(240).duration(380)}>
+            <SalesFunnelSection refreshedAt={dashboard?.loadedAt} />
+          </Animated.View>
+
           {/* Dashboard sections */}
           {dashboard?.sections.map((section, index) => {
             const accentColor =
@@ -363,6 +353,7 @@ export default function HomeDashboard() {
                   channel={section.channel}
                   accentColor={accentColor}
                   cards={section.cards}
+                  variants={section.variants}
                   onCardPress={() => openSection(section)}
                 />
               </Animated.View>
@@ -408,6 +399,9 @@ const styles = StyleSheet.create({
   },
   hubTitle: {
     marginTop: 1,
+    fontSize: 30,
+    lineHeight: 36,
+    fontWeight: '800',
   },
   headerActions: {
     flexDirection: 'row',
