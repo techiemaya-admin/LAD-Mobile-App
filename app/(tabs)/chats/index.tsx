@@ -11,7 +11,6 @@ import {
   ImageBackground,
   KeyboardAvoidingView,
   Linking,
-  PermissionsAndroid,
   Platform,
   Pressable,
   BackHandler,
@@ -53,6 +52,8 @@ import {
   Clock,
   CreditCard,
   Download,
+  Eye,
+  EyeOff,
   Globe,
   Heart,
   FileText,
@@ -65,7 +66,6 @@ import {
   Mail,
   MapPin,
   Megaphone,
-  Menu as MenuIcon,
   MessageCircle,
   MessageSquare,
   MessageSquarePlus,
@@ -102,6 +102,7 @@ import {
   Volume2,
   VolumeX,
   X,
+  Zap,
   Mic,
   PlayCircle,
   PauseCircle,
@@ -115,8 +116,10 @@ import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 import { SkeletonConversationRow, SkeletonMessageBlock } from '@/components/ui/SkeletonLoader';
 import { getFriendlyError } from '@/src/utils/errors';
 import { LadLogoMark } from '@/components/ui/LadLogoMark';
+import { ImportLeadsModal } from '@/components/features/ImportLeadsModal';
 import { ChatChannel, ChatMessage, Conversation, useChatStore } from '@/src/store/chatStore';
-import { RESOLVED_API_URL, apiDelete, apiPatch, apiPost, buildApiUrl, getAuthToken, safeStorage } from '@/src/api';
+import type { ConnectedIntegration } from '@/src/types/chat';
+import { RESOLVED_API_URL, apiDelete, apiGet, apiPatch, apiPost, buildApiUrl, getAuthToken, safeStorage } from '@/src/api';
 import useAuthStore from '@/src/store/authStore';
 import {
   assignConversationHandler,
@@ -146,11 +149,15 @@ import {
   getEmailBroadcastGroup,
   getEmailBroadcastRun,
   getEmailBroadcastRuns,
+  sendEmailBroadcast,
   sendEmailBroadcastToGroup,
   type EmailBroadcastGroup,
   type EmailBroadcastGroupDetail,
+  type EmailBroadcastChannel,
+  type EmailBroadcastRecipient,
   type EmailBroadcastRun,
   type EmailBroadcastRunDetail,
+  type ConnectedEmailAccount,
 } from '@/src/services/emailBroadcast.service';
 import {
   addConversationsToBroadcastGroup,
@@ -160,10 +167,11 @@ import {
   getBroadcastGroupMembers,
   getStarredMessages,
   getWabaChatSettings,
-  createWhatsAppLabel,
+  getWhatsAppTemplates,
   removeBroadcastGroupMember,
   sendEmailReply,
   sendTemplateToBroadcastGroups,
+  sendTemplateToConversation,
   sendTemplateToConversations,
   updateBroadcastGroup,
   updateWabaChatSettings,
@@ -183,6 +191,8 @@ const CHAT_DARK_BACKGROUND_IMAGE = require('../../../assets/images/chat-dark-bg.
 const WEB_INPUT_RESET = Platform.OS === 'web' ? ({ outlineStyle: 'none', boxShadow: 'none' } as any) : null;
 
 type ChannelFilterId = 'all' | 'unread' | ChatChannel | 'personal' | 'waba' | 'outlook';
+type WhatsAppListFilter = 'all' | 'unread';
+type LinkedInStatusFilter = 'all' | 'pending' | 'accepted' | 'active';
 // Mirrors lad-frontend-2's ConversationsPage tabs: Gmail and Outlook are separate
 // channels (with Gmail red / Outlook blue), plus Custom SMTP as plain Email.
 const CHANNELS: { id: ChannelFilterId; label: string; color: string }[] = [
@@ -312,11 +322,17 @@ const WhatsAppBusinessLogo = ({ size = 28 }: { size?: number }) => (
   <Image source={require('@/assets/images/whatsapp-business.png')} style={{ width: size, height: size, resizeMode: 'contain' }} />
 );
 
+const LinkedInLogo = ({ size = 28 }: { size?: number }) => (
+  <Image source={require('@/assets/images/linkedin.png')} style={{ width: size, height: size, resizeMode: 'contain' }} />
+);
+
 // Full-colour brand logo for a channel filter, shown like the Outlook mark in the
 // channel selector. Returns null for channels without a brand logo (falls back to a dot).
 const ChannelBrandLogo = ({ id, size = 20 }: { id: string; size?: number }) => {
   if (id === 'outlook') return <OutlookLogo size={size} />;
   if (id === 'gmail') return <GmailLogo size={size} />;
+  if (id === 'email') return <Mail color={EMAIL_PROVIDER_META.custom.color} size={Math.max(15, size * 0.9)} />;
+  if (id === 'linkedin') return <LinkedInLogo size={size} />;
   if (id === 'waba') return <WhatsAppBusinessLogo size={size} />;
   if (id === 'personal') return <WhatsAppLogo size={size} />;
   return null;
@@ -367,21 +383,67 @@ const getEmailProviderId = (conversation: Conversation): EmailProviderId => {
   return 'custom';
 };
 
+const getBroadcastProviderForAccount = (account?: ConnectedEmailAccount | null): EmailBroadcastChannel | null => {
+  if (!account) {
+    return null;
+  }
+  if (account.provider === 'google') {
+    return 'gmail';
+  }
+  if (account.provider === 'microsoft') {
+    return 'outlook';
+  }
+  return null;
+};
+
+const getAccountProviderForEmailTab = (providerId: EmailProviderId) =>
+  providerId === 'outlook' ? 'microsoft' : providerId === 'custom' ? 'custom_smtp' : 'google';
+
+const parseBroadcastRecipients = (raw: string): EmailBroadcastRecipient[] => {
+  const seen = new Set<string>();
+  return raw
+    .split(/[\n,;]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const match = entry.match(/^(.+?)\s*<([^<>]+@[^<>]+)>$/);
+      if (match) {
+        return {
+          name: match[1].trim().replace(/^["']|["']$/g, ''),
+          email: match[2].trim(),
+        };
+      }
+      return { email: entry };
+    })
+    .filter((recipient) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient.email))
+    .filter((recipient) => {
+      const key = recipient.email.toLowerCase();
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+};
+
+const isBroadcastEmailContact = (conversation: Conversation) =>
+  String(conversation.id ?? '').startsWith('email:') && !conversation.messageCount;
+
 const ATTACHMENT_ACTIONS: {
   id: AttachmentAction;
   label: string;
   icon: React.ComponentType<{ color?: string; size?: number }>;
   color: string;
 }[] = [
-  { id: 'photos', label: 'Photos & Video', icon: ImageIcon, color: '#A83CF0' },
-  { id: 'camera', label: 'Camera', icon: Camera, color: '#F2338A' },
   { id: 'document', label: 'Document', icon: FileText, color: '#2F83FF' },
+  { id: 'photos', label: 'Photos & videos', icon: ImageIcon, color: '#A83CF0' },
+  { id: 'camera', label: 'Camera', icon: Camera, color: '#F2338A' },
   { id: 'audio', label: 'Audio', icon: Music, color: '#FF6908' },
-  { id: 'location', label: 'Location', icon: MapPin, color: '#05C866' },
   { id: 'contact', label: 'Contact', icon: Phone, color: '#14B8A6' },
   { id: 'poll', label: 'Poll', icon: BarChart3, color: '#4F7CFF' },
-  { id: 'template', label: 'Template', icon: FileText, color: '#0A66C2' },
   { id: 'event', label: 'Event', icon: Calendar, color: '#6655F6' },
+  { id: 'sticker', label: 'New sticker', icon: Star, color: '#FACC15' },
+  { id: 'template', label: 'Send template', icon: FileText, color: '#10B981' },
 ];
 
 const getChannelIcon = (channel: ChatChannel) => {
@@ -428,13 +490,43 @@ const getChannelColor = (channel: ChatChannel) => {
   }
 };
 
+// WABA conversation stages (context_status) shown as a coloured capsule on each
+// row — mirrors lad-frontend-2's WABusinessView stage tag colours. Unlike the
+// web (which only reveals the stage name on hover), the APK shows the label text
+// directly inside the capsule.
+const WABA_STAGE_COLORS: Record<string, string> = {
+  greeting: '#3b82f6',
+  info_gathering: '#8b5cf6',
+  booking_in_progress: '#f59e0b',
+  booking_completed: '#10b981',
+  cancelled: '#f43f5e',
+  human: '#f97316',
+  booked: '#10b981',
+  qualified: '#8b5cf6',
+  active: '#8b5cf6',
+};
+const WABA_STAGE_DEFAULT = '#9ca3af';
+const formatContextStatus = (value: string) =>
+  value.replace(/_/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+
 type ChatTemplate = {
   id: string;
   name: string;
+  templateName?: string;
+  subject?: string;
   body: string;
+  bodyHtml?: string | null;
+  bodyText?: string | null;
   category?: string;
   channel: ChatChannel;
   language?: string;
+  parameters?: string[];
+  headerParamCount?: number;
+  headerType?: string;
+  headerUrl?: string;
+  mediaUrl?: string | null;
+  mediaType?: string | null;
+  mediaFilename?: string | null;
 };
 
 const FALLBACK_TEMPLATES: Record<string, ChatTemplate[]> = {
@@ -490,9 +582,35 @@ const FALLBACK_TEMPLATES: Record<string, ChatTemplate[]> = {
 
 const stripHtml = (value: string) => value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
-const getTemplateEndpoint = (channel: ChatChannel) => {
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const looksLikeHtml = (value: string) => /<[a-z][\s\S]*>/i.test(value);
+
+const toEmailBodyHtml = (value: string) => {
+  if (looksLikeHtml(value)) {
+    return value;
+  }
+
+  return value
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, '<br />')}</p>`)
+    .join('');
+};
+
+const toEmailBodyText = (value: string) => (looksLikeHtml(value) ? stripHtml(value) : value.trim());
+
+const getTemplateEndpoint = (channel: ChatChannel, accountId?: string) => {
   if (channel === 'whatsapp') {
-    return '/api/whatsapp-conversations/conversations/templates?channel=waba';
+    const base = '/api/whatsapp-conversations/conversations/templates?channel=waba';
+    return accountId ? `${base}&account_id=${encodeURIComponent(accountId)}` : base;
   }
 
   if (channel === 'linkedin') {
@@ -507,30 +625,150 @@ const getTemplateEndpoint = (channel: ChatChannel) => {
 };
 
 const normalizeTemplate = (item: Record<string, any>, channel: ChatChannel, index: number): ChatTemplate | null => {
-  const rawBody =
+  const metadata = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+  const rawHtml =
+    item.body_html ??
+    item.content_html ??
+    item.html_content ??
+    item.html ??
+    metadata.body_html ??
+    metadata.content_html ??
+    null;
+  const rawText =
+    item.body ??
+    item.content ??
+    item.plain_text ??
+    item.text ??
     item.message_text ??
     item.followup_message ??
     item.connection_message ??
-    item.body ??
-    item.content ??
-    item.html_content ??
-    item.plain_text ??
     item.description ??
+    null;
+  const rawBody =
+    rawHtml ??
+    rawText ??
     '';
   const body = stripHtml(String(rawBody));
 
   if (!body) {
     return null;
   }
+  const bodyParameters = Array.from(new Set(
+    (body.match(/\{\{([^}]+)\}\}/g) || [])
+      .map((placeholder) => placeholder.replace(/^\{\{|\}\}$/g, '').trim())
+      .filter(Boolean),
+  ));
+  const rawParameters = Array.isArray(item.parameters)
+    ? item.parameters
+    : Array.isArray(metadata.parameters)
+      ? metadata.parameters
+      : bodyParameters;
 
   return {
     id: String(item.id ?? item._id ?? item.name ?? `${channel}-template-${index}`),
     name: String(item.name ?? item.title ?? item.template_name ?? `Template ${index + 1}`),
+    templateName: item.template_name ? String(item.template_name) : item.name ? String(item.name) : undefined,
+    subject: item.subject || metadata.subject ? String(item.subject ?? metadata.subject) : undefined,
     body,
-    category: item.category ? String(item.category) : item.metadata?.channel_type ? String(item.metadata.channel_type) : undefined,
+    bodyHtml: rawHtml !== undefined && rawHtml !== null ? String(rawHtml) : null,
+    bodyText: rawText !== undefined && rawText !== null ? String(rawText) : body,
+    category: item.category ? String(item.category) : metadata.channel_type ? String(metadata.channel_type) : undefined,
     channel,
-    language: item.language ?? item.language_code ?? item.metadata?.language_code ? String(item.language ?? item.language_code ?? item.metadata?.language_code) : undefined,
+    language: item.language ?? item.language_code ?? metadata.language_code ? String(item.language ?? item.language_code ?? metadata.language_code) : undefined,
+    parameters: rawParameters.map((parameter: unknown) => String(parameter).trim()).filter(Boolean),
+    headerParamCount: Number(item.header_param_count ?? metadata.header_param_count ?? 0) || 0,
+    headerType: item.header_type ? String(item.header_type) : metadata.header_type ? String(metadata.header_type) : '',
+    headerUrl: item.header_url ? String(item.header_url) : metadata.header_url ? String(metadata.header_url) : '',
+    mediaUrl: metadata.media_url ?? item.media_url ?? null,
+    mediaType: metadata.media_type ?? item.media_type ?? null,
+    mediaFilename: metadata.media_filename ?? item.media_filename ?? null,
   };
+};
+
+const loadEmailTemplatesFromApi = async (): Promise<ChatTemplate[]> => {
+  const response = await apiGet<unknown>('/api/campaigns/email-templates', {
+    params: { is_active: true },
+  });
+  const payload = response.data;
+  const record = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as Record<string, any>
+    : {};
+  const raw = Array.isArray(payload)
+    ? payload
+    : Array.isArray(record.data)
+      ? record.data
+      : Array.isArray(record.templates)
+        ? record.templates
+        : Array.isArray(record.items)
+          ? record.items
+          : [];
+
+  return raw
+    .map((item, index) => normalizeTemplate(item as Record<string, any>, 'email', index))
+    .filter((template): template is ChatTemplate => Boolean(template));
+};
+
+const substituteConversationVariables = (text: string, conversation?: Conversation | null) => {
+  if (!text || !conversation) {
+    return text;
+  }
+
+  const full = (conversation.name || '').trim();
+  const first = full.split(/\s+/)[0] || '';
+  const last = full.split(/\s+/).slice(1).join(' ') || '';
+  const company = (conversation.company || '').trim();
+
+  const replace = (source: string, key: string, value: string) =>
+    value ? source.replace(new RegExp(`\\{\\{?\\s*${key}\\s*\\}\\}?`, 'gi'), value) : source;
+
+  let output = text;
+  output = replace(output, 'first_name', first);
+  output = replace(output, 'last_name', last);
+  output = replace(output, 'name', full);
+  output = replace(output, 'company(?:_name)?', company);
+  return output;
+};
+
+const getConversationTemplateValue = (parameter: string, conversation?: Conversation | null) => {
+  const key = parameter.trim().toLowerCase();
+  const fullName = (conversation?.name || '').trim();
+  const firstName = fullName.split(/\s+/)[0] || fullName;
+  const company = (conversation?.company || '').trim();
+  const phone = (conversation?.phone || '').trim();
+  const email = (conversation?.email || '').trim();
+
+  if (!key || /^\d+$/.test(key)) {
+    return firstName || fullName || 'there';
+  }
+  if (key.includes('first')) {
+    return firstName || fullName || 'there';
+  }
+  if (key.includes('name')) {
+    return fullName || firstName || 'there';
+  }
+  if (key.includes('company') || key.includes('business')) {
+    return company || fullName || firstName || 'your company';
+  }
+  if (key.includes('phone') || key.includes('mobile')) {
+    return phone || fullName || firstName || 'your number';
+  }
+  if (key.includes('mail')) {
+    return email || fullName || firstName || 'your email';
+  }
+
+  return fullName || firstName || company || phone || 'there';
+};
+
+const buildTemplateParameters = (template: ChatTemplate, conversation?: Conversation | null) => {
+  const parameters = template.parameters?.length
+    ? template.parameters
+    : Array.from(new Set(
+        (template.body.match(/\{\{([^}]+)\}\}/g) || [])
+          .map((placeholder) => placeholder.replace(/^\{\{|\}\}$/g, '').trim())
+          .filter(Boolean),
+      ));
+
+  return parameters.map((parameter) => getConversationTemplateValue(parameter, conversation));
 };
 
 const getFallbackTemplates = (channel: ChatChannel) => {
@@ -615,6 +853,29 @@ const isEmailChannel = (channel: ChatChannel) => channel === 'email' || channel 
 const isLinkedInChannel = (channel: ChatChannel) => channel === 'linkedin';
 const isWhatsAppChannel = (channel: ChatChannel) => channel === 'whatsapp';
 const isInstagramChannel = (channel: ChatChannel) => channel === 'instagram';
+const isWhatsAppFilterTab = (filter: ChannelFilterId) => filter === 'personal' || filter === 'waba' || filter === 'whatsapp';
+const conversationMatchesWhatsAppTab = (conversation: Conversation, filter: ChannelFilterId) => {
+  if (conversation.channel !== 'whatsapp') {
+    return false;
+  }
+  if (filter === 'personal') {
+    return conversation.waBackendChannel === 'personal';
+  }
+  if (filter === 'waba') {
+    return conversation.waBackendChannel === 'waba';
+  }
+  return isWhatsAppFilterTab(filter);
+};
+const getLinkedInConversationStatus = (conversation: Conversation): LinkedInStatusFilter => {
+  const raw = `${conversation.conversationState ?? ''} ${(conversation.tags ?? []).join(' ')}`.toLowerCase();
+  if (raw.includes('active')) {
+    return 'active';
+  }
+  if (raw.includes('accepted') || raw.includes('connected')) {
+    return 'accepted';
+  }
+  return 'pending';
+};
 const getChannelLabel = (channel: ChatChannel) => {
   if (channel === 'gmail' || channel === 'email') {
     return 'Email';
@@ -648,6 +909,32 @@ const getConversationSearchLabel = (conversation: Conversation) =>
 
 const sortNewestConversations = (items: Conversation[]) =>
   [...items].sort((a, b) => Date.parse(b.lastMessageAt ?? '') - Date.parse(a.lastMessageAt ?? ''));
+
+type WhatsAppIntegrationSource = 'personal' | 'waba';
+
+const getConnectedWhatsAppSources = (integrations: ConnectedIntegration[]) => {
+  const sources = new Set<WhatsAppIntegrationSource>();
+  if (integrations.some((integration) => integration.label === 'WhatsApp Personal' && integration.connected)) {
+    sources.add('personal');
+  }
+  if (integrations.some((integration) => integration.label === 'WhatsApp API Agent' && integration.connected)) {
+    sources.add('waba');
+  }
+  return sources;
+};
+
+const matchesConnectedWhatsAppSource = (
+  conversation: Conversation,
+  connectedSources: Set<WhatsAppIntegrationSource>,
+) => (
+  conversation.channel === 'whatsapp' &&
+  connectedSources.has(conversation.waBackendChannel ?? 'personal')
+);
+
+const matchesConnectedWhatsAppGroupSource = (
+  group: BroadcastGroup,
+  connectedSources: Set<WhatsAppIntegrationSource>,
+) => connectedSources.has(group.waBackendChannel ?? 'personal');
 
 const WHATSAPP_CONTACT_CHANNEL = 'personal';
 
@@ -891,7 +1178,8 @@ const WABA_BNI_MEDIA_BASE = (
 ).replace(/\/+$/, '');
 
 const getBackendMediaUrl = (mediaId: string) => {
-  if (mediaId.startsWith('http') || mediaId.startsWith('blob:')) return mediaId;
+  // Local copies of sent attachments (blob:/data:/file:) render directly — never proxy them
+  if (/^(https?:|blob:|data:|file:)/.test(mediaId)) return mediaId;
   if (Platform.OS !== 'web') {
     if (mediaId.startsWith('pwa_')) {
       // Personal WhatsApp media — WAPA service, path unchanged
@@ -1024,11 +1312,7 @@ const MessageStatusIcon = ({ message }: { message: ChatMessage }) => {
     return <Check color={appTheme.disabled} size={14} />;
   }
 
-  return (
-    <Typography variant="caption" color={Theme.colors.error}>
-      Failed
-    </Typography>
-  );
+  return <AlertCircle color={Theme.colors.error} size={14} />;
 };
 
 const ConversationRow = memo(({
@@ -1049,6 +1333,10 @@ const ConversationRow = memo(({
     : waBackendChannel === 'waba'
       ? 'WA Business'
       : getChannelLabel(conversation.channel);
+  // Conversation stage (context_status) as the second capsule, e.g. "Greeting".
+  const stageRaw = conversation.channel === 'whatsapp' ? conversation.conversationState?.trim() : undefined;
+  const stageLabel = stageRaw ? formatContextStatus(stageRaw) : '';
+  const stageColor = stageRaw ? WABA_STAGE_COLORS[stageRaw.toLowerCase()] ?? WABA_STAGE_DEFAULT : WABA_STAGE_DEFAULT;
 
   return (
     <TouchableOpacity
@@ -1079,12 +1367,6 @@ const ConversationRow = memo(({
             <Typography variant="h4" numberOfLines={1} style={[styles.conversationName, { color: appTheme.text }]}>
               {conversation.name}
             </Typography>
-            {/* Labels render as compact colored tag icons beside the name (mirrors lad-frontend-2), not as text chips. */}
-            {conversation.tags?.slice(0, 3).map((tag, idx) => {
-              const TAG_ICON_COLORS = ['#8B5CF6', '#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#6366F1'];
-              const tagColor = TAG_ICON_COLORS[idx % TAG_ICON_COLORS.length];
-              return <Tag key={tag} color={tagColor} fill={`${tagColor}22`} size={13} style={{ marginLeft: idx === 0 ? 4 : 2 }} />;
-            })}
           </View>
           <View style={[styles.timePill, { backgroundColor: appTheme.softSurface }]}>
             <Typography variant="caption" color={appTheme.muted} style={styles.timeText}>
@@ -1113,7 +1395,14 @@ const ConversationRow = memo(({
               {channelLabel}
             </Typography>
           </View>
-          {conversation.company ? (
+          {stageLabel ? (
+            <View style={[styles.stagePill, { backgroundColor: `${stageColor}1F`, borderColor: `${stageColor}45` }]}>
+              <View style={[styles.stageDot, { backgroundColor: stageColor }]} />
+              <Typography variant="caption" style={[styles.channelPillText, { color: stageColor }]} numberOfLines={1}>
+                {stageLabel}
+              </Typography>
+            </View>
+          ) : conversation.company ? (
             <Typography variant="caption" color={appTheme.disabled} numberOfLines={1} style={styles.companyText}>
               {conversation.company}
             </Typography>
@@ -1314,6 +1603,8 @@ const EmailMessageCard = memo(({
   );
 });
 
+EmailConversationRow.displayName = 'EmailConversationRow';
+EmailMessageCard.displayName = 'EmailMessageCard';
 ConversationRow.displayName = 'ConversationRow';
 const SecureImage = ({ uri, headers, style, resizeMode, onLoad }: any) => {
   const [displayUri, setDisplayUri] = useState<string | null>(null);
@@ -1439,11 +1730,23 @@ const MessageBubble = memo(({
 
   // Detect special message types
   const hasLocationCoords = message.latitude != null && message.longitude != null;
-  const isLocationMessage = hasLocationCoords || message.content?.startsWith('Location shared');
+  const isLocationMessage = hasLocationCoords || message.content?.includes('Location shared');
   const locationLines = (isLocationMessage && !hasLocationCoords) ? message.content.split('\n') : [];
   const locationDisplayName = message.locationName || locationLines[1] || 'Location';
-  const locationLat = message.latitude ?? undefined;
-  const locationLon = message.longitude ?? undefined;
+
+  // Try to extract coordinates from Google Maps link in text
+  let extractedLat: number | undefined = undefined;
+  let extractedLon: number | undefined = undefined;
+  if (!hasLocationCoords && isLocationMessage && message.content) {
+    const match = message.content.match(/q=(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (match) {
+      extractedLat = parseFloat(match[1]);
+      extractedLon = parseFloat(match[2]);
+    }
+  }
+
+  const locationLat = message.latitude ?? extractedLat;
+  const locationLon = message.longitude ?? extractedLon;
   // Build map links from coordinates (prefer coords over embedded link in content)
   const googleMapsUrl = (locationLat != null && locationLon != null)
     ? `https://maps.google.com/maps?q=${locationLat},${locationLon}`
@@ -1454,27 +1757,26 @@ const MessageBubble = memo(({
   const wazeUrl = (locationLat != null && locationLon != null)
     ? `https://waze.com/ul?ll=${locationLat},${locationLon}&navigate=yes`
     : undefined;
+  const googleMapsApiKey = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '';
   const staticMapImageUrl = (locationLat != null && locationLon != null)
-    ? `https://staticmap.openstreetmap.de/staticmap.php?center=${locationLat},${locationLon}&zoom=14&size=400x200&markers=${locationLat},${locationLon},red`
+    ? `https://maps.googleapis.com/maps/api/staticmap?center=${locationLat},${locationLon}&zoom=15&size=300x140&markers=color:red%7C${locationLat},${locationLon}${googleMapsApiKey ? `&key=${googleMapsApiKey}` : ''}`
     : undefined;
 
-  // Check if content is just the media identifier or a common placeholder
-  const isWaMediaPlaceholder = message.content && (
-    message.content.trim() === '\u{1F4F7} Photo' ||
-    message.content.trim() === '\u{1F4F8} Photo' ||
-    message.content.trim() === 'Photo' ||
-    message.content.trim() === '\u{1F3A5} Video' ||
-    message.content.trim() === 'Video' ||
-    message.content.trim() === '\u{1F4C4} Document' ||
-    message.content.trim() === 'Document' ||
-    message.content.trim() === '\u{1F3B5} Audio' ||
-    message.content.trim() === 'Audio' ||
-    message.content.trim() === '\u{1F3A4} Voice message' ||
-    message.content.trim() === 'Voice message' ||
-    message.content.trim() === 'image' ||
-    message.content.trim() === 'video' ||
-    message.content.trim() === 'audio' ||
-    message.content.trim() === 'document'
+  // Check if content is just the media identifier or a common placeholder.
+  // Case-insensitive: the WABA backend stores outbound media rows with
+  // capitalised placeholders ("Image", "Video", …).
+  const normalizedContent = (message.content || '').trim().toLowerCase();
+  const isWaMediaPlaceholder = !!message.content && (
+    [
+      '\u{1F4F7} photo', '\u{1F4F8} photo', 'photo',
+      '\u{1F3A5} video', 'video',
+      '\u{1F4C4} document', 'document',
+      '\u{1F3B5} audio', 'audio',
+      '\u{1F3A4} voice message', 'voice message',
+      'image', 'attachment',
+    ].includes(normalizedContent) ||
+    // Bare WhatsApp media id (15-16 digit number) echoed back as content
+    /^\d{10,}$/.test(normalizedContent)
   );
 
   // content is a raw filename (e.g. "Mr LAD.png") — treat as media ref so it isn't shown as caption
@@ -1510,6 +1812,7 @@ const MessageBubble = memo(({
   const mediaUrl = hasMediaId ? getBackendMediaUrl(message.mediaId!) : null;
 
   const hasOnlyMedia = (imageAttachments.length > 0 || isImageMedia || isVideoMedia) && !displayCaption && docAttachments.length === 0 && !isDocumentMedia;
+  const [mapImageError, setMapImageError] = React.useState(false);
 
   return (
     <View
@@ -1596,57 +1899,49 @@ const MessageBubble = memo(({
             />
           </TouchableOpacity>
         )}
+                    {/* Location card — matches LAD frontend-2 LocationCard */}
+                    {isLocationMessage ? (
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => googleMapsUrl ? void Linking.openURL(googleMapsUrl).catch(() => undefined) : undefined}
+                        style={styles.locationCard}
+                      >
+                        {/* Static map thumbnail — dark gray bg like frontend-2 */}
+                        <View style={styles.locationMapPreview}>
+                          {staticMapImageUrl && !mapImageError && (
+                            <Image
+                              source={{ uri: staticMapImageUrl }}
+                              style={{ width: '100%', height: '100%' }}
+                              resizeMode="cover"
+                              onError={() => setMapImageError(true)}
+                            />
+                          )}
+                          {/* Pin overlay — always centered, same as frontend-2 */}
+                          <View style={styles.locationPinOverlay}>
+                            <MapPin color="#EF4444" size={32} fill="#EF4444" />
+                          </View>
+                        </View>
 
-        {/* Location card */}
-        {isLocationMessage ? (
-          <View style={[styles.locationCard, { borderColor: isAgent ? 'rgba(255,255,255,0.24)' : appTheme.border, padding: 0, overflow: 'hidden' }]}>
-            {staticMapImageUrl ? (
-              <Image
-                source={{ uri: staticMapImageUrl }}
-                style={{ width: '100%', height: 140, backgroundColor: appTheme.softSurface }}
-                resizeMode="cover"
-              />
-            ) : (
-              <View style={{ height: 80, backgroundColor: appTheme.softSurface, justifyContent: 'center', alignItems: 'center' }}>
-                <MapPin color={appTheme.muted} size={32} />
-              </View>
-            )}
-            {(locationLat != null && locationLon != null) ? (
-              <View style={{ paddingHorizontal: 10, paddingTop: 6, paddingBottom: 2 }}>
-                <Typography variant="caption" color={isAgent ? 'rgba(255,255,255,0.55)' : appTheme.disabled} style={{ fontSize: 10 }}>
-                  {`${locationLat.toFixed(4)}, ${locationLon.toFixed(4)}`}
-                </Typography>
-              </View>
-            ) : null}
-            <View style={{ paddingHorizontal: 10, paddingTop: 4, paddingBottom: 4 }}>
-              <Typography variant="bodySmall" color={isAgent ? palette.outgoingText : leadTextColor} style={{ fontWeight: '600' }}>
-                📍 {locationDisplayName || 'Location shared'}
-              </Typography>
-            </View>
-            {googleMapsUrl ? (
-              <View style={{ paddingHorizontal: 10, paddingBottom: 6, gap: 2 }}>
-                <TouchableOpacity onPress={() => void Linking.openURL(googleMapsUrl).catch(() => undefined)} activeOpacity={0.7}>
-                  <Typography variant="caption" color="#2563EB" style={{ textDecorationLine: 'underline' }}>
-                    🗺️ Google Maps
-                  </Typography>
-                </TouchableOpacity>
-                {appleMapsUrl ? (
-                  <TouchableOpacity onPress={() => void Linking.openURL(appleMapsUrl).catch(() => undefined)} activeOpacity={0.7}>
-                    <Typography variant="caption" color="#2563EB" style={{ textDecorationLine: 'underline' }}>
-                      🍎 Apple Maps
-                    </Typography>
-                  </TouchableOpacity>
-                ) : null}
-                {wazeUrl ? (
-                  <TouchableOpacity onPress={() => void Linking.openURL(wazeUrl).catch(() => undefined)} activeOpacity={0.7}>
-                    <Typography variant="caption" color="#2563EB" style={{ textDecorationLine: 'underline' }}>
-                      🚗 Waze
-                    </Typography>
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            ) : null}
-          </View>
+                        {/* Label bar — dark bg, white text + coords, matches frontend-2 */}
+                        <View style={styles.locationLabelBar}>
+                          <Typography
+                            variant="body"
+                            style={styles.locationLabelText}
+                            numberOfLines={1}
+                          >
+                            {locationDisplayName || 'Current location'}
+                          </Typography>
+                          {locationLat != null && locationLon != null && (
+                            <Typography
+                              variant="caption"
+                              style={styles.locationCoords}
+                              numberOfLines={1}
+                            >
+                              {`${locationLat.toFixed(6)}, ${locationLon.toFixed(6)}`}
+                            </Typography>
+                          )}
+                        </View>
+                      </TouchableOpacity>
         ) : (
           !hasOnlyMedia && displayCaption ? (
             <Text
@@ -1662,7 +1957,13 @@ const MessageBubble = memo(({
                   return (
                     <Text
                       key={i}
-                      style={{ color: isAgent ? 'rgba(255,255,255,0.9)' : '#2563EB', textDecorationLine: 'underline' }}
+                      style={{
+                        color: isAgent
+                          ? appTheme.darkMode ? '#93C5FD' : '#027EB5'
+                          : '#1A73E8',
+                        textDecorationLine: 'underline',
+                        fontWeight: '500',
+                      }}
                       onPress={() => void Linking.openURL(href).catch(() => undefined)}
                     >
                       {part}
@@ -1778,8 +2079,149 @@ MessageBubble.displayName = 'MessageBubble';
 
 type AgentMode = 'ai' | 'human';
 const getAgentModeFromConversation = (conversation?: Conversation | null): AgentMode => {
+  if (conversation?.ownerType === 'human_agent') {
+    return 'human';
+  }
+
+  if (conversation?.ownerType === 'AI') {
+    return 'ai';
+  }
+
   const owner = `${conversation?.ownerType ?? ''} ${conversation?.owner ?? ''}`;
-  return /human_agent|human/i.test(owner) ? 'human' : 'ai';
+  if (/ai[_\s-]?agent|bot|assistant|automation|\bai\b/i.test(owner)) {
+    return 'ai';
+  }
+
+  return /human[_\s-]?agent|human|manual|team member/i.test(owner) ? 'human' : 'ai';
+};
+
+type MetadataRow = {
+  label: string;
+  value: string;
+};
+
+const METADATA_SKIP_KEYS = new Set([
+  'avatar',
+  'body',
+  'caption',
+  'content',
+  'file_url',
+  'filename',
+  'last_message',
+  'last_message_content',
+  'media_filename',
+  'media_id',
+  'media_type',
+  'message',
+  'messages',
+  'preview',
+  'text',
+  'url',
+]);
+
+const isPresentMetadataValue = (value: unknown): boolean => {
+  if (value === undefined || value === null || value === '') {
+    return false;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+
+  if (typeof value === 'object') {
+    return Object.keys(value as Record<string, unknown>).length > 0;
+  }
+
+  return true;
+};
+
+const formatMetadataLabel = (key: string) =>
+  key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const formatMetadataValue = (value: unknown): string => {
+  if (typeof value === 'boolean') {
+    return value ? 'Yes' : 'No';
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : '';
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'object' ? JSON.stringify(item) : String(item)))
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  if (value && typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '';
+    }
+  }
+
+  return '';
+};
+
+const getBackendMetadataRows = (conversation: Conversation): MetadataRow[] => {
+  const metadata = {
+    ...(conversation.metadata ?? {}),
+    ...(conversation.contactMetadata ?? {}),
+  };
+  const seen = new Set<string>();
+
+  return Object.entries(metadata)
+    .filter(([key, value]) => !METADATA_SKIP_KEYS.has(key) && isPresentMetadataValue(value))
+    .map(([key, value]) => ({
+      label: formatMetadataLabel(key),
+      value: formatMetadataValue(value),
+    }))
+    .filter((row) => {
+      const dedupeKey = `${row.label.toLowerCase()}:${row.value}`;
+      if (!row.value || seen.has(dedupeKey)) {
+        return false;
+      }
+
+      seen.add(dedupeKey);
+      return true;
+    });
+};
+
+const getContactMetadataRows = (
+  conversation: Conversation,
+  stateLabel: string,
+  ownerLabel: string,
+  messageCount: number,
+): MetadataRow[] => {
+  const rows: MetadataRow[] = [
+    { label: 'Status', value: stateLabel },
+    { label: 'Owner', value: ownerLabel },
+    { label: 'Channel', value: getChannelLabel(conversation.channel) },
+    { label: 'Messages', value: String(conversation.messageCount || messageCount) },
+    ...getBackendMetadataRows(conversation),
+  ];
+  const seen = new Set<string>();
+
+  return rows.filter((row) => {
+    const dedupeKey = row.label.toLowerCase();
+    if (!row.value || seen.has(dedupeKey)) {
+      return false;
+    }
+
+    seen.add(dedupeKey);
+    return true;
+  });
 };
 
 const confirmHumanTakeover = () => new Promise<boolean>((resolve) => {
@@ -1792,15 +2234,18 @@ const confirmHumanTakeover = () => new Promise<boolean>((resolve) => {
   }
 
   Alert.alert(title, message, [
-    { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
     { text: 'Take Over', style: 'default', onPress: () => resolve(true) },
+    { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
   ]);
 });
 
-type AttachmentAction = 'photos' | 'camera' | 'document' | 'audio' | 'location' | 'contact' | 'poll' | 'template' | 'event';
+type AttachmentAction = 'photos' | 'camera' | 'document' | 'audio' | 'location' | 'contact' | 'poll' | 'template' | 'event' | 'sticker';
 type QuickComposerAction = 'location' | 'contact' | 'poll' | 'event';
 type QuickComposerDraft = {
   locationName: string;
+  locationAddress?: string;
+  latitude?: number;
+  longitude?: number;
   locationLink: string;
   contactName: string;
   contactPhone: string;
@@ -1827,6 +2272,9 @@ type MenuAction =
 
 const EMPTY_QUICK_DRAFT: QuickComposerDraft = {
   locationName: '',
+  locationAddress: undefined,
+  latitude: undefined,
+  longitude: undefined,
   locationLink: '',
   contactName: '',
   contactPhone: '',
@@ -1972,11 +2420,51 @@ const AttachmentActionButton = ({
   const appTheme = useAppTheme();
 
   return (
-    <TouchableOpacity style={styles.attachmentActionItem} activeOpacity={0.78} onPress={onPress}>
+    <TouchableOpacity
+      style={[styles.attachmentActionItem, { backgroundColor: appTheme.input, borderColor: appTheme.borderSoft }]}
+      activeOpacity={0.78}
+      onPress={onPress}
+    >
       <View style={[styles.attachmentActionIcon, { backgroundColor: color }]}>
-        <Icon color="#FFFFFF" size={24} />
+        <Icon color="#FFFFFF" size={22} />
       </View>
-      <Typography variant="bodySmall" color={appTheme.muted} align="center" style={styles.attachmentActionLabel}>
+      <Typography variant="caption" color={appTheme.text} style={styles.attachmentActionLabel} numberOfLines={2}>
+        {label}
+      </Typography>
+    </TouchableOpacity>
+  );
+};
+
+const ChannelFilterPill = ({
+  icon: Icon,
+  label,
+  active,
+  accent,
+  onPress,
+}: {
+  icon: React.ComponentType<{ color?: string; size?: number }>;
+  label: string;
+  active: boolean;
+  accent: string;
+  onPress: () => void;
+}) => {
+  const appTheme = useAppTheme();
+  const color = active ? accent : appTheme.muted;
+
+  return (
+    <TouchableOpacity
+      style={[
+        styles.channelFilterPill,
+        {
+          backgroundColor: active ? `${accent}20` : appTheme.input,
+          borderColor: active ? `${accent}80` : appTheme.border,
+        },
+      ]}
+      activeOpacity={0.78}
+      onPress={onPress}
+    >
+      <Icon color={color} size={14} />
+      <Typography variant="caption" color={color} style={styles.channelFilterPillText} numberOfLines={1}>
         {label}
       </Typography>
     </TouchableOpacity>
@@ -2510,11 +2998,18 @@ const AssignmentWorkflowPanel = ({
 
   const membersById = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
   const currentAssigneeId = assignment?.current?.assignedToUserId ?? null;
+  // Once the assignment has been loaded (or optimistically set), trust it as the
+  // source of truth: a null `current` means the conversation is unassigned, even
+  // if the conversation record still carries a stale `owner` name. Only fall back
+  // to `conversation.owner` before the first load, to avoid a flash of "Unassigned".
+  const assignmentLoaded = assignment !== null;
   const currentAssignee = currentAssigneeId
     ? membersById.get(currentAssigneeId) ?? { id: currentAssigneeId, name: conversation.owner || 'Team member' }
-    : conversation.owner && !/^ai$/i.test(conversation.owner)
-      ? { id: 'owner', name: conversation.owner }
-      : null;
+    : assignmentLoaded
+      ? null
+      : conversation.owner && !/^ai$/i.test(conversation.owner)
+        ? { id: 'owner', name: conversation.owner }
+        : null;
 
   const loadAssignment = useCallback(async () => {
     setLoading(true);
@@ -2553,12 +3048,21 @@ const AssignmentWorkflowPanel = ({
     setNotice(null);
 
     try {
-      const nextAssignment = member
-        ? await assignConversationToTeamMember(conversation.id, member.id)
-        : await unassignConversationFromTeamMember(conversation.id);
-      setAssignment(nextAssignment);
-      setPickerOpen(false);
-      setNotice(member ? `Assigned to ${member.name}` : 'Conversation returned to AI');
+      if (member) {
+        const nextAssignment = await assignConversationToTeamMember(conversation.id, member.id);
+        setAssignment(nextAssignment);
+        setPickerOpen(false);
+        setNotice(`Assigned to ${member.name}`);
+      } else {
+        // Optimistically clear the assignment immediately so the UI reflects
+        // the unassignment without waiting for the re-fetch. The backend
+        // /threads/:id/unassign call persists it (mirrors lad-frontend-2), and
+        // the re-fetch below confirms current === null.
+        setAssignment({ current: null, history: assignment?.history ?? [] });
+        setPickerOpen(false);
+        await unassignConversationFromTeamMember(conversation.id);
+        setNotice('Conversation unassigned');
+      }
       onAssignmentChanged?.();
       void loadAssignment();
     } catch (requestError) {
@@ -2566,7 +3070,7 @@ const AssignmentWorkflowPanel = ({
     } finally {
       setAssigningId(null);
     }
-  }, [conversation.id, loadAssignment, onAssignmentChanged]);
+  }, [assignment, conversation.id, loadAssignment, onAssignmentChanged]);
 
   const initials = getInitials(currentAssignee?.name || conversation.owner || 'TE') || 'TE';
   const recentHistory = assignment?.history?.slice(0, 3) ?? [];
@@ -2720,6 +3224,7 @@ const NotesWorkflowPanel = ({
 }) => {
   const appTheme = useAppTheme();
   const currentUser = useAuthStore((state) => state.user);
+  const canManageExistingNotes = conversation.channel === 'whatsapp';
   const [notes, setNotes] = useState<ConversationNote[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2799,11 +3304,7 @@ const NotesWorkflowPanel = ({
       internal ? 'Delete internal comment?' : 'Delete note?',
       'This cannot be undone.',
       [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
+        { text: 'Delete', style: 'destructive', onPress: async () => {
             try {
               await deleteConversationNote(note.id);
               setNotes((current) => current.filter((item) => item.id !== note.id));
@@ -2812,6 +3313,7 @@ const NotesWorkflowPanel = ({
             }
           },
         },
+        { text: 'Cancel', style: 'cancel' },
       ],
     );
   }, [internal]);
@@ -2895,28 +3397,30 @@ const NotesWorkflowPanel = ({
               ) : (
                 <>
                   <View style={styles.noteMetaRow}>
-                    <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={styles.noteMetaText}>
-                      {note.authorName || 'Agent'}{note.createdAt ? ` - ${formatTime(note.createdAt)}` : ''}
-                    </Typography>
-                    <View style={styles.noteActionRow}>
-                      <TouchableOpacity
-                        style={[styles.noteTextButton, { borderColor: appTheme.border }]}
-                        activeOpacity={0.76}
-                        onPress={() => {
-                          setEditingId(note.id);
-                          setEditingContent(note.displayContent);
-                        }}
-                      >
-                        <Typography variant="caption" color={appTheme.primaryAccent}>Edit</Typography>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.noteTextButton, { borderColor: appTheme.border }]}
-                        activeOpacity={0.76}
-                        onPress={() => handleDeleteNote(note)}
-                      >
-                        <Typography variant="caption" color={Theme.colors.error}>Delete</Typography>
-                      </TouchableOpacity>
-                    </View>
+                  <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={styles.noteMetaText}>
+                    {note.authorName || 'Agent'}{note.createdAt ? ` - ${formatTime(note.createdAt)}` : ''}
+                  </Typography>
+                    {canManageExistingNotes ? (
+                      <View style={styles.noteActionRow}>
+                        <TouchableOpacity
+                          style={[styles.noteTextButton, { borderColor: appTheme.border }]}
+                          activeOpacity={0.76}
+                          onPress={() => {
+                            setEditingId(note.id);
+                            setEditingContent(note.displayContent);
+                          }}
+                        >
+                          <Typography variant="caption" color={appTheme.primaryAccent}>Edit</Typography>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[styles.noteTextButton, { borderColor: appTheme.border }]}
+                          activeOpacity={0.76}
+                          onPress={() => handleDeleteNote(note)}
+                        >
+                          <Typography variant="caption" color={Theme.colors.error}>Delete</Typography>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
                   </View>
                   <Typography variant="bodySmall" color={appTheme.text} style={styles.noteContent}>
                     {note.displayContent}
@@ -2938,6 +3442,32 @@ const NotesWorkflowPanel = ({
   );
 };
 
+const UnsupportedWorkflowPanel = ({
+  icon: Icon = Info,
+  title,
+  description,
+}: {
+  icon?: React.ComponentType<{ color?: string; size?: number }>;
+  title: string;
+  description: string;
+}) => {
+  const appTheme = useAppTheme();
+
+  return (
+    <View style={[styles.workflowCard, { backgroundColor: appTheme.warningSoft, borderColor: Theme.colors.warning }]}>
+      <View style={styles.unsupportedWorkflowContent}>
+        <Icon color={Theme.colors.warning} size={24} />
+        <Typography variant="bodySmall" color={Theme.colors.warning} style={styles.unsupportedWorkflowTitle}>
+          {title}
+        </Typography>
+        <Typography variant="caption" color={Theme.colors.warning} style={styles.unsupportedWorkflowCopy}>
+          {description}
+        </Typography>
+      </View>
+    </View>
+  );
+};
+
 const ContactWorkflowTabs = ({
   conversation,
   onAssignmentChanged,
@@ -2947,6 +3477,9 @@ const ContactWorkflowTabs = ({
 }) => {
   const appTheme = useAppTheme();
   const [activeTab, setActiveTab] = useState<'assignment' | 'notes' | 'internal'>('assignment');
+  const assignmentSupported = conversation.channel === 'whatsapp';
+  const notesSupported = conversation.channel === 'whatsapp' || conversation.channel === 'linkedin';
+  const internalSupported = conversation.channel === 'whatsapp';
   const tabs: {
     id: 'assignment' | 'notes' | 'internal';
     label: string;
@@ -2987,11 +3520,33 @@ const ContactWorkflowTabs = ({
       </View>
 
       {activeTab === 'assignment' ? (
-        <AssignmentWorkflowPanel conversation={conversation} onAssignmentChanged={onAssignmentChanged} />
+        assignmentSupported ? (
+          <AssignmentWorkflowPanel conversation={conversation} onAssignmentChanged={onAssignmentChanged} />
+        ) : (
+          <UnsupportedWorkflowPanel
+            icon={Users}
+            title={`Assignment for ${getChannelLabel(conversation.channel)} is not available yet`}
+            description="LAD-Frontend-2 keeps this disabled until the backend ships per-conversation assignment for this channel. WhatsApp assignment is fully wired."
+          />
+        )
       ) : activeTab === 'notes' ? (
-        <NotesWorkflowPanel conversation={conversation} />
-      ) : (
+        notesSupported ? (
+          <NotesWorkflowPanel conversation={conversation} />
+        ) : (
+          <UnsupportedWorkflowPanel
+            icon={Tag}
+            title={`Notes for ${getChannelLabel(conversation.channel)} are not available yet`}
+            description="This channel does not expose a conversation notes API in the backend yet."
+          />
+        )
+      ) : internalSupported ? (
         <NotesWorkflowPanel conversation={conversation} internal />
+      ) : (
+        <UnsupportedWorkflowPanel
+          icon={MessageSquare}
+          title={`Internal comments for ${getChannelLabel(conversation.channel)} are not available yet`}
+          description="LAD-Frontend-2 marks internal comments as coming soon for this channel. WhatsApp internal comments use the live notes API."
+        />
       )}
     </View>
   );
@@ -3270,12 +3825,16 @@ const ContactDetailsPanel = ({
   const mediaPreviewItems = mediaItems.filter((item) => item.kind === 'media').slice(0, 4);
   const { formatPhone } = usePhoneMasking();
   const stateLabel = resolved ? 'Resolved' : conversation.conversationState || 'Open';
-  const ownerLabel = conversation.owner || 'AI';
+  const ownerLabel = conversation.owner || (conversation.ownerType === 'human_agent' ? 'Human Agent' : 'AI Agent');
   const startedLabel = formatTime(conversation.startedAt || conversation.lastMessageAt);
   const phoneLabel = formatPhone(conversation.phone) || conversation.email || getChannelLabel(conversation.channel);
   const isWhatsAppContact = isWhatsAppChannel(conversation.channel);
   const profileAvatarSize = width < 360 ? 124 : width < 390 ? 136 : fullPage ? 148 : 140;
   const firstName = conversation.name.split(' ').filter(Boolean)[0] || conversation.name;
+  const metadataRows = useMemo(
+    () => getContactMetadataRows(conversation, stateLabel, ownerLabel, messageCount),
+    [conversation, messageCount, ownerLabel, stateLabel],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -3393,6 +3952,18 @@ const ContactDetailsPanel = ({
               />
             ) : null}
             <BusinessProfileLine icon={Clock} title={`Conversation started ${startedLabel}`} />
+            {metadataRows.length ? (
+              <View style={[styles.contactMetadataList, { borderTopColor: appTheme.border }]}>
+                {metadataRows.map((row) => (
+                  <BusinessProfileLine
+                    key={`${row.label}-${row.value}`}
+                    icon={Info}
+                    title={row.label}
+                    subtitle={row.value}
+                  />
+                ))}
+              </View>
+            ) : null}
           </View>
 
           <View style={[styles.whatsAppSection, { borderTopColor: appTheme.border }]}>
@@ -3465,18 +4036,6 @@ const ContactDetailsPanel = ({
         </View>
 
         <View style={styles.detailSection}>
-          <View style={styles.detailSectionTitleRow}>
-            <Typography variant="caption" color={appTheme.muted} style={styles.detailSectionTitle}>
-              LABELS
-            </Typography>
-            <Plus color={appTheme.muted} size={18} />
-          </View>
-          <Typography variant="bodySmall" color={appTheme.muted}>
-            {conversation.tags?.length ? conversation.tags.join(', ') : 'No labels assigned'}
-          </Typography>
-        </View>
-
-        <View style={styles.detailSection}>
           {conversation.email ? <DetailLine icon={Mail}>{conversation.email}</DetailLine> : null}
           {conversation.phone ? <DetailLine icon={Phone}>{formatPhone(conversation.phone)}</DetailLine> : null}
           <DetailLine icon={MessageCircle}>Conversation started {startedLabel || 'recently'}</DetailLine>
@@ -3486,74 +4045,95 @@ const ContactDetailsPanel = ({
           <Typography variant="caption" color={appTheme.muted} style={styles.detailSectionTitle}>
             METADATA
           </Typography>
-          <View style={styles.metaRow}>
-            <Typography variant="bodySmall" color={appTheme.muted}>Status</Typography>
-            <Typography variant="bodySmall" color={appTheme.text} style={styles.metaValue}>{stateLabel}</Typography>
-          </View>
-          <View style={styles.metaRow}>
-            <Typography variant="bodySmall" color={appTheme.muted}>Owner</Typography>
-            <Typography variant="bodySmall" color={appTheme.text} style={styles.metaValue}>{ownerLabel}</Typography>
-          </View>
-          <View style={styles.metaRow}>
-            <Typography variant="bodySmall" color={appTheme.muted}>Channel</Typography>
-            <Typography variant="bodySmall" color={appTheme.text} style={styles.metaValue}>{getChannelLabel(conversation.channel)}</Typography>
-          </View>
-          <View style={styles.metaRow}>
-            <Typography variant="bodySmall" color={appTheme.muted}>Messages</Typography>
-            <Typography variant="bodySmall" color={appTheme.text} style={styles.metaValue}>
-              {conversation.messageCount || messageCount}
-            </Typography>
-          </View>
+          {metadataRows.map((row) => (
+            <View key={`${row.label}-${row.value}`} style={styles.metaRow}>
+              <Typography variant="bodySmall" color={appTheme.muted}>{row.label}</Typography>
+              <Typography variant="bodySmall" color={appTheme.text} style={styles.metaValue} numberOfLines={3}>{row.value}</Typography>
+            </View>
+          ))}
         </View>
 
-        <TouchableOpacity style={styles.paymentButton} activeOpacity={0.8}>
-          <FileText color={appTheme.primaryAccent} size={16} />
-          <Typography variant="bodySmall" color={appTheme.primaryAccent} style={styles.paymentButtonText}>
-            MindBody Payment
-          </Typography>
-        </TouchableOpacity>
-
-        <View style={styles.assignmentTabs}>
-          <View style={styles.assignmentTabActive}>
-            <UserRound color={appTheme.primaryAccent} size={16} />
-            <Typography variant="caption" color={appTheme.primaryAccent} style={styles.assignmentTabText}>Assignment</Typography>
-          </View>
-          <View style={styles.assignmentTab}>
-          <Tag color={appTheme.muted} size={15} />
-          <Typography variant="caption" color={appTheme.muted}>Notes</Typography>
-          </View>
-          <View style={styles.assignmentTab}>
-          <MessageSquare color={appTheme.muted} size={15} />
-          <Typography variant="caption" color={appTheme.muted}>Internal</Typography>
-          </View>
-        </View>
-
-        <View style={[styles.assignmentCard, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]}>
-          <Users color={appTheme.primaryAccent} size={36} />
-          <Typography variant="h4" color={appTheme.text} style={styles.assignmentTitle}>
-            {conversation.owner ? `Assigned to ${conversation.owner}` : 'Not Assigned'}
-          </Typography>
-          <Typography variant="bodySmall" color={appTheme.muted} style={styles.assignmentCopy}>
-            {conversation.owner ? 'Messages are handled by the assigned owner' : 'Messages will be handled by AI'}
-          </Typography>
-          <TouchableOpacity style={styles.assignButton} activeOpacity={0.8}>
-            <UserRound color={Theme.colors.surface} size={16} />
-              <Typography variant="bodySmall" color={Theme.colors.surface} style={styles.assignButtonText}>
-              Assign to Team Member
-            </Typography>
-          </TouchableOpacity>
-        </View>
+        <MindBodyPaymentPanel conversation={conversation} onMessageSent={onConversationRefresh} />
+        <ContactWorkflowTabs conversation={conversation} onAssignmentChanged={onConversationRefresh} />
       </ScrollView>
     </View>
   );
 };
 
+
+const AnimatedDotsBackground = ({ width, darkMode }: { width: number; darkMode: boolean }) => {
+  const dot0 = React.useRef(new Animated.Value(0)).current;
+  const dot1 = React.useRef(new Animated.Value(0)).current;
+  const dot2 = React.useRef(new Animated.Value(0)).current;
+  const dot3 = React.useRef(new Animated.Value(0)).current;
+  const dot4 = React.useRef(new Animated.Value(0)).current;
+  const dot5 = React.useRef(new Animated.Value(0)).current;
+  const dot6 = React.useRef(new Animated.Value(0)).current;
+  const dotAnims = [dot0, dot1, dot2, dot3, dot4, dot5, dot6];
+
+  React.useEffect(() => {
+    const loops = dotAnims.map((anim, i) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(anim, { toValue: -10, duration: 1800 + i * 300, delay: i * 180, useNativeDriver: true, easing: (t) => Math.sin(t * Math.PI) }),
+          Animated.timing(anim, { toValue: 0, duration: 1800 + i * 300, useNativeDriver: true, easing: (t) => Math.sin(t * Math.PI) }),
+        ]),
+      ),
+    );
+    loops.forEach((l) => l.start());
+    return () => loops.forEach((l) => l.stop());
+  }, []);
+
+  const DOT_POSITIONS = [
+    { top: 22, left: 26 }, { top: 18, right: 22 }, { top: 55, left: width * 0.42 },
+    { top: 110, left: 14 }, { top: 95, right: 52 }, { top: 150, left: width * 0.30 }, { top: 165, right: 18 },
+  ];
+
+  const CIRCLE_POSITIONS = [
+    { top: 42, left: 82 }, { top: 78, left: 40 }, { top: 132, right: 88 },
+    { top: 50, right: 112 }, { top: 162, left: 142 },
+  ];
+
+  return (
+    <>
+      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: darkMode ? '#0F172A' : '#E0E7FF' }} />
+      <View style={{ position: 'absolute', top: -50, right: -50, width: 200, height: 200, borderRadius: 100, backgroundColor: darkMode ? 'rgba(56, 189, 248, 0.1)' : 'rgba(255,255,255,0.4)'}} />
+      <View style={{ position: 'absolute', bottom: -50, left: -50, width: 150, height: 150, borderRadius: 75, backgroundColor: darkMode ? 'rgba(129, 140, 248, 0.1)' : 'rgba(99, 102, 241, 0.05)'}} />
+
+
+      {DOT_POSITIONS.map((dot, i) => {
+        const sz = i % 3 === 0 ? 14 : 10;
+        const clr = darkMode ? 'rgba(100,140,255,0.35)' : 'rgba(60,100,220,0.2)';
+        const posStyle: any = { position: 'absolute', top: dot.top };
+        if ('left' in dot) posStyle.left = dot.left;
+        if ('right' in dot) posStyle.right = dot.right;
+        return (
+          <Animated.View key={`dot-${i}`} style={[posStyle, { transform: [{ translateY: dotAnims[i] }] }]}>
+            <View style={{ alignItems: 'center', justifyContent: 'center', width: sz, height: sz }}>
+              <View style={{ position: 'absolute', width: sz, height: 2, borderRadius: 1, backgroundColor: clr }} />
+              <View style={{ position: 'absolute', width: 2, height: sz, borderRadius: 1, backgroundColor: clr }} />
+            </View>
+          </Animated.View>
+        );
+      })}
+
+      {CIRCLE_POSITIONS.map((dot, i) => {
+        const posStyle: any = { position: 'absolute', top: dot.top, width: 6, height: 6, borderRadius: 3, backgroundColor: darkMode ? 'rgba(100,140,255,0.2)' : 'rgba(60,100,220,0.12)' };
+        if ('left' in dot) posStyle.left = dot.left;
+        if ('right' in dot) posStyle.right = dot.right;
+        return <View key={`c-${i}`} style={posStyle} />;
+      })}
+    </>
+  );
+};
+
 export default function ChatsScreen() {
   const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const appTheme = useAppTheme();
   const handleBottomTabScroll = useBottomTabScrollHandler();
   const bottomTabHidden = useBottomTabHidden();
+
   const currentUser = useAuthStore((state) => state.user);
   const { formatPhone } = usePhoneMasking();
   const fetchMaskPhoneNumbers = usePreferencesStore((state) => state.fetchMaskPhoneNumbers);
@@ -3565,7 +4145,12 @@ export default function ChatsScreen() {
   );
 
   const [activeFilter, setActiveFilter] = useState<ChannelFilterId>('all');
+  const [whatsAppListFilter, setWhatsAppListFilter] = useState<WhatsAppListFilter>('all');
+  const [whatsAppHideEmpty, setWhatsAppHideEmpty] = useState(false);
+  const [whatsAppStageFilter, setWhatsAppStageFilter] = useState('all');
+  const [linkedInStatusFilter, setLinkedInStatusFilter] = useState<LinkedInStatusFilter>('all');
   const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
+  const [filterSidebarOpen, setFilterSidebarOpen] = useState(false);
   const [moreOptionsOpen, setMoreOptionsOpen] = useState(false);
   const [broadcastGroupsScreenOpen, setBroadcastGroupsScreenOpen] = useState(false);
   // ── Broadcast groups screen state (mirrors lad-frontend-2's ChatGroupManager) ──
@@ -3602,19 +4187,41 @@ export default function ChatsScreen() {
   const [emailGroupDetail, setEmailGroupDetail] = useState<EmailBroadcastGroupDetail | null>(null);
   const [emailGroupLoading, setEmailGroupLoading] = useState(false);
   const [emailMemberSearch, setEmailMemberSearch] = useState('');
+  const [emailSidebarAccountEmail, setEmailSidebarAccountEmail] = useState('');
   const [emailGroupCreateOpen, setEmailGroupCreateOpen] = useState(false);
   const [emailGroupName, setEmailGroupName] = useState('');
   const [emailGroupBusy, setEmailGroupBusy] = useState(false);
-  const [emailLabelCreateOpen, setEmailLabelCreateOpen] = useState(false);
-  const [emailLabelName, setEmailLabelName] = useState('');
-  const [emailLabelBusy, setEmailLabelBusy] = useState(false);
+  const [emailGroupTemplateOpen, setEmailGroupTemplateOpen] = useState(false);
+  const [emailGroupTemplates, setEmailGroupTemplates] = useState<ChatTemplate[]>([]);
+  const [emailGroupTemplatesLoading, setEmailGroupTemplatesLoading] = useState(false);
+  const [emailGroupTemplateSendingId, setEmailGroupTemplateSendingId] = useState<string | null>(null);
+  const [emailGroupTemplateError, setEmailGroupTemplateError] = useState<string | null>(null);
   const [sentRuns, setSentRuns] = useState<EmailBroadcastRun[]>([]);
   const [sentRunsLoading, setSentRunsLoading] = useState(false);
   const [sentRunOpen, setSentRunOpen] = useState<EmailBroadcastRun | null>(null);
   const [sentRunDetail, setSentRunDetail] = useState<EmailBroadcastRunDetail | null>(null);
   const [sentRunDetailLoading, setSentRunDetailLoading] = useState(false);
+  const [sentBroadcastOpen, setSentBroadcastOpen] = useState(false);
+  const [sentBroadcastAccounts, setSentBroadcastAccounts] = useState<ConnectedEmailAccount[]>([]);
+  const [sentBroadcastGroups, setSentBroadcastGroups] = useState<EmailBroadcastGroup[]>([]);
+  const [sentBroadcastAccountId, setSentBroadcastAccountId] = useState('');
+  const [sentBroadcastMode, setSentBroadcastMode] = useState<'group' | 'manual'>('group');
+  const [sentBroadcastGroupId, setSentBroadcastGroupId] = useState('');
+  const [sentBroadcastRecipients, setSentBroadcastRecipients] = useState('');
+  const [sentBroadcastTemplates, setSentBroadcastTemplates] = useState<ChatTemplate[]>([]);
+  const [sentBroadcastTemplateId, setSentBroadcastTemplateId] = useState('');
+  const [sentBroadcastTemplateDropdownOpen, setSentBroadcastTemplateDropdownOpen] = useState(false);
+  const [sentBroadcastTemplatesLoading, setSentBroadcastTemplatesLoading] = useState(false);
+  const [sentBroadcastTemplatesError, setSentBroadcastTemplatesError] = useState<string | null>(null);
+  const [sentBroadcastSubject, setSentBroadcastSubject] = useState('');
+  const [sentBroadcastBody, setSentBroadcastBody] = useState('');
+  const [sentBroadcastLoading, setSentBroadcastLoading] = useState(false);
+  const [sentBroadcastSending, setSentBroadcastSending] = useState(false);
+  const [sentBroadcastError, setSentBroadcastError] = useState<string | null>(null);
   // Compose-to-group (email-comms /broadcast/send with group_id).
   const [emailComposeGroup, setEmailComposeGroup] = useState<EmailBroadcastGroup | null>(null);
+  const [emailComposeFromEmail, setEmailComposeFromEmail] = useState('');
+  const [emailComposeTemplateId, setEmailComposeTemplateId] = useState<string | null>(null);
   // Compose extras (mirrors frontend-2's ComposeWindow: Cc/Bcc, minimize/
   // maximize, formatting toolbar, templates, attachments, emoji).
   const [emailComposeCc, setEmailComposeCc] = useState('');
@@ -3660,8 +4267,16 @@ export default function ChatsScreen() {
   const [createChatMode, setCreateChatMode] = useState<ChatCreateActionId | null>(null);
   const [createChatSearch, setCreateChatSearch] = useState('');
   const [createChatSelectedIds, setCreateChatSelectedIds] = useState<Set<string>>(() => new Set());
+  // "Create Group" step of the New Chat flow — mirrors frontend-2's CreateBroadcastGroupModal
+  const [createGroupModalOpen, setCreateGroupModalOpen] = useState(false);
+  const [createGroupName, setCreateGroupName] = useState('');
+  const [createGroupColor, setCreateGroupColor] = useState('#10B981');
+  const [createGroupExistingIds, setCreateGroupExistingIds] = useState<Set<string>>(() => new Set());
+  const [createGroupSaving, setCreateGroupSaving] = useState(false);
+  const [createGroupError, setCreateGroupError] = useState<string | null>(null);
+  const [importLeadsOpen, setImportLeadsOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const [draft, setDraft] = useState('');
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [mediaLibraryOpen, setMediaLibraryOpen] = useState(false);
   const [mediaLibraryInitialTab, setMediaLibraryInitialTab] = useState<ChatMediaKind>('media');
@@ -3687,6 +4302,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
   const pendingVoiceNoteSoundRef = useRef<Audio.Sound | null>(null);
   const [chatUiStateLoaded, setChatUiStateLoaded] = useState(false);
   const [templateMenuOpen, setTemplateMenuOpen] = useState(false);
+  const [templateSending, setTemplateSending] = useState(false);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [templatesError, setTemplatesError] = useState<string | null>(null);
   const [templateSearch, setTemplateSearch] = useState('');
@@ -3736,6 +4352,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     setActiveConversation,
     getOlderMessages,
     sendMessage,
+    sendLocationMessage,
     sendAttachment,
     emitTypingState,
     clearConversationMessages,
@@ -3745,13 +4362,30 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     fetchConnectedIntegrations,
     isLoadingIntegrations,
     broadcastGroups,
-    whatsappLabels,
     fetchBroadcastGroups,
-    fetchWhatsAppLabels,
     isLoadingGroups,
     markConversationRead,
   } = useChatStore();
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const draft = activeConversationId ? (drafts[activeConversationId] || '') : '';
+  // Keep the active id in a ref so `setDraft` can stay referentially stable.
+  // Otherwise handlers that capture `setDraft` with stale deps (e.g. the
+  // composer's onChangeText and applyTemplate) would hold the first-render
+  // version — created when no conversation was open — whose body is a no-op,
+  // silently dropping typed text and template inserts.
+  const activeConversationIdRef = useRef(activeConversationId);
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+  const setDraft = useCallback((value: string | ((prev: string) => string)) => {
+    const id = activeConversationIdRef.current;
+    if (!id) return;
+    setDrafts((prev) => {
+      const next = typeof value === 'function' ? value(prev[id] || '') : value;
+      return { ...prev, [id]: next };
+    });
+  }, []);
 
   const navigation = useNavigation();
   const router = useRouter();
@@ -3773,8 +4407,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
 
   useEffect(() => {
     void fetchBroadcastGroups();
-    void fetchWhatsAppLabels();
-  }, [fetchBroadcastGroups, fetchWhatsAppLabels]);
+  }, [fetchBroadcastGroups]);
 
   useEffect(() => {
     if (!filterDropdownOpen) {
@@ -3944,6 +4577,28 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
           (activeFilter === 'outlook' && emailProviderId === 'outlook') ||
           (activeFilter === 'email' && emailProviderId === 'custom') ||
           (activeFilter !== 'gmail' && activeFilter !== 'email' && conversation.channel === activeFilter);
+
+        if (isWhatsAppFilterTab(activeFilter) && conversationMatchesWhatsAppTab(conversation, activeFilter)) {
+          if (whatsAppListFilter === 'unread' && conversation.unreadCount <= 0) {
+            return false;
+          }
+          if (whatsAppHideEmpty && !conversation.lastMessage && !conversation.messageCount) {
+            return false;
+          }
+          if (whatsAppStageFilter !== 'all') {
+            const stage = (conversation.conversationState || '').toLowerCase();
+            if (stage !== whatsAppStageFilter.toLowerCase()) {
+              return false;
+            }
+          }
+        }
+
+        if (activeFilter === 'linkedin' && conversation.channel === 'linkedin' && linkedInStatusFilter !== 'all') {
+          if (getLinkedInConversationStatus(conversation) !== linkedInStatusFilter) {
+            return false;
+          }
+        }
+
         // Email folders: "Starred" narrows the inbox to favourited conversations.
         const isGroupFolder = emailFolder.startsWith('group:');
         const activeGroupId = isGroupFolder ? emailFolder.replace('group:', '') : null;
@@ -3974,12 +4629,63 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
 
         return Date.parse(b.lastMessageAt ?? '') - Date.parse(a.lastMessageAt ?? '');
       });
-  }, [activeFilter, blockedIds, connectedIntegrations, conversations, deletedIds, emailFolder, emailGroupDetail, isLoadingIntegrations, pinnedIds, search, starredIds]);
+  }, [activeFilter, blockedIds, connectedIntegrations, conversations, deletedIds, emailFolder, emailGroupDetail, isLoadingIntegrations, linkedInStatusFilter, pinnedIds, search, starredIds, whatsAppHideEmpty, whatsAppListFilter, whatsAppStageFilter]);
+  const liveConversationCount = useMemo(
+    () => conversations.filter((conversation) => !isBroadcastEmailContact(conversation)).length,
+    [conversations],
+  );
+  const focusedConversationCount = useMemo(
+    () => filteredConversations.filter((conversation) => !isBroadcastEmailContact(conversation)).length,
+    [filteredConversations],
+  );
+  const whatsAppBaseConversations = useMemo(
+    () => conversations.filter((conversation) => conversationMatchesWhatsAppTab(conversation, activeFilter)),
+    [activeFilter, conversations],
+  );
+  const whatsAppUnreadCount = useMemo(
+    () => whatsAppBaseConversations.filter((conversation) => conversation.unreadCount > 0).length,
+    [whatsAppBaseConversations],
+  );
+  const whatsAppStageOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    whatsAppBaseConversations.forEach((conversation) => {
+      const stage = conversation.conversationState?.trim();
+      if (!stage) {
+        return;
+      }
+      counts.set(stage, (counts.get(stage) ?? 0) + 1);
+    });
+    return Array.from(counts.entries())
+      .sort(([a], [b]) => formatContextStatus(a).localeCompare(formatContextStatus(b)))
+      .map(([value, count]) => ({ value, label: formatContextStatus(value), count }));
+  }, [whatsAppBaseConversations]);
+  const linkedInStatusCounts = useMemo(() => {
+    const counts: Record<LinkedInStatusFilter, number> = { all: 0, pending: 0, accepted: 0, active: 0 };
+    conversations.forEach((conversation) => {
+      if (conversation.channel !== 'linkedin') {
+        return;
+      }
+      const status = getLinkedInConversationStatus(conversation);
+      counts.all += 1;
+      counts[status] += 1;
+    });
+    return counts;
+  }, [conversations]);
+  const showWhatsAppChannelFilters = isWhatsAppFilterTab(activeFilter);
+  const showLinkedInChannelFilters = activeFilter === 'linkedin';
+  const connectedWhatsAppSources = useMemo(
+    () => getConnectedWhatsAppSources(connectedIntegrations),
+    [connectedIntegrations],
+  );
 
   const createChatContacts = useMemo(() => {
     const query = createChatSearch.trim().toLowerCase();
     const visibleContacts = sortNewestConversations(
-      conversations.filter((conversation) => !deletedIds.has(conversation.id) && !blockedIds.has(conversation.id)),
+      conversations.filter((conversation) => (
+        !deletedIds.has(conversation.id) &&
+        !blockedIds.has(conversation.id) &&
+        matchesConnectedWhatsAppSource(conversation, connectedWhatsAppSources)
+      )),
     );
 
     if (!query) {
@@ -3987,7 +4693,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     }
 
     return visibleContacts.filter((conversation) => getConversationSearchLabel(conversation).includes(query));
-  }, [blockedIds, conversations, createChatSearch, deletedIds]);
+  }, [blockedIds, connectedWhatsAppSources, conversations, createChatSearch, deletedIds]);
 
   const messageListData = useMemo<MessageListItem[]>(() => {
     const newestFirst = [...activeMessages].reverse();
@@ -4145,8 +4851,8 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
         .includes(query),
     );
   }, [chatTemplates, templateSearch]);
-  const emptyConversationMessage = conversations.length
-    ? `No matches in ${activeFilterLabel}. ${conversations.length} total conversations loaded.`
+  const emptyConversationMessage = liveConversationCount
+    ? `No matches in ${activeFilterLabel}. ${liveConversationCount} total conversations loaded.`
     : syncError || 'No backend conversations found';
 
   const [pendingAttachment, setPendingAttachment] = useState<any>(null);
@@ -4192,37 +4898,6 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     };
   }, [emitTypingState]);
 
-  const requestAndroidMediaPermissions = useCallback(async (needsCamera = false) => {
-    if (Platform.OS !== 'android') return true;
-    try {
-      const sdkVersion = typeof Platform.Version === 'number' ? Platform.Version : parseInt(String(Platform.Version), 10);
-      const permsToRequest: string[] = needsCamera ? [PermissionsAndroid.PERMISSIONS.CAMERA] : [];
-      if (sdkVersion >= 33) {
-        permsToRequest.push(
-          PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES,
-          PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO,
-        );
-      } else {
-        permsToRequest.push(PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE);
-      }
-      const results = await PermissionsAndroid.requestMultiple(permsToRequest as any[]);
-      const allGranted = Object.values(results).every(
-        (r) => r === PermissionsAndroid.RESULTS.GRANTED,
-      );
-      if (!allGranted) {
-        Alert.alert(
-          'Permission required',
-          'Please allow media access in Settings to send photos and files.',
-          [{ text: 'OK' }],
-        );
-        return false;
-      }
-      return true;
-    } catch {
-      return true;
-    }
-  }, []);
-
   const handlePickAttachment = useCallback(async (type: string | string[] = [
     'image/*',
     'video/*',
@@ -4236,11 +4911,6 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     if (isUploadingAttachment) {
       return;
     }
-
-    const types = Array.isArray(type) ? type : [type];
-    const isMediaPick = types.some((t) => t.startsWith('image/') || t.startsWith('video/'));
-    const granted = await requestAndroidMediaPermissions(false);
-    if (!granted) return;
 
     const result = await DocumentPicker.getDocumentAsync({
       copyToCacheDirectory: true,
@@ -4263,7 +4933,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
         mimeType: asset.mimeType,
       });
     }
-  }, [isUploadingAttachment, requestAndroidMediaPermissions, sendAttachment]);
+  }, [isUploadingAttachment, sendAttachment]);
 
   const confirmPendingAttachment = useCallback(async () => {
     if (!pendingAttachment) return;
@@ -4281,8 +4951,41 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
   }, [pendingAttachment, sendAttachment, draft]);
 
   const loadTemplates = useCallback(async (channel: ChatChannel) => {
-    const endpoint = getTemplateEndpoint(channel);
     const fallback = getFallbackTemplates(channel);
+
+    // WhatsApp templates are stored per connected account on the channel-specific
+    // microservice (waba → BNI, personal → WAPA). Route through the service using
+    // the active conversation's backend channel so we display exactly the templates
+    // that belong to the currently connected account (e.g. Frontdesk), not the
+    // main backend (which 404s these and left the list empty).
+    if (channel === 'whatsapp') {
+      setTemplatesLoading(true);
+      setTemplatesError(null);
+      try {
+        const raw = await getWhatsAppTemplates(
+          activeConversation?.waBackendChannel,
+          activeConversation?.accountId,
+        );
+        const normalized = raw
+          .map((item, index) => normalizeTemplate(item as Record<string, any>, 'whatsapp', index))
+          .filter((item): item is ChatTemplate => Boolean(item));
+
+        if (normalized.length) {
+          setChatTemplates(normalized);
+        } else {
+          setChatTemplates(fallback);
+          setTemplatesError('No saved templates found for this account. Showing quick-start templates.');
+        }
+      } catch {
+        setChatTemplates(fallback);
+        setTemplatesError('Could not load saved templates. Showing quick-start templates.');
+      } finally {
+        setTemplatesLoading(false);
+      }
+      return;
+    }
+
+    const endpoint = getTemplateEndpoint(channel);
 
     if (!endpoint) {
       setChatTemplates(fallback);
@@ -4317,7 +5020,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     } finally {
       setTemplatesLoading(false);
     }
-  }, []);
+  }, [activeConversation?.waBackendChannel, activeConversation?.accountId]);
 
   const openTemplateMenu = useCallback(() => {
     const channel = activeConversation?.channel ?? 'whatsapp';
@@ -4327,10 +5030,70 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     void loadTemplates(channel);
   }, [activeConversation?.channel, loadTemplates]);
 
-  const applyTemplate = useCallback((template: ChatTemplate) => {
-    setDraft((value) => (value.trim() ? `${value.trim()}\n${template.body}` : template.body));
+  const insertTemplateIntoDraft = useCallback((template: ChatTemplate) => {
+    const body = substituteConversationVariables(template.body, activeConversation);
+    setDraft((value) => (value.trim() ? `${value.trim()}\n${body}` : body));
     setTemplateMenuOpen(false);
-  }, []);
+  }, [activeConversation, setDraft]);
+
+  const handleTemplateSelect = useCallback(async (template: ChatTemplate) => {
+    if (!activeConversation) {
+      insertTemplateIntoDraft(template);
+      return;
+    }
+
+    const channel = activeConversation.channel;
+    const body = substituteConversationVariables(template.body, activeConversation);
+    const templateName = template.templateName || template.name;
+
+    if (channel !== 'whatsapp' && channel !== 'linkedin') {
+      insertTemplateIntoDraft(template);
+      return;
+    }
+
+    if (templateSending) {
+      return;
+    }
+
+    if (channel === 'linkedin' && !body.trim() && !template.mediaUrl) {
+      Alert.alert('Template is empty', 'This LinkedIn template has no message or attachment to send.');
+      return;
+    }
+
+    setTemplateSending(true);
+    setTemplatesError(null);
+    try {
+      await sendTemplateToConversation(
+        {
+          id: activeConversation.id,
+          channel,
+          waBackendChannel: activeConversation.waBackendChannel,
+        },
+        {
+          templateId: template.id,
+          templateName,
+          languageCode: template.language || 'en',
+          parameters: buildTemplateParameters(template, activeConversation),
+          headerParamCount: template.headerParamCount ?? 0,
+          headerType: template.headerType || '',
+          headerUrl: template.headerUrl || '',
+          body,
+          mediaUrl: template.mediaUrl,
+          mediaType: template.mediaType,
+          mediaFilename: template.mediaFilename,
+        },
+      );
+
+      setDraft('');
+      setTemplateMenuOpen(false);
+      await setActiveConversation(activeConversation.id, { force: true, silent: true });
+      void syncConversations({ silent: true, force: true });
+    } catch (error) {
+      Alert.alert('Template failed', getActionErrorMessage(error, 'Unable to send the selected template.'));
+    } finally {
+      setTemplateSending(false);
+    }
+  }, [activeConversation, insertTemplateIntoDraft, setActiveConversation, setDraft, syncConversations, templateSending]);
 
   const openQuickComposer = useCallback((action: QuickComposerAction) => {
     setTemplateMenuOpen(false);
@@ -4404,6 +5167,16 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
 
     if (quickComposer === 'location') {
       const label = quickDraft.locationName.trim() || 'Shared location';
+      const address = quickDraft.locationAddress?.trim();
+      const lat = quickDraft.latitude;
+      const lon = quickDraft.longitude;
+      if (lat != null && lon != null) {
+        await sendLocationMessage(lat, lon, label, address);
+        setQuickComposer(null);
+        setQuickDraft(EMPTY_QUICK_DRAFT);
+        return;
+      }
+
       const link = quickDraft.locationLink.trim();
       message = ['Location shared', label, link].filter(Boolean).join('\n');
     }
@@ -4442,7 +5215,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     await sendMessage(message);
     setQuickComposer(null);
     setQuickDraft(EMPTY_QUICK_DRAFT);
-  }, [activeConversation, isSending, lockedIds, quickComposer, quickDraft, sendMessage]);
+  }, [activeConversation, isSending, lockedIds, quickComposer, quickDraft, sendMessage, sendLocationMessage]);
 
   const handleAttachmentAction = useCallback(async (action: AttachmentAction) => {
     setQuickActionsOpen(false);
@@ -4452,7 +5225,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
         await handlePickAttachment(['image/*', 'video/*']);
         break;
       case 'camera':
-        await handlePickAttachment('image/*');
+        await handlePickAttachment(['image/*']);
         break;
       case 'document':
         await handlePickAttachment([
@@ -4476,6 +5249,10 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
       case 'poll':
         openQuickComposer('poll');
         break;
+      case 'sticker':
+        setEmojiSearch('');
+        setEmojiPickerOpen(true);
+        break;
       case 'template':
         openTemplateMenu();
         break;
@@ -4487,35 +5264,12 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     }
   }, [handlePickAttachment, openQuickComposer, openTemplateMenu]);
 
+  // Opens the Import Leads dialog (Add Leads / Excel Upload / Scrape from URL),
+  // mirroring frontend-2's ImportLeadsDialog workflow.
   const handleImportLeadsAction = useCallback(async () => {
-    setCreateChatMenuOpen(false);
-    setCreateChatMode(null);
     setCreateChatNotice(null);
-
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: [
-          'text/csv',
-          'application/vnd.ms-excel',
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          'application/pdf',
-          'image/*',
-        ],
-        multiple: true,
-        copyToCacheDirectory: true,
-      });
-
-      if (result.canceled) {
-        return;
-      }
-
-      const count = result.assets.length;
-      setCreateChatNotice(`${count} lead file${count === 1 ? '' : 's'} selected. Sync will refresh contacts from the backend.`);
-      await syncConversations({ silent: true, force: true });
-    } catch (err) {
-      setCreateChatNotice(err instanceof Error && err.message ? err.message : 'Unable to open the lead importer.');
-    }
-  }, [syncConversations]);
+    setImportLeadsOpen(true);
+  }, []);
 
   const handleCreateAction = useCallback(async (action: ChatCreateActionId) => {
     setCreateChatNotice(null);
@@ -4551,6 +5305,61 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
       return next;
     });
   }, []);
+
+  const openCreateGroupModal = useCallback(() => {
+    setCreateGroupName('');
+    setCreateGroupColor('#10B981');
+    setCreateGroupExistingIds(new Set());
+    setCreateGroupError(null);
+    setCreateGroupModalOpen(true);
+  }, []);
+
+  // Mirrors frontend-2's CreateBroadcastGroupModal: create a new group (and/or pick
+  // existing ones), then add every selected conversation to each target group.
+  const handleCreateGroupFromSelection = useCallback(async () => {
+    const selectedIds = Array.from(createChatSelectedIds);
+    const name = createGroupName.trim();
+
+    if (!name && createGroupExistingIds.size === 0) {
+      setCreateGroupError('Enter a group name or select existing groups.');
+      return;
+    }
+    if (!selectedIds.length) {
+      setCreateGroupError('No contacts selected.');
+      return;
+    }
+
+    setCreateGroupSaving(true);
+    setCreateGroupError(null);
+    try {
+      const targetGroupIds: string[] = [];
+      if (name) {
+        const created = await createBroadcastGroup(name, createGroupColor);
+        if (!created?.id) {
+          throw new Error('Group could not be created. Please try again.');
+        }
+        targetGroupIds.push(created.id);
+      }
+      targetGroupIds.push(...Array.from(createGroupExistingIds));
+
+      for (const groupId of targetGroupIds) {
+        await addConversationsToBroadcastGroup(groupId, selectedIds);
+      }
+
+      setCreateGroupModalOpen(false);
+      setCreateChatSelectedIds(new Set());
+      setCreateChatNotice(
+        name
+          ? `"${name}" created with ${selectedIds.length} contact${selectedIds.length === 1 ? '' : 's'}.`
+          : `Added ${selectedIds.length} contact${selectedIds.length === 1 ? '' : 's'} to ${createGroupExistingIds.size} group${createGroupExistingIds.size === 1 ? '' : 's'}.`,
+      );
+      await fetchBroadcastGroups();
+    } catch (err) {
+      setCreateGroupError(getActionErrorMessage(err, 'Unable to create the group.'));
+    } finally {
+      setCreateGroupSaving(false);
+    }
+  }, [createChatSelectedIds, createGroupColor, createGroupExistingIds, createGroupName, fetchBroadcastGroups]);
 
   const commitCreateChatSelection = useCallback(async () => {
     const selectedIds = Array.from(createChatSelectedIds);
@@ -4952,6 +5761,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
 
   const closeConversationListPopups = useCallback(() => {
     setFilterDropdownOpen(false);
+    setFilterSidebarOpen(false);
     closeCreateChatMenu();
   }, [closeCreateChatMenu]);
 
@@ -5242,19 +6052,42 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     openGroupForm();
   }, [closeCreateChatMenu, openGroupForm]);
 
+  const emailTabProvider: 'gmail' | 'outlook' | null =
+    activeFilter === 'gmail' ? 'gmail' : activeFilter === 'outlook' ? 'outlook' : null;
+  const isEmailTabActive = activeFilter === 'gmail' || activeFilter === 'outlook' || activeFilter === 'email';
+  const isEmailGroupFolder = isEmailTabActive && emailFolder.startsWith('group:');
+  const emailTabProviderId: EmailProviderId = activeFilter === 'outlook' ? 'outlook' : activeFilter === 'email' ? 'custom' : 'gmail';
+  const emailTabMeta = EMAIL_PROVIDER_META[emailTabProviderId];
+  const emailComposeGroupAccountRef = useRef<string | null>(null);
+
+  const resolveConnectedEmailAccount = useCallback(async (providerId: EmailProviderId) => {
+    const accounts = await getConnectedEmailAccounts();
+    const wanted = getAccountProviderForEmailTab(providerId);
+    return (
+      accounts.find((item) => item.provider === wanted && item.status === 'active') ??
+      accounts.find((item) => item.provider === wanted) ??
+      null
+    );
+  }, []);
+
   // ── Email reply / forward (mirrors EmailComposePanel's send-bulk flow) ──
 
-  const openEmailCompose = useCallback((mode: 'reply' | 'forward', prefillBody?: string) => {
+  const openEmailCompose = useCallback(async (mode: 'reply' | 'forward', prefillBody?: string) => {
     if (!activeConversation) {
       return;
     }
 
     const latest = [...activeMessages].reverse().find((message) => message.subject || message.content);
     const baseSubject = (latest?.subject || '').replace(/^(re|fwd):\s*/i, '').trim() || activeConversation.name;
+    const providerId = getEmailProviderId(activeConversation);
+    const account = await resolveConnectedEmailAccount(providerId).catch(() => null);
 
     setEmailComposeMode(mode);
+    emailComposeGroupAccountRef.current = account?.id ?? null;
+    setEmailComposeFromEmail(account?.email ?? '');
     setEmailComposeTo(mode === 'reply' ? activeConversation.email ?? '' : '');
     setEmailComposeSubject(`${mode === 'reply' ? 'Re' : 'Fwd'}: ${baseSubject}`);
+    setEmailComposeTemplateId(null);
     setEmailComposeBody(
       prefillBody ??
         (mode === 'forward' && latest
@@ -5263,18 +6096,23 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     );
     setEmailComposeError(null);
     setEmailComposeOpen(true);
-  }, [activeConversation, activeMessages]);
+  }, [activeConversation, activeMessages, resolveConnectedEmailAccount]);
 
   // Fresh compose from the Gmail/Outlook tab FAB — mirrors ComposeWindow's
   // free-form send (provider from the active tab, recipient typed by the user).
-  const openEmailComposeNew = useCallback(() => {
+  const openEmailComposeNew = useCallback(async () => {
+    const account = await resolveConnectedEmailAccount(emailTabProviderId).catch(() => null);
+
     setEmailComposeMode('new');
+    emailComposeGroupAccountRef.current = account?.id ?? null;
+    setEmailComposeFromEmail(account?.email ?? '');
     setEmailComposeTo('');
     setEmailComposeSubject('');
+    setEmailComposeTemplateId(null);
     setEmailComposeBody('');
     setEmailComposeError(null);
     setEmailComposeOpen(true);
-  }, []);
+  }, [emailTabProviderId, resolveConnectedEmailAccount]);
 
   const submitEmailCompose = useCallback(async () => {
     if (emailComposeSending) {
@@ -5344,13 +6182,6 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
 
   // ── Email client sidebar + folders (mirrors EmailChannelView) ──
 
-  const emailTabProvider: 'gmail' | 'outlook' | null =
-    activeFilter === 'gmail' ? 'gmail' : activeFilter === 'outlook' ? 'outlook' : null;
-  const isEmailTabActive = activeFilter === 'gmail' || activeFilter === 'outlook' || activeFilter === 'email';
-  const emailTabProviderId: EmailProviderId = activeFilter === 'outlook' ? 'outlook' : activeFilter === 'email' ? 'custom' : 'gmail';
-  const emailTabMeta = EMAIL_PROVIDER_META[emailTabProviderId];
-  const emailComposeGroupAccountRef = useRef<string | null>(null);
-
   const loadEmailCommsGroups = useCallback(() => {
     if (!emailTabProvider) {
       setEmailCommsGroups([]);
@@ -5370,11 +6201,47 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
       .finally(() => setSentRunsLoading(false));
   }, []);
 
+  const sentBroadcastActiveAccounts = useMemo(
+    () => sentBroadcastAccounts.filter((account) => account.status === 'active'),
+    [sentBroadcastAccounts],
+  );
+  const sentBroadcastSelectedAccount = useMemo(
+    () => sentBroadcastActiveAccounts.find((account) => account.id === sentBroadcastAccountId) ?? null,
+    [sentBroadcastAccountId, sentBroadcastActiveAccounts],
+  );
+  const sentBroadcastAvailableGroups = useMemo(() => {
+    const channel = sentBroadcastSelectedAccount ? getBroadcastProviderForAccount(sentBroadcastSelectedAccount) : emailTabProvider;
+    return channel ? sentBroadcastGroups.filter((group) => group.channel === channel) : [];
+  }, [emailTabProvider, sentBroadcastGroups, sentBroadcastSelectedAccount]);
+  const sentBroadcastParsedRecipients = useMemo(
+    () => parseBroadcastRecipients(sentBroadcastRecipients),
+    [sentBroadcastRecipients],
+  );
+  const sentBroadcastSelectedTemplate = useMemo(
+    () => sentBroadcastTemplates.find((template) => template.id === sentBroadcastTemplateId) ?? null,
+    [sentBroadcastTemplateId, sentBroadcastTemplates],
+  );
+  const sentBroadcastSendCount = sentBroadcastMode === 'group'
+    ? (sentBroadcastAvailableGroups.find((group) => group.id === sentBroadcastGroupId)?.memberCount ?? 0)
+    : sentBroadcastParsedRecipients.length;
+
+  useEffect(() => {
+    if (sentBroadcastGroupId && !sentBroadcastAvailableGroups.some((group) => group.id === sentBroadcastGroupId)) {
+      setSentBroadcastGroupId('');
+      return;
+    }
+    if (sentBroadcastMode === 'group' && !sentBroadcastGroupId && sentBroadcastAvailableGroups.length > 0) {
+      setSentBroadcastGroupId(sentBroadcastAvailableGroups[0].id);
+    }
+  }, [sentBroadcastAvailableGroups, sentBroadcastGroupId, sentBroadcastMode]);
+
   const openEmailSidebar = useCallback(() => {
     setEmailSidebarOpen(true);
     loadEmailCommsGroups();
-    void fetchWhatsAppLabels();
-  }, [fetchWhatsAppLabels, loadEmailCommsGroups]);
+    void resolveConnectedEmailAccount(emailTabProviderId)
+      .then((account) => setEmailSidebarAccountEmail(account?.email ?? ''))
+      .catch(() => setEmailSidebarAccountEmail(''));
+  }, [emailTabProviderId, loadEmailCommsGroups, resolveConnectedEmailAccount]);
 
   const selectEmailFolder = useCallback((folder: string) => {
     setEmailFolder(folder);
@@ -5393,25 +6260,173 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     }
   }, [loadSentRuns]);
 
+  const resetSentBroadcastComposer = useCallback(() => {
+    setSentBroadcastAccountId('');
+    setSentBroadcastMode('group');
+    setSentBroadcastGroupId('');
+    setSentBroadcastRecipients('');
+    setSentBroadcastTemplateId('');
+    setSentBroadcastTemplateDropdownOpen(false);
+    setSentBroadcastTemplatesError(null);
+    setSentBroadcastSubject('');
+    setSentBroadcastBody('');
+    setSentBroadcastError(null);
+  }, []);
+
+  const closeSentBroadcastComposer = useCallback(() => {
+    setSentBroadcastOpen(false);
+    resetSentBroadcastComposer();
+  }, [resetSentBroadcastComposer]);
+
+  const openSentBroadcastComposer = useCallback(async () => {
+    setSentBroadcastOpen(true);
+    setSentBroadcastLoading(true);
+    setSentBroadcastTemplatesLoading(true);
+    setSentBroadcastError(null);
+    setSentBroadcastTemplates([]);
+    setSentBroadcastTemplatesError(null);
+
+    try {
+      let templateError: string | null = null;
+      const [accounts, gmailGroups, outlookGroups, emailTemplates] = await Promise.all([
+        getConnectedEmailAccounts(),
+        getEmailBroadcastGroups('gmail').catch(() => []),
+        getEmailBroadcastGroups('outlook').catch(() => []),
+        loadEmailTemplatesFromApi().catch((error) => {
+          templateError = getActionErrorMessage(error, 'Unable to load saved templates.');
+          return [];
+        }),
+      ]);
+      const activeAccounts = accounts.filter((account) => account.status === 'active');
+      const preferredProvider = getAccountProviderForEmailTab(emailTabProviderId);
+      const preferredAccount =
+        activeAccounts.find((account) => account.provider === preferredProvider) ??
+        accounts.find((account) => account.provider === preferredProvider) ??
+        activeAccounts[0] ??
+        accounts[0] ??
+        null;
+
+      const groups = [...gmailGroups, ...outlookGroups];
+      const preferredChannel = getBroadcastProviderForAccount(preferredAccount);
+      const preferredGroup = preferredChannel
+        ? groups.find((group) => group.channel === preferredChannel)
+        : null;
+
+      setSentBroadcastAccounts(accounts);
+      setSentBroadcastGroups(groups);
+      setSentBroadcastTemplates(emailTemplates);
+      setSentBroadcastTemplatesError(templateError);
+      setSentBroadcastAccountId(preferredAccount?.id ?? '');
+      setSentBroadcastGroupId(preferredGroup?.id ?? '');
+      setSentBroadcastMode(preferredAccount?.provider === 'custom_smtp' ? 'manual' : 'group');
+    } catch (error) {
+      setSentBroadcastError(getActionErrorMessage(error, 'Unable to load broadcast options.'));
+    } finally {
+      setSentBroadcastLoading(false);
+      setSentBroadcastTemplatesLoading(false);
+    }
+  }, [emailTabProviderId]);
+
+  const applySentBroadcastTemplate = useCallback((template: ChatTemplate) => {
+    setSentBroadcastTemplateId(template.id);
+    setSentBroadcastTemplateDropdownOpen(false);
+    if (template.subject && !sentBroadcastSubject.trim()) {
+      setSentBroadcastSubject(template.subject);
+    }
+    setSentBroadcastBody(template.bodyHtml || template.bodyText || template.body);
+  }, [sentBroadcastSubject]);
+
+  const submitSentBroadcast = useCallback(async () => {
+    if (sentBroadcastSending) {
+      return;
+    }
+
+    const subjectText = sentBroadcastSubject.trim();
+    const bodyText = sentBroadcastBody.trim();
+    const selectedGroup = sentBroadcastAvailableGroups.find((group) => group.id === sentBroadcastGroupId);
+    const bodyHtml = toEmailBodyHtml(bodyText);
+    const plainBodyText = toEmailBodyText(bodyText);
+
+    if (!sentBroadcastAccountId) {
+      setSentBroadcastError('Pick a sender account.');
+      return;
+    }
+    if (!subjectText) {
+      setSentBroadcastError('Subject is required.');
+      return;
+    }
+    if (!bodyText) {
+      setSentBroadcastError('Body cannot be empty.');
+      return;
+    }
+    if (sentBroadcastMode === 'group') {
+      if (!sentBroadcastGroupId) {
+        setSentBroadcastError('Pick a group to send to.');
+        return;
+      }
+      if (selectedGroup && selectedGroup.memberCount === 0) {
+        setSentBroadcastError(`Group "${selectedGroup.name}" has no members.`);
+        return;
+      }
+    }
+    if (sentBroadcastMode === 'manual' && sentBroadcastParsedRecipients.length === 0) {
+      setSentBroadcastError('Add at least one recipient email.');
+      return;
+    }
+
+    setSentBroadcastSending(true);
+    setSentBroadcastError(null);
+    try {
+      await sendEmailBroadcast({
+        fromEmailAccountId: sentBroadcastAccountId,
+        subject: subjectText,
+        bodyHtml,
+        bodyText: plainBodyText || null,
+        templateId: sentBroadcastSelectedTemplate?.id,
+        ...(sentBroadcastMode === 'group'
+          ? { groupId: sentBroadcastGroupId }
+          : { recipients: sentBroadcastParsedRecipients }),
+      });
+      closeSentBroadcastComposer();
+      loadSentRuns();
+      Alert.alert('Broadcast queued', `Email queued for ${sentBroadcastSendCount} recipient${sentBroadcastSendCount === 1 ? '' : 's'}.`);
+    } catch (error) {
+      setSentBroadcastError(getActionErrorMessage(error, 'Failed to queue broadcast.'));
+    } finally {
+      setSentBroadcastSending(false);
+    }
+  }, [
+    closeSentBroadcastComposer,
+    loadSentRuns,
+    sentBroadcastAccountId,
+    sentBroadcastAvailableGroups,
+    sentBroadcastBody,
+    sentBroadcastGroupId,
+    sentBroadcastMode,
+    sentBroadcastParsedRecipients,
+    sentBroadcastSendCount,
+    sentBroadcastSelectedTemplate?.id,
+    sentBroadcastSending,
+    sentBroadcastSubject,
+  ]);
+
   // Leaving the email tabs resets the folder so other channels see the full list.
   useEffect(() => {
     setEmailFolder('inbox');
   }, [activeFilter]);
 
-  // Auto-open the sidebar whenever the user first switches to an email tab (Outlook / Gmail / custom).
-  // This mimics the lad-frontend-2 behaviour where the folder pane slides in automatically.
+  // Keep email data warm without forcing the folder pane open.
   useEffect(() => {
     if (isEmailTabActive) {
-      // Small delay so the filter chip animation completes first.
-      const timer = setTimeout(() => {
-        openEmailSidebar();
-      }, 120);
-      return () => clearTimeout(timer);
+      loadEmailCommsGroups();
+      resolveConnectedEmailAccount(emailTabProviderId)
+        .then((account) => setEmailSidebarAccountEmail(account?.email ?? ''))
+        .catch(() => setEmailSidebarAccountEmail(''));
     } else {
       setEmailSidebarOpen(false);
+      setEmailSidebarAccountEmail('');
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEmailTabActive]);
+  }, [emailTabProviderId, isEmailTabActive, loadEmailCommsGroups, resolveConnectedEmailAccount]);
 
   const submitCreateEmailGroup = useCallback(async () => {
     const name = emailGroupName.trim();
@@ -5450,25 +6465,6 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     }
   }, [loadEmailCommsGroups]);
 
-  const submitCreateEmailLabel = useCallback(async () => {
-    const name = emailLabelName.trim();
-    if (!name || emailLabelBusy) {
-      return;
-    }
-
-    setEmailLabelBusy(true);
-    try {
-      await createWhatsAppLabel(name, emailTabMeta.color);
-      setEmailLabelName('');
-      setEmailLabelCreateOpen(false);
-      void fetchWhatsAppLabels();
-    } catch (error) {
-      Alert.alert('Create failed', getActionErrorMessage(error, 'Unable to create the label.'));
-    } finally {
-      setEmailLabelBusy(false);
-    }
-  }, [emailLabelBusy, emailLabelName, emailTabMeta.color, fetchWhatsAppLabels]);
-
   const openSentRun = useCallback((run: EmailBroadcastRun) => {
     setSentRunOpen(run);
     setSentRunDetail(null);
@@ -5484,11 +6480,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
   const openComposeToGroup = useCallback(async (group: EmailBroadcastGroup) => {
     setEmailSidebarOpen(false);
     try {
-      const accounts = await getConnectedEmailAccounts();
-      const wanted = group.channel === 'outlook' ? 'microsoft' : 'google';
-      const account =
-        accounts.find((item) => item.provider === wanted && item.status === 'active') ??
-        accounts.find((item) => item.provider === wanted);
+      const account = await resolveConnectedEmailAccount(group.channel);
 
       if (!account) {
         Alert.alert('No connected account', `Connect a ${EMAIL_PROVIDER_META[group.channel].label} account first.`);
@@ -5496,17 +6488,70 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
       }
 
       emailComposeGroupAccountRef.current = account.id;
+      setEmailComposeFromEmail(account.email);
       setEmailComposeGroup(group);
       setEmailComposeMode('new');
       setEmailComposeTo(`${group.name} · ${group.memberCount} member${group.memberCount === 1 ? '' : 's'}`);
       setEmailComposeSubject('');
+      setEmailComposeTemplateId(null);
       setEmailComposeBody('');
       setEmailComposeError(null);
       setEmailComposeOpen(true);
     } catch (error) {
       Alert.alert('Unable to load accounts', getActionErrorMessage(error, 'Could not reach the email service.'));
     }
-  }, []);
+  }, [resolveConnectedEmailAccount]);
+
+  const openEmailGroupTemplatePicker = useCallback(async () => {
+    if (!emailGroupDetail) {
+      return;
+    }
+
+    setEmailGroupTemplateOpen(true);
+    setEmailGroupTemplatesLoading(true);
+    setEmailGroupTemplateError(null);
+    try {
+      const templates = await loadEmailTemplatesFromApi();
+      setEmailGroupTemplates(templates);
+    } catch (error) {
+      setEmailGroupTemplates([]);
+      setEmailGroupTemplateError(getActionErrorMessage(error, 'Unable to load saved templates.'));
+    } finally {
+      setEmailGroupTemplatesLoading(false);
+    }
+  }, [emailGroupDetail]);
+
+  const selectEmailGroupTemplate = useCallback(async (template: ChatTemplate) => {
+    if (!emailGroupDetail || emailGroupTemplateSendingId) {
+      return;
+    }
+
+    setEmailGroupTemplateSendingId(template.id);
+    setEmailGroupTemplateError(null);
+    try {
+      const account = await resolveConnectedEmailAccount(emailGroupDetail.channel);
+      if (!account) {
+        throw new Error(`Connect a ${EMAIL_PROVIDER_META[emailGroupDetail.channel].label} account first.`);
+      }
+
+      const bodySource = template.bodyHtml || template.bodyText || template.body;
+      emailComposeGroupAccountRef.current = account.id;
+      setEmailComposeFromEmail(account.email);
+      setEmailComposeGroup(emailGroupDetail);
+      setEmailComposeMode('new');
+      setEmailComposeTo(`${emailGroupDetail.name} Â· ${emailGroupDetail.memberCount} member${emailGroupDetail.memberCount === 1 ? '' : 's'}`);
+      setEmailComposeSubject(template.subject || template.name);
+      setEmailComposeTemplateId(template.id);
+      setEmailComposeBody(bodySource);
+      setEmailComposeError(null);
+      setEmailGroupTemplateOpen(false);
+      setEmailComposeOpen(true);
+    } catch (error) {
+      setEmailGroupTemplateError(getActionErrorMessage(error, 'Unable to open this template.'));
+    } finally {
+      setEmailGroupTemplateSendingId(null);
+    }
+  }, [emailGroupDetail, emailGroupTemplateSendingId, resolveConnectedEmailAccount]);
 
   const submitEmailBroadcastToGroup = useCallback(async () => {
     if (!emailComposeGroup || emailComposeSending) {
@@ -5532,12 +6577,15 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
       await sendEmailBroadcastToGroup({
         fromEmailAccountId: accountId,
         subject: subjectText,
-        bodyHtml: bodyText,
+        bodyHtml: toEmailBodyHtml(bodyText),
+        bodyText: toEmailBodyText(bodyText),
+        templateId: emailComposeTemplateId,
         groupId: emailComposeGroup.id,
       });
       const summary = `Email queued for ${emailComposeGroup.memberCount} member${emailComposeGroup.memberCount === 1 ? '' : 's'} of "${emailComposeGroup.name}".`;
       setEmailComposeOpen(false);
       setEmailComposeGroup(null);
+      setEmailComposeTemplateId(null);
       setEmailComposeBody('');
       loadSentRuns();
       Alert.alert('Broadcast queued', summary);
@@ -5546,7 +6594,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     } finally {
       setEmailComposeSending(false);
     }
-  }, [emailComposeBody, emailComposeGroup, emailComposeSending, emailComposeSubject, loadSentRuns]);
+  }, [emailComposeBody, emailComposeGroup, emailComposeSending, emailComposeSubject, emailComposeTemplateId, loadSentRuns]);
 
   const closeComposerPopups = useCallback(() => {
     setAgentMenuOpen(false);
@@ -5741,6 +6789,16 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
       return true;
     }
 
+    if (listSelectMode) {
+      exitListSelectMode();
+      return true;
+    }
+
+    if (filterSidebarOpen) {
+      setFilterSidebarOpen(false);
+      return true;
+    }
+
     if (filterDropdownOpen) {
       setFilterDropdownOpen(false);
       return true;
@@ -5764,13 +6822,16 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     detailsOpen,
     emojiPickerOpen,
     filterDropdownOpen,
+    filterSidebarOpen,
     isChatFocused,
+    listSelectMode,
     mediaLibraryOpen,
     pendingAttachment,
     quickActionsOpen,
     quickComposer,
     templateMenuOpen,
     threadSearchOpen,
+    exitListSelectMode,
   ]);
 
   useFocusEffect(
@@ -5907,6 +6968,8 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     const isWhatsAppThread = isWhatsAppChannel(activeConversation.channel);
     const composerBottomPadding = isKeyboardVisible ? 12 : Math.max(insets.bottom, 12);
     const floatingMenuBottom = composerBottomPadding + 62;
+    const templateMenuMaxHeight = Math.max(260, Math.min(460, height - floatingMenuBottom - Math.max(insets.top, 16) - 20));
+    const templateListMaxHeight = Math.max(150, templateMenuMaxHeight - 150);
     const composerPopupOpen = agentMenuOpen || quickActionsOpen || templateMenuOpen || Boolean(quickComposer) || emojiPickerOpen;
     const ThreadSurface = (isWhatsAppThread ? ImageBackground : View) as React.ComponentType<any>;
     const threadSurfaceProps = isWhatsAppThread
@@ -6153,11 +7216,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                 ListEmptyComponent={
                   <View style={styles.emptyThread}>
                     {isLoadingMessages ? (
-                      <Reanimated.View entering={FadeIn.duration(300)} style={{ width: '100%', padding: 16 }}>
-                        <SkeletonMessageBlock />
-                        <SkeletonMessageBlock isSender />
-                        <SkeletonMessageBlock />
-                        <SkeletonMessageBlock isSender />
+                      <Reanimated.View entering={FadeIn.duration(300)} style={{ width: '100%' }}>
                         <SkeletonMessageBlock />
                       </Reanimated.View>
                     ) : (
@@ -6222,7 +7281,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                         {getSmartReplies(latestSubject).map((reply) => (
                           <TouchableOpacity
                             key={reply}
-                            onPress={() => openEmailCompose('reply', reply)}
+                            onPress={() => void openEmailCompose('reply', reply)}
                             activeOpacity={0.75}
                             style={{ paddingHorizontal: 14, paddingVertical: 7, borderRadius: 999, borderWidth: 1, borderColor: appTheme.border }}
                           >
@@ -6235,7 +7294,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                       <View style={{ flexDirection: 'row', gap: 10, paddingTop: 10 }}>
                         <TouchableOpacity
                           style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: provider.color, borderRadius: 24, paddingVertical: 12 }}
-                          onPress={() => openEmailCompose('reply')}
+                          onPress={() => void openEmailCompose('reply')}
                           activeOpacity={0.85}
                         >
                           <Reply color="#FFF" size={17} />
@@ -6243,7 +7302,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                         </TouchableOpacity>
                         <TouchableOpacity
                           style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderRadius: 24, paddingVertical: 12, borderWidth: 1.5, borderColor: provider.color }}
-                          onPress={() => openEmailCompose('forward')}
+                          onPress={() => void openEmailCompose('forward')}
                           activeOpacity={0.85}
                         >
                           <ForwardIcon color={provider.color} size={17} />
@@ -6310,7 +7369,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
               )}
 
               {templateMenuOpen && (
-                <View style={[styles.templateMenu, { bottom: floatingMenuBottom, backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
+                <View style={[styles.templateMenu, { bottom: floatingMenuBottom, maxHeight: templateMenuMaxHeight, backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
                   <View style={styles.templateMenuHeader}>
                     <View>
                       <Typography variant="caption" color={appTheme.muted} style={styles.quickActionTitle}>
@@ -6342,18 +7401,30 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                     </Typography>
                   )}
 
-                  {templatesLoading ? (
+                  {templateSending ? (
+                    <View style={styles.templateLoadingRow}>
+                      <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+                      <Typography variant="caption" color={appTheme.muted}>Sending template...</Typography>
+                    </View>
+                  ) : templatesLoading ? (
                     <View style={styles.templateLoadingRow}>
                       <ActivityIndicator color={appTheme.primaryAccent} size="small" />
                       <Typography variant="caption" color={appTheme.muted}>Loading templates...</Typography>
                     </View>
                   ) : filteredTemplates.length ? (
-                    <ScrollView style={styles.templateList} showsVerticalScrollIndicator={false} nestedScrollEnabled>
+                    <ScrollView
+                      style={[styles.templateList, { maxHeight: templateListMaxHeight }]}
+                      contentContainerStyle={styles.templateListContent}
+                      showsVerticalScrollIndicator
+                      nestedScrollEnabled
+                      keyboardShouldPersistTaps="handled"
+                    >
                       {filteredTemplates.map((template) => (
                         <TouchableOpacity
                           key={template.id}
                           style={[styles.templateItem, { backgroundColor: appTheme.input, borderColor: appTheme.border }]}
-                          onPress={() => applyTemplate(template)}
+                          onPress={() => void handleTemplateSelect(template)}
+                          disabled={templateSending}
                           activeOpacity={0.78}
                         >
                           <View style={styles.templateItemTop}>
@@ -6886,6 +7957,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     const closeComposeSheet = () => {
       setEmailComposeOpen(false);
       setEmailComposeGroup(null);
+      setEmailComposeFromEmail('');
       setEmailComposeMinimized(false);
       setEmailComposeMaximized(false);
       setEmailComposeEmojiOpen(false);
@@ -6905,6 +7977,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
       setEmailComposeTemplateSearch('');
       emailComposeHistoryRef.current = [];
       emailComposeRedoRef.current = [];
+      emailComposeGroupAccountRef.current = null;
     };
 
     // Contact suggestions for the To field — mirrors ComposeWindow's
@@ -7017,6 +8090,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
         setEmailComposeSubject(template.name);
       }
       pushBodyHistory(emailComposeBody);
+      setEmailComposeTemplateId(template.id);
       setEmailComposeBody(template.body);
       setEmailComposeTemplatesOpen(false);
     };
@@ -7024,6 +8098,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     const discardCompose = () => {
       setEmailComposeTo('');
       setEmailComposeSubject('');
+      setEmailComposeTemplateId(null);
       setEmailComposeBody('');
       setEmailComposeError(null);
       closeComposeSheet();
@@ -7225,7 +8300,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft }}>
                       <Typography variant="bodySmall" color={appTheme.muted} style={{ width: 52 }}>From</Typography>
                       <Typography variant="bodySmall" color={appTheme.text} numberOfLines={1} style={{ flex: 1 }}>
-                        {currentUser?.email || `Connected ${provider.label} account`}
+                        {emailComposeFromEmail || `Connect ${provider.label} in Settings`}
                       </Typography>
                       <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999, backgroundColor: provider.color }}>
                         <Typography variant="caption" color="#FFF" style={{ fontSize: 9, fontWeight: '700' }}>{provider.label}</Typography>
@@ -7547,51 +8622,63 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
     );
   }
 
+  const chatSubscreenOpen = createChatMenuOpen || broadcastGroupsScreenOpen;
+
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
-      <Reanimated.View entering={FadeInDown.delay(0).duration(380).springify()} style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 16 }]}>
-        <View style={styles.headerTopRow}>
-          <View style={styles.titleArea}>
-            <Typography variant="h1" color={appTheme.text}>Chats</Typography>
+      {!isEmailGroupFolder && !chatSubscreenOpen && (
+        <Reanimated.View entering={FadeInDown.delay(0).duration(380).springify()} style={[styles.header, styles.mainChatsHeader, { paddingTop: Math.max(insets.top, 16) + 16, zIndex: 10, backgroundColor: appTheme.background }]}>
+          <View style={styles.headerTopRow}>
+            <View style={styles.titleArea}>
+              <Typography variant="h1" color={appTheme.text} style={{ fontWeight: '800' }}>Chats</Typography>
+            </View>
           </View>
-        </View>
-        <Typography variant="bodySmall" color={appTheme.muted} numberOfLines={1} style={styles.headerMeta}>
-          {filteredConversations.length} focused • {conversations.length} total • {lastSyncedLabel}
-        </Typography>
-      </Reanimated.View>
+          <Typography variant="bodySmall" color={appTheme.muted} numberOfLines={1} style={[styles.headerMeta, { fontWeight: '600', marginTop: 4 }]}>
+            {focusedConversationCount} focused • {liveConversationCount} total • {lastSyncedLabel}
+          </Typography>
+        </Reanimated.View>
+      )}
 
-      <View style={styles.content}>
+      <View style={[styles.content, chatSubscreenOpen && styles.contentFullBleed]}>
         {createChatMenuOpen || filterDropdownOpen ? (
           <Pressable style={styles.listDismissLayer} onPress={closeConversationListPopups} />
         ) : null}
         {createChatMenuOpen && (
           <View style={[StyleSheet.absoluteFill, { backgroundColor: appTheme.background, zIndex: 999, elevation: 40 }]}>
-             <View style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 16, flexDirection: 'row', alignItems: 'center', gap: 16 }]}>
-               <TouchableOpacity onPress={closeCreateChatMenu} activeOpacity={0.7}>
+             <View style={[styles.subscreenHeader, { paddingTop: Math.max(insets.top, 16) + 14, backgroundColor: appTheme.background }]}>
+               <TouchableOpacity onPress={closeCreateChatMenu} activeOpacity={0.7} style={styles.subscreenBackButton}>
                  <ArrowLeft color={appTheme.text} size={24} />
                </TouchableOpacity>
-               <Typography variant="h2" color={appTheme.text} style={{ fontWeight: '700' }}>New chat</Typography>
+               <Typography variant="h2" color={appTheme.text} style={{ fontWeight: '800' }}>New chat</Typography>
              </View>
 
              {(() => {
                const query = createChatSearch.trim().toLowerCase();
+               const connectedBroadcastGroups = broadcastGroups.filter((group) =>
+                 matchesConnectedWhatsAppGroupSource(group, connectedWhatsAppSources),
+               );
                const groupsForNewChat = query
-                 ? broadcastGroups.filter((group) => group.name.toLowerCase().includes(query))
-                 : broadcastGroups;
+                 ? connectedBroadcastGroups.filter((group) => group.name.toLowerCase().includes(query))
+                 : connectedBroadcastGroups;
                const allGroupsSelected = groupsForNewChat.length > 0 && groupsForNewChat.every((group) => newChatGroupIds.has(group.id));
                const contactsForNewChat = createChatContacts.slice(0, 200);
+               const newChatEmptyText = isLoadingIntegrations
+                 ? 'Loading WhatsApp contacts...'
+                 : connectedWhatsAppSources.size === 0
+                   ? 'Connect WhatsApp in Integrations to view contacts'
+                   : 'No connected WhatsApp contacts or groups found';
 
                const listHeader = (
                  <View>
-                   <View style={{ paddingHorizontal: 16, paddingBottom: 4 }}>
-                     <View style={[styles.createChatSearchBar, { backgroundColor: appTheme.input, borderColor: appTheme.borderSoft, marginBottom: 16 }]}>
-                       <Search color={appTheme.disabled} size={17} />
+                   <View style={{ paddingHorizontal: 24, paddingBottom: 4, paddingTop: 8 }}>
+                     <View style={[styles.createChatSearchBar, { backgroundColor: appTheme.input, borderColor: appTheme.borderSoft, marginBottom: 16, borderRadius: 24, paddingHorizontal: 16, height: 48 }]}>
+                       <Search color={appTheme.muted} size={18} />
                        <TextInput
                          placeholder="Search name or number"
                          placeholderTextColor={appTheme.disabled}
                          value={createChatSearch}
                          onChangeText={setCreateChatSearch}
-                         style={[styles.createChatSearchInput, WEB_INPUT_RESET, { color: appTheme.text }]}
+                         style={[styles.createChatSearchInput, WEB_INPUT_RESET, { color: appTheme.text, fontSize: 15, fontWeight: '500' }]}
                        />
                      </View>
 
@@ -7619,7 +8706,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                    </View>
 
                    {groupsForNewChat.length > 0 && (
-                     <View style={{ paddingHorizontal: 16 }}>
+                     <View style={{ paddingHorizontal: 24 }}>
                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, marginBottom: 8 }}>
                          <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '600', letterSpacing: 0.5 }}>GROUPS</Typography>
                          <TouchableOpacity
@@ -7698,7 +8785,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                      </View>
                    )}
 
-                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, marginTop: 8, marginBottom: 8 }}>
+                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 24, marginTop: 8, marginBottom: 8 }}>
                      <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '600', letterSpacing: 0.5 }}>CONTACTS</Typography>
                      <Typography variant="caption" color={appTheme.muted}>{contactsForNewChat.length}</Typography>
                    </View>
@@ -7725,48 +8812,105 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                        groupsForNewChat.length ? null : (
                          <View style={{ alignItems: 'center', paddingVertical: 32, gap: 8 }}>
                            <Search color={appTheme.disabled} size={26} />
-                           <Typography variant="bodySmall" color={appTheme.muted}>No contacts or groups found</Typography>
+                           <Typography variant="bodySmall" color={appTheme.muted}>{newChatEmptyText}</Typography>
                          </View>
                        )
                      }
-                     renderItem={({ item: conversation }) => (
-                       <TouchableOpacity
-                         style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 10, gap: 12, paddingHorizontal: 16 }}
-                         activeOpacity={0.7}
-                         onPress={() => void openCreateChatConversation(conversation)}
-                       >
-                         <Avatar src={conversation.avatar} fallback={getInitials(conversation.name)} size={44} />
-                         <View style={{ flex: 1 }}>
-                           <Typography variant="body" color={appTheme.text} style={{ fontWeight: '500', fontSize: 15 }} numberOfLines={1}>
-                             {conversation.name}
-                           </Typography>
-                           {conversation.phone ? (
-                             <Typography variant="bodySmall" color={appTheme.muted} style={{ marginTop: 2 }} numberOfLines={1}>
-                               {formatPhone(conversation.phone)}
+                     renderItem={({ item: conversation }) => {
+                       const contactChecked = createChatSelectedIds.has(conversation.id);
+                       const selectionActive = createChatSelectedIds.size > 0;
+                       return (
+                         <TouchableOpacity
+                           style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 10, gap: 12, paddingHorizontal: 24, backgroundColor: contactChecked ? (appTheme.darkMode ? 'rgba(0,168,132,0.12)' : 'rgba(0,168,132,0.08)') : 'transparent' }}
+                           activeOpacity={0.7}
+                           // Tap opens the chat (like frontend-2); tap while selecting — or
+                           // long-press — toggles the contact into the selection instead.
+                           onPress={() => {
+                             if (selectionActive) {
+                               toggleCreateChatSelection(conversation.id);
+                             } else {
+                               void openCreateChatConversation(conversation);
+                             }
+                           }}
+                           onLongPress={() => toggleCreateChatSelection(conversation.id)}
+                           delayLongPress={250}
+                         >
+                           <TouchableOpacity
+                             onPress={() => toggleCreateChatSelection(conversation.id)}
+                             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                             activeOpacity={0.7}
+                           >
+                             {contactChecked
+                               ? <CheckSquare color="#00A884" size={22} />
+                               : <Square color={appTheme.muted} size={22} />}
+                           </TouchableOpacity>
+                           <Avatar src={conversation.avatar} fallback={getInitials(conversation.name)} size={44} />
+                           <View style={{ flex: 1 }}>
+                             <Typography variant="body" color={appTheme.text} style={{ fontWeight: '500', fontSize: 15 }} numberOfLines={1}>
+                               {conversation.name}
                              </Typography>
-                           ) : null}
-                         </View>
-                         <ChannelGlyph channel={conversation.channel} size={14} />
-                       </TouchableOpacity>
-                     )}
+                             {conversation.phone ? (
+                               <Typography variant="bodySmall" color={appTheme.muted} style={{ marginTop: 2 }} numberOfLines={1}>
+                                 {formatPhone(conversation.phone)}
+                               </Typography>
+                             ) : null}
+                           </View>
+                           <ChannelGlyph channel={conversation.channel} size={14} />
+                         </TouchableOpacity>
+                       );
+                     }}
                    />
 
-                   {newChatGroupIds.size > 0 && (
+                   {/* Bottom action bar — mirrors frontend-2's New Chat panel:
+                       groups selected → Send Broadcast · 1 contact → Open Chat · many → Create Group */}
+                   {(newChatGroupIds.size > 0 || createChatSelectedIds.size > 0) && (
                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 12, borderTopWidth: 1, borderTopColor: appTheme.borderSoft }}>
                        <View style={{ flex: 1 }}>
                          <Typography variant="body" color={appTheme.text} style={{ fontWeight: '600' }}>
-                           {newChatGroupIds.size} group{newChatGroupIds.size === 1 ? '' : 's'} selected
+                           {newChatGroupIds.size > 0
+                             ? `${newChatGroupIds.size} group${newChatGroupIds.size === 1 ? '' : 's'} selected`
+                             : `${createChatSelectedIds.size} contact${createChatSelectedIds.size === 1 ? '' : 's'} selected`}
                          </Typography>
                        </View>
                        <TouchableOpacity
                          style={{ backgroundColor: '#00A884', borderRadius: 10, paddingHorizontal: 16, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }}
                          activeOpacity={0.8}
-                         onPress={() => openBroadcastTemplatePicker({ groupIds: Array.from(newChatGroupIds) })}
+                         onPress={() => {
+                           if (newChatGroupIds.size > 0) {
+                             openBroadcastTemplatePicker({ groupIds: Array.from(newChatGroupIds) });
+                             return;
+                           }
+                           if (createChatSelectedIds.size === 1) {
+                             const selected = contactsForNewChat.find((conversation) => createChatSelectedIds.has(conversation.id))
+                               ?? createChatContacts.find((conversation) => createChatSelectedIds.has(conversation.id));
+                             if (selected) {
+                               void openCreateChatConversation(selected);
+                             }
+                             return;
+                           }
+                           openCreateGroupModal();
+                         }}
                        >
-                         <Send color="#FFF" size={16} />
-                         <Typography variant="bodySmall" color="#FFF" style={{ fontWeight: '600' }}>Send Broadcast</Typography>
+                         {newChatGroupIds.size > 0
+                           ? <Send color="#FFF" size={16} />
+                           : createChatSelectedIds.size === 1
+                             ? <MessageSquare color="#FFF" size={16} />
+                             : <Users color="#FFF" size={16} />}
+                         <Typography variant="bodySmall" color="#FFF" style={{ fontWeight: '600' }}>
+                           {newChatGroupIds.size > 0
+                             ? 'Send Broadcast'
+                             : createChatSelectedIds.size === 1
+                               ? 'Open Chat'
+                               : 'Create Group'}
+                         </Typography>
                        </TouchableOpacity>
-                       <TouchableOpacity onPress={() => setNewChatGroupIds(new Set())} activeOpacity={0.7}>
+                       <TouchableOpacity
+                         onPress={() => {
+                           setNewChatGroupIds(new Set());
+                           setCreateChatSelectedIds(new Set());
+                         }}
+                         activeOpacity={0.7}
+                       >
                          <Typography variant="bodySmall" color={appTheme.muted}>Clear</Typography>
                        </TouchableOpacity>
                      </View>
@@ -7774,12 +8918,128 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                  </>
                );
              })()}
+
+             {/* ── Create Group modal — name + colour + optional existing groups ── */}
+             <Modal visible={createGroupModalOpen} transparent animationType="fade" onRequestClose={() => setCreateGroupModalOpen(false)}>
+               <Pressable
+                 style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', paddingHorizontal: 20 }}
+                 onPress={() => !createGroupSaving && setCreateGroupModalOpen(false)}
+               >
+                 <Pressable
+                   style={{ backgroundColor: appTheme.surface, borderRadius: 20, padding: 20, gap: 14, borderWidth: 1, borderColor: appTheme.borderSoft, ...Theme.shadows.medium }}
+                   onPress={() => undefined}
+                 >
+                   <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                     <Typography variant="h3" color={appTheme.text} style={{ fontWeight: '800' }}>Create Group</Typography>
+                     <TouchableOpacity onPress={() => setCreateGroupModalOpen(false)} disabled={createGroupSaving} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                       <X color={appTheme.muted} size={20} />
+                     </TouchableOpacity>
+                   </View>
+                   <Typography variant="bodySmall" color={appTheme.muted}>
+                     {createChatSelectedIds.size} contact{createChatSelectedIds.size === 1 ? '' : 's'} will be added.
+                   </Typography>
+
+                   <TextInput
+                     placeholder="Group name"
+                     placeholderTextColor={appTheme.disabled}
+                     value={createGroupName}
+                     onChangeText={setCreateGroupName}
+                     editable={!createGroupSaving}
+                     style={[WEB_INPUT_RESET, { backgroundColor: appTheme.input, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, color: appTheme.text, fontSize: 15, borderWidth: 1, borderColor: appTheme.borderSoft }]}
+                   />
+
+                   {/* Colour palette — same options as frontend-2 */}
+                   <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+                     {['#6366f1', '#8b5cf6', '#ec4899', '#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#06b6d4', '#3b82f6', '#64748b', '#10B981'].map((color) => (
+                       <TouchableOpacity
+                         key={color}
+                         onPress={() => setCreateGroupColor(color)}
+                         style={{
+                           width: 28,
+                           height: 28,
+                           borderRadius: 14,
+                           backgroundColor: color,
+                           borderWidth: createGroupColor === color ? 3 : 0,
+                           borderColor: appTheme.darkMode ? '#FFFFFF' : '#0F172A',
+                         }}
+                         activeOpacity={0.8}
+                       />
+                     ))}
+                   </View>
+
+                   {broadcastGroups.filter((group) => !group.isBroadcastList).length > 0 && (
+                     <View style={{ gap: 6 }}>
+                       <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '600', letterSpacing: 0.5 }}>
+                         OR ADD TO EXISTING GROUPS
+                       </Typography>
+                       <ScrollView style={{ maxHeight: 150 }} showsVerticalScrollIndicator={false}>
+                         {broadcastGroups.filter((group) => !group.isBroadcastList).map((group) => {
+                           const checked = createGroupExistingIds.has(group.id);
+                           return (
+                             <TouchableOpacity
+                               key={group.id}
+                               style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 }}
+                               activeOpacity={0.7}
+                               onPress={() => {
+                                 setCreateGroupExistingIds((current) => {
+                                   const next = new Set(current);
+                                   if (next.has(group.id)) next.delete(group.id);
+                                   else next.add(group.id);
+                                   return next;
+                                 });
+                               }}
+                             >
+                               {checked
+                                 ? <CheckSquare color="#00A884" size={20} />
+                                 : <Square color={appTheme.muted} size={20} />}
+                               <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: group.color || '#00A884', alignItems: 'center', justifyContent: 'center' }}>
+                                 <Users color="#FFF" size={14} />
+                               </View>
+                               <Typography variant="bodySmall" color={appTheme.text} style={{ flex: 1 }} numberOfLines={1}>{group.name}</Typography>
+                               <Typography variant="caption" color={appTheme.muted}>{group.memberCount}</Typography>
+                             </TouchableOpacity>
+                           );
+                         })}
+                       </ScrollView>
+                     </View>
+                   )}
+
+                   {createGroupError ? (
+                     <Typography variant="caption" color={Theme.colors.error}>{createGroupError}</Typography>
+                   ) : null}
+
+                   <TouchableOpacity
+                     style={{ backgroundColor: '#00A884', borderRadius: 12, paddingVertical: 13, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 8, opacity: createGroupSaving ? 0.6 : 1 }}
+                     activeOpacity={0.85}
+                     disabled={createGroupSaving}
+                     onPress={() => void handleCreateGroupFromSelection()}
+                   >
+                     {createGroupSaving
+                       ? <ActivityIndicator color="#FFF" size="small" />
+                       : <Users color="#FFF" size={16} />}
+                     <Typography variant="bodySmall" color="#FFF" style={{ fontWeight: '700' }}>
+                       {createGroupSaving ? 'Creating…' : 'Create Group'}
+                     </Typography>
+                   </TouchableOpacity>
+                 </Pressable>
+               </Pressable>
+             </Modal>
+
+             {/* ── Import Leads — Add Leads / Excel Upload / Scrape from URL ── */}
+             <ImportLeadsModal
+               visible={importLeadsOpen}
+               onClose={() => setImportLeadsOpen(false)}
+               onImportComplete={() => {
+                 void syncConversations({ silent: true, force: true });
+                 void fetchBroadcastGroups();
+               }}
+             />
           </View>
         )}
 
         {broadcastGroupsScreenOpen && (
           <View style={[StyleSheet.absoluteFill, { backgroundColor: appTheme.background, zIndex: 999, elevation: 40 }]}>
-             <View style={[styles.header, { paddingTop: Math.max(insets.top, 16) + 16, flexDirection: 'row', alignItems: 'center', gap: 16 }]}>
+             <View style={[styles.subscreenHeader, { paddingTop: Math.max(insets.top, 16) + 14, backgroundColor: appTheme.background }]}>
                <TouchableOpacity
                  onPress={() => {
                    setBroadcastGroupsScreenOpen(false);
@@ -7789,11 +9049,12 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                    closeGroupForm();
                  }}
                  activeOpacity={0.7}
+                 style={styles.subscreenBackButton}
                >
                  <ArrowLeft color={appTheme.text} size={24} />
                </TouchableOpacity>
-               <Typography variant="h2" color={appTheme.text} style={{ fontWeight: '700', flex: 1 }}>Broadcast Groups</Typography>
-               <TouchableOpacity onPress={() => void fetchBroadcastGroups()} activeOpacity={0.7}>
+               <Typography variant="h2" color={appTheme.text} style={{ fontWeight: '800', flex: 1 }}>Broadcast Groups</Typography>
+               <TouchableOpacity onPress={() => void fetchBroadcastGroups()} activeOpacity={0.7} style={styles.subscreenIconButton}>
                  {isLoadingGroups
                    ? <ActivityIndicator color={appTheme.text} size="small" />
                    : <RefreshCw color={appTheme.text} size={20} />}
@@ -7808,8 +9069,8 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                scrollEventThrottle={16}
                contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
              >
-             <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
-                <View style={[styles.createChatSearchBar, { backgroundColor: appTheme.input, borderColor: appTheme.borderSoft }]}>
+             <View style={{ paddingHorizontal: 24, paddingBottom: 8, paddingTop: 2 }}>
+                <View style={[styles.createChatSearchBar, { backgroundColor: appTheme.input, borderColor: appTheme.borderSoft, borderRadius: 24, height: 48 }]}>
                   <Search color={appTheme.disabled} size={17} />
                   <TextInput
                     placeholder="Search groups..."
@@ -7983,7 +9244,9 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                         <View style={{ flex: 1 }}>
                            <Typography variant="body" color={appTheme.text} style={{ fontWeight: '500', fontSize: 16 }}>{group.name}</Typography>
                            <Typography variant="bodySmall" color={appTheme.muted} style={{ marginTop: 2 }} numberOfLines={1}>
-                             {group.memberCount} member{group.memberCount === 1 ? '' : 's'}
+                             {group.isBroadcastList
+                               ? `${group.memberGroupCount ?? 0} group${(group.memberGroupCount ?? 0) === 1 ? '' : 's'}`
+                               : `${group.memberCount} member${group.memberCount === 1 ? '' : 's'}`}
                              {group.description ? ` · ${group.description}` : ''}
                            </Typography>
                         </View>
@@ -8045,6 +9308,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
           </View>
         ) : null}
 
+        {!isEmailGroupFolder && (
         <Reanimated.View entering={FadeInDown.delay(80).duration(380).springify()} style={[styles.filterRow, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', zIndex: 900 }]}>
           <View style={styles.filterDropdownWrap}>
             <TouchableOpacity
@@ -8057,7 +9321,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
             >
               {isEmailTabActive ? (
                 <ProviderLogo provider={emailTabProviderId} size={20} />
-              ) : (activeFilterOption.id === 'personal' || activeFilterOption.id === 'waba') ? (
+              ) : (activeFilterOption.id === 'personal' || activeFilterOption.id === 'waba' || activeFilterOption.id === 'email') ? (
                 <ChannelBrandLogo id={activeFilterOption.id} size={20} />
               ) : (
                 <View style={[styles.filterSelectedDot, { backgroundColor: activeFilterOption.color }]} />
@@ -8111,7 +9375,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                     }}
                     activeOpacity={0.75}
                   >
-                    {(channel.id === 'personal' || channel.id === 'waba' || channel.id === 'gmail' || channel.id === 'outlook') ? (
+                    {(channel.id === 'personal' || channel.id === 'waba' || channel.id === 'gmail' || channel.id === 'outlook' || channel.id === 'linkedin' || channel.id === 'email') ? (
                       <ChannelBrandLogo id={channel.id} size={18} />
                     ) : (
                       <View style={[styles.filterOptionDot, { backgroundColor: channel.color }]} />
@@ -8169,7 +9433,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                 </View>
              </View>
           )}
-          {isEmailTabActive && (
+          {isEmailTabActive && !isEmailGroupFolder && (
              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 {emailFolder !== 'inbox' && (
                   <TouchableOpacity
@@ -8207,7 +9471,250 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
              </View>
           )}
         </Reanimated.View>
+        )}
         
+        <Modal visible={filterSidebarOpen} transparent animationType="fade" onRequestClose={() => setFilterSidebarOpen(false)}>
+          <View style={StyleSheet.absoluteFill}>
+            <Pressable
+              style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(15,23,42,0.38)' }]}
+              onPress={() => setFilterSidebarOpen(false)}
+            />
+            <View
+              style={{
+                position: 'absolute',
+                top: 0,
+                right: 0,
+                bottom: 0,
+                width: Math.min(width * 0.86, 340),
+                backgroundColor: appTheme.surface,
+                borderLeftWidth: 1,
+                borderLeftColor: appTheme.borderSoft,
+                paddingTop: Math.max(insets.top, 16) + 14,
+                paddingBottom: Math.max(insets.bottom, 16),
+                shadowColor: '#000',
+                shadowOffset: { width: -6, height: 0 },
+                shadowOpacity: 0.16,
+                shadowRadius: 18,
+                elevation: 18,
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 18, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft }}>
+                <SlidersHorizontal color={appTheme.primaryAccent} size={19} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Typography variant="body" color={appTheme.text} style={{ fontWeight: '800', fontSize: 16 }}>Filters</Typography>
+                  <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
+                    {focusedConversationCount} focused · {liveConversationCount} total
+                  </Typography>
+                </View>
+                <TouchableOpacity onPress={() => setFilterSidebarOpen(false)} style={{ padding: 6 }} activeOpacity={0.7}>
+                  <X color={appTheme.muted} size={20} />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 18, gap: 18 }}>
+                {showWhatsAppChannelFilters ? (
+                  <>
+                    <View style={{ gap: 8 }}>
+                      <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800', textTransform: 'uppercase' }}>WhatsApp</Typography>
+                      {([
+                        { id: 'all' as const, label: 'All chats', icon: MessageCircle },
+                        { id: 'unread' as const, label: `Unread${whatsAppUnreadCount ? ` ${whatsAppUnreadCount}` : ''}`, icon: Clock },
+                      ]).map((option) => {
+                        const active = whatsAppListFilter === option.id;
+                        const Icon = option.icon;
+                        return (
+                          <TouchableOpacity
+                            key={option.id}
+                            onPress={() => {
+                              setWhatsAppListFilter(option.id);
+                              setFilterSidebarOpen(false);
+                            }}
+                            activeOpacity={0.75}
+                            style={[styles.filterSheetOption, { backgroundColor: active ? '#00A88418' : appTheme.input, borderColor: active ? '#00A884' : appTheme.borderSoft }]}
+                          >
+                            <Icon color={active ? '#00A884' : appTheme.muted} size={18} />
+                            <Typography variant="bodySmall" color={appTheme.text} style={styles.filterSheetOptionText}>{option.label}</Typography>
+                            {active ? <Check color="#00A884" size={17} /> : null}
+                          </TouchableOpacity>
+                        );
+                      })}
+                      <TouchableOpacity
+                        onPress={() => setWhatsAppHideEmpty((value) => !value)}
+                        activeOpacity={0.75}
+                        style={[styles.filterSheetOption, { backgroundColor: whatsAppHideEmpty ? '#00A88418' : appTheme.input, borderColor: whatsAppHideEmpty ? '#00A884' : appTheme.borderSoft }]}
+                      >
+                        {whatsAppHideEmpty ? <EyeOff color="#00A884" size={18} /> : <Eye color={appTheme.muted} size={18} />}
+                        <Typography variant="bodySmall" color={appTheme.text} style={styles.filterSheetOptionText}>
+                          {whatsAppHideEmpty ? 'Hiding empty' : 'Hide empty'}
+                        </Typography>
+                        {whatsAppHideEmpty ? <Check color="#00A884" size={17} /> : null}
+                      </TouchableOpacity>
+                    </View>
+
+                    <View style={{ gap: 8 }}>
+                      <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800', textTransform: 'uppercase' }}>Stage</Typography>
+                      <TouchableOpacity
+                        onPress={() => {
+                          setWhatsAppStageFilter('all');
+                          setFilterSidebarOpen(false);
+                        }}
+                        activeOpacity={0.75}
+                        style={[styles.filterSheetOption, { backgroundColor: whatsAppStageFilter === 'all' ? '#00A88418' : appTheme.input, borderColor: whatsAppStageFilter === 'all' ? '#00A884' : appTheme.borderSoft }]}
+                      >
+                        <Tag color={whatsAppStageFilter === 'all' ? '#00A884' : appTheme.muted} size={18} />
+                        <Typography variant="bodySmall" color={appTheme.text} style={styles.filterSheetOptionText}>All stages</Typography>
+                        {whatsAppStageFilter === 'all' ? <Check color="#00A884" size={17} /> : null}
+                      </TouchableOpacity>
+                      {whatsAppStageOptions.map((stage) => {
+                        const active = whatsAppStageFilter === stage.value;
+                        const stageColor = WABA_STAGE_COLORS[stage.value.toLowerCase()] ?? WABA_STAGE_DEFAULT;
+                        return (
+                          <TouchableOpacity
+                            key={stage.value}
+                            onPress={() => {
+                              setWhatsAppStageFilter(stage.value);
+                              setFilterSidebarOpen(false);
+                            }}
+                            activeOpacity={0.75}
+                            style={[styles.filterSheetOption, { backgroundColor: active ? `${stageColor}18` : appTheme.input, borderColor: active ? stageColor : appTheme.borderSoft }]}
+                          >
+                            <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: stageColor }} />
+                            <Typography variant="bodySmall" color={appTheme.text} style={styles.filterSheetOptionText}>{stage.label}</Typography>
+                            <Typography variant="caption" color={appTheme.muted}>{stage.count}</Typography>
+                            {active ? <Check color={stageColor} size={17} /> : null}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </>
+                ) : null}
+
+                {showLinkedInChannelFilters ? (
+                  <View style={{ gap: 8 }}>
+                    <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800', textTransform: 'uppercase' }}>LinkedIn status</Typography>
+                    {([
+                      { id: 'all' as const, label: `All ${linkedInStatusCounts.all}`, icon: Users, color: '#0A66C2' },
+                      { id: 'pending' as const, label: `${linkedInStatusCounts.pending} pending`, icon: Clock, color: '#F59E0B' },
+                      { id: 'accepted' as const, label: `${linkedInStatusCounts.accepted} connected`, icon: CircleCheck, color: '#10B981' },
+                      { id: 'active' as const, label: `${linkedInStatusCounts.active} active`, icon: Zap, color: '#22C55E' },
+                    ]).map((option) => {
+                      const active = linkedInStatusFilter === option.id;
+                      const Icon = option.icon;
+                      return (
+                        <TouchableOpacity
+                          key={option.id}
+                          onPress={() => {
+                            setLinkedInStatusFilter(option.id);
+                            setFilterSidebarOpen(false);
+                          }}
+                          activeOpacity={0.75}
+                          style={[styles.filterSheetOption, { backgroundColor: active ? `${option.color}18` : appTheme.input, borderColor: active ? option.color : appTheme.borderSoft }]}
+                        >
+                          <Icon color={active ? option.color : appTheme.muted} size={18} />
+                          <Typography variant="bodySmall" color={appTheme.text} style={styles.filterSheetOptionText}>{option.label}</Typography>
+                          {active ? <Check color={option.color} size={17} /> : null}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                ) : null}
+
+                {isEmailTabActive ? (
+                  <View style={{ gap: 8 }}>
+                    <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800', textTransform: 'uppercase' }}>Mail folders</Typography>
+                    {[
+                      { id: 'inbox', label: 'Inbox', icon: Inbox },
+                      { id: 'starred', label: 'Starred', icon: Star },
+                      { id: 'sent', label: 'Sent', icon: Send },
+                      { id: 'drafts', label: 'Drafts', icon: FileText },
+                      { id: 'spam', label: 'Spam', icon: AlertTriangle },
+                      { id: 'trash', label: 'Trash', icon: Trash2 },
+                    ].map((folder) => {
+                      const active = emailFolder === folder.id;
+                      return (
+                        <TouchableOpacity
+                          key={folder.id}
+                          onPress={() => {
+                            selectEmailFolder(folder.id);
+                            setFilterSidebarOpen(false);
+                          }}
+                          activeOpacity={0.75}
+                          style={{
+                            minHeight: 42,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 12,
+                            borderRadius: 12,
+                            paddingHorizontal: 12,
+                            backgroundColor: active ? `${emailTabMeta.color}14` : 'transparent',
+                          }}
+                        >
+                          <folder.icon color={active ? emailTabMeta.color : appTheme.muted} size={18} />
+                          <Typography variant="bodySmall" color={active ? emailTabMeta.color : appTheme.text} style={{ flex: 1, fontWeight: active ? '800' : '600' }}>
+                            {folder.label}
+                          </Typography>
+                          {active ? <Check color={emailTabMeta.color} size={16} /> : null}
+                        </TouchableOpacity>
+                      );
+                    })}
+
+                    {emailCommsGroups.length ? (
+                      <View style={{ gap: 6, paddingTop: 6 }}>
+                        <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800', textTransform: 'uppercase' }}>Broadcast groups</Typography>
+                        {emailCommsGroups.map((group) => {
+                          const folderId = `group:${group.id}`;
+                          const active = emailFolder === folderId;
+                          return (
+                            <TouchableOpacity
+                              key={group.id}
+                              onPress={() => {
+                                selectEmailFolder(folderId);
+                                setFilterSidebarOpen(false);
+                              }}
+                              activeOpacity={0.75}
+                              style={{
+                                minHeight: 40,
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 10,
+                                borderRadius: 12,
+                                paddingHorizontal: 12,
+                                backgroundColor: active ? `${emailTabMeta.color}14` : 'transparent',
+                              }}
+                            >
+                              <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: group.color || emailTabMeta.color }} />
+                              <Typography variant="bodySmall" color={appTheme.text} style={{ flex: 1, fontWeight: active ? '800' : '600' }} numberOfLines={1}>
+                                {group.name}
+                              </Typography>
+                              <Typography variant="caption" color={appTheme.muted}>{group.memberCount}</Typography>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
+
+                <TouchableOpacity
+                  onPress={() => {
+                    setSearch('');
+                    setWhatsAppListFilter('all');
+                    setWhatsAppHideEmpty(false);
+                    setWhatsAppStageFilter('all');
+                    setLinkedInStatusFilter('all');
+                    setEmailFolder('inbox');
+                    setFilterSidebarOpen(false);
+                  }}
+                  activeOpacity={0.75}
+                  style={{ minHeight: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: appTheme.softSurface }}
+                >
+                  <Typography variant="bodySmall" color={appTheme.text} style={{ fontWeight: '800' }}>Clear filters</Typography>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
         <Modal visible={moreOptionsOpen} transparent={true} animationType="fade" onRequestClose={() => setMoreOptionsOpen(false)}>
           <TouchableOpacity style={StyleSheet.absoluteFill} onPress={() => setMoreOptionsOpen(false)} activeOpacity={1}>
             <View style={[styles.moreOptionsMenu, { backgroundColor: appTheme.surface, borderColor: appTheme.border, top: 130, right: 16 }]}>
@@ -8497,6 +10004,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
           </TouchableOpacity>
         </Modal>
 
+        {!isEmailGroupFolder && (
         <Reanimated.View entering={FadeInDown.delay(140).duration(380).springify()} style={[styles.searchBar, { backgroundColor: appTheme.input, borderColor: appTheme.border, borderWidth: 1 }]}>
           <Search color={appTheme.disabled} size={20} />
           <TextInput
@@ -8509,7 +10017,11 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
           <TouchableOpacity
             onPress={() => {
               closeCreateChatMenu();
-              setFilterDropdownOpen((value) => !value);
+              setFilterDropdownOpen(false);
+              if (isEmailTabActive) {
+                loadEmailCommsGroups();
+              }
+              setFilterSidebarOpen(true);
             }}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             activeOpacity={0.7}
@@ -8517,78 +10029,81 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
             <SlidersHorizontal color={appTheme.muted} size={19} />
           </TouchableOpacity>
         </Reanimated.View>
-
-        {/* Email folder-pane trigger — simple hamburger icon on the left */}
-        {isEmailTabActive && !emailSidebarOpen && (
-          <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: Theme.spacing.xl, paddingTop: 10, paddingBottom: 6 }}>
-            <TouchableOpacity
-              onPress={openEmailSidebar}
-              activeOpacity={0.7}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-            >
-              <MenuIcon color={appTheme.muted} size={22} />
-            </TouchableOpacity>
-          </View>
         )}
 
-        {listSelectMode && (
+        {!isEmailGroupFolder && listSelectMode && (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: Theme.spacing.xl, paddingVertical: 10 }}>
-            <CheckSquare color="#00A884" size={18} />
-            <Typography variant="bodySmall" color={appTheme.text} style={{ flex: 1, fontWeight: '600' }}>
-              {selectedChatIds.size} selected
-            </Typography>
-            <TouchableOpacity
-              onPress={() => {
-                const allIds = filteredConversations.map((conversation) => conversation.id);
-                const allSelected = allIds.length > 0 && allIds.every((id) => selectedChatIds.has(id));
-                setSelectedChatIds(allSelected ? new Set() : new Set(allIds));
-              }}
-            >
-              <Typography variant="caption" color={appTheme.primaryAccent}>
-                {filteredConversations.length > 0 && filteredConversations.every((conversation) => selectedChatIds.has(conversation.id))
-                  ? 'Deselect all'
-                  : 'Select all'}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <CheckSquare color="#00A884" size={18} />
+              <Typography
+                variant="bodySmall"
+                color={appTheme.text}
+                numberOfLines={1}
+                style={{ minWidth: 76, fontWeight: '600' }}
+              >
+                {selectedChatIds.size} selected
               </Typography>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => setAddToGroupOpen(true)}
-              disabled={!selectedChatIds.size}
-              style={{ padding: 6, opacity: selectedChatIds.size ? 1 : 0.4 }}
-              activeOpacity={0.7}
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ alignItems: 'center', gap: 10, paddingRight: 2 }}
+              style={{ flex: 1 }}
             >
-              <Users color="#8B5CF6" size={18} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => openBroadcastTemplatePicker({ conversationIds: Array.from(selectedChatIds) })}
-              disabled={!selectedChatIds.size}
-              style={{ padding: 6, opacity: selectedChatIds.size ? 1 : 0.4 }}
-              activeOpacity={0.7}
-            >
-              <Send color="#2563EB" size={18} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => void handleBulkResolve()}
-              disabled={!selectedChatIds.size}
-              style={{ padding: 6, opacity: selectedChatIds.size ? 1 : 0.4 }}
-              activeOpacity={0.7}
-            >
-              <CircleCheck color="#16A34A" size={18} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => void handleBulkDelete()}
-              disabled={!selectedChatIds.size}
-              style={{ padding: 6, opacity: selectedChatIds.size ? 1 : 0.4 }}
-              activeOpacity={0.7}
-            >
-              <Trash2 color={Theme.colors.error} size={18} />
-            </TouchableOpacity>
-            <TouchableOpacity onPress={exitListSelectMode} style={{ padding: 6 }} activeOpacity={0.7}>
-              <X color={appTheme.muted} size={18} />
-            </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  const allIds = filteredConversations.map((conversation) => conversation.id);
+                  const allSelected = allIds.length > 0 && allIds.every((id) => selectedChatIds.has(id));
+                  setSelectedChatIds(allSelected ? new Set() : new Set(allIds));
+                }}
+                style={{ minHeight: 32, justifyContent: 'center', paddingHorizontal: 4 }}
+              >
+                <Typography variant="caption" color={appTheme.primaryAccent} numberOfLines={1} style={{ fontWeight: '700' }}>
+                  {filteredConversations.length > 0 && filteredConversations.every((conversation) => selectedChatIds.has(conversation.id))
+                    ? 'Deselect all'
+                    : 'Select all'}
+                </Typography>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setAddToGroupOpen(true)}
+                disabled={!selectedChatIds.size}
+                style={{ padding: 6, opacity: selectedChatIds.size ? 1 : 0.4 }}
+                activeOpacity={0.7}
+              >
+                <Users color="#8B5CF6" size={18} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => openBroadcastTemplatePicker({ conversationIds: Array.from(selectedChatIds) })}
+                disabled={!selectedChatIds.size}
+                style={{ padding: 6, opacity: selectedChatIds.size ? 1 : 0.4 }}
+                activeOpacity={0.7}
+              >
+                <Send color="#2563EB" size={18} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => void handleBulkResolve()}
+                disabled={!selectedChatIds.size}
+                style={{ padding: 6, opacity: selectedChatIds.size ? 1 : 0.4 }}
+                activeOpacity={0.7}
+              >
+                <CircleCheck color="#16A34A" size={18} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => void handleBulkDelete()}
+                disabled={!selectedChatIds.size}
+                style={{ padding: 6, opacity: selectedChatIds.size ? 1 : 0.4 }}
+                activeOpacity={0.7}
+              >
+                <Trash2 color={Theme.colors.error} size={18} />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={exitListSelectMode} style={{ padding: 6 }} activeOpacity={0.7}>
+                <X color={appTheme.muted} size={18} />
+              </TouchableOpacity>
+            </ScrollView>
           </View>
         )}
 
-        {(error || syncError) && !((error || syncError || '').includes('Personal WhatsApp')) && (
+        {!isEmailGroupFolder && (error || syncError) && !((error || syncError || '').includes('Personal WhatsApp')) && (
           <View style={styles.errorStrip}>
             <Typography variant="bodySmall" color={Theme.colors.error}>
               {error || syncError}
@@ -8600,57 +10115,76 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
         {isEmailTabActive && emailFolder !== 'inbox' && emailFolder !== 'starred' ? (
           <Reanimated.View entering={FadeIn.duration(300)} style={{ flex: 1 }}>
             {emailFolder === 'sent' ? (
-              sentRunsLoading ? (
-                <ActivityIndicator color={emailTabMeta.color} style={{ marginTop: 40 }} />
-              ) : sentRuns.length === 0 ? (
-                <View style={{ alignItems: 'center', paddingTop: 60, gap: 10, paddingHorizontal: 32 }}>
-                  <Send color={appTheme.disabled} size={30} />
-                  <Typography variant="body" color={appTheme.muted}>No sent broadcasts yet</Typography>
-                  <Typography variant="caption" color={appTheme.disabled} style={{ textAlign: 'center' }}>
-                    Emails you broadcast to groups will appear here.
+              <View style={{ flex: 1 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft }}>
+                  <Typography variant="caption" color={appTheme.muted}>
+                    {sentRunsLoading
+                      ? 'Loading...'
+                      : sentRuns.length === 0
+                        ? 'No broadcasts yet'
+                        : `${sentRuns.length} broadcast${sentRuns.length === 1 ? '' : 's'}`}
                   </Typography>
+                  <TouchableOpacity
+                    onPress={() => void openSentBroadcastComposer()}
+                    activeOpacity={0.82}
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: emailTabMeta.color, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8 }}
+                  >
+                    <Pencil color="#FFF" size={14} />
+                    <Typography variant="caption" color="#FFF" style={{ fontWeight: '800' }}>New Broadcast</Typography>
+                  </TouchableOpacity>
                 </View>
-              ) : (
-                <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 120 }}>
-                  {sentRuns.map((run) => {
-                    const statusColor = run.status === 'completed' ? '#188038' : run.status === 'failed' ? '#D93025' : '#F9AB00';
-                    return (
-                      <TouchableOpacity
-                        key={run.id}
-                        onPress={() => openSentRun(run)}
-                        activeOpacity={0.75}
-                        style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft }}
-                      >
-                        <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: `${emailTabMeta.color}1A`, alignItems: 'center', justifyContent: 'center' }}>
-                          <Send color={emailTabMeta.color} size={17} />
-                        </View>
-                        <View style={{ flex: 1, minWidth: 0 }}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                            <Typography variant="body" style={{ flex: 1, fontWeight: '600', color: appTheme.text, fontSize: 15 }} numberOfLines={1}>
-                              {run.subject}
-                            </Typography>
-                            <Typography variant="caption" color={appTheme.muted}>{formatTime(run.createdAt)}</Typography>
-                          </View>
-                          <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={{ marginTop: 2 }}>
-                            To {run.recipientCount} recipient{run.recipientCount === 1 ? '' : 's'} · from {run.fromEmail}
-                          </Typography>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
-                            <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999, backgroundColor: `${statusColor}1A` }}>
-                              <Typography variant="caption" style={{ color: statusColor, fontWeight: '700', fontSize: 10, textTransform: 'capitalize' }}>
-                                {run.status.replace(/_/g, ' ')}
-                              </Typography>
-                            </View>
-                            <Typography variant="caption" color={appTheme.disabled}>
-                              {run.sentCount} sent{run.failedCount ? ` · ${run.failedCount} failed` : ''}
-                            </Typography>
-                          </View>
-                        </View>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
-              )
-            ) : emailFolder.startsWith('group:') ? (
+                {sentRunsLoading ? (
+                  <ActivityIndicator color={emailTabMeta.color} style={{ marginTop: 40 }} />
+                ) : sentRuns.length === 0 ? (
+                  <View style={{ alignItems: 'center', paddingTop: 60, gap: 10, paddingHorizontal: 32 }}>
+                    <Send color={appTheme.disabled} size={30} />
+                    <Typography variant="body" color={appTheme.muted}>No sent broadcasts yet</Typography>
+                    <Typography variant="caption" color={appTheme.disabled} style={{ textAlign: 'center' }}>
+                      Compose a new broadcast to send the same message to many recipients.
+                    </Typography>
+                  </View>
+                ) : (
+                  <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 120 }}>
+                    {sentRuns.map((run) => {
+                       const statusColor = run.status === 'completed' ? '#188038' : run.status === 'failed' ? '#D93025' : '#F9AB00';
+                       return (
+                         <TouchableOpacity
+                           key={run.id}
+                           onPress={() => openSentRun(run)}
+                           activeOpacity={0.75}
+                           style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft }}
+                         >
+                           <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: `${emailTabMeta.color}1A`, alignItems: 'center', justifyContent: 'center' }}>
+                             <Send color={emailTabMeta.color} size={17} />
+                           </View>
+                           <View style={{ flex: 1, minWidth: 0 }}>
+                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                               <Typography variant="body" style={{ flex: 1, fontWeight: '600', color: appTheme.text, fontSize: 15 }} numberOfLines={1}>
+                                 {run.subject}
+                               </Typography>
+                               <Typography variant="caption" color={appTheme.muted}>{formatTime(run.createdAt)}</Typography>
+                             </View>
+                             <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={{ marginTop: 2 }}>
+                               To {run.recipientCount} recipient{run.recipientCount === 1 ? '' : 's'} · from {run.fromEmail}
+                             </Typography>
+                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                               <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999, backgroundColor: `${statusColor}1A` }}>
+                                 <Typography variant="caption" style={{ color: statusColor, fontWeight: '700', fontSize: 10, textTransform: 'capitalize' }}>
+                                   {run.status.replace(/_/g, ' ')}
+                                 </Typography>
+                               </View>
+                               <Typography variant="caption" color={appTheme.disabled}>
+                                 {run.sentCount} sent{run.failedCount ? ` · ${run.failedCount} failed` : ''}
+                               </Typography>
+                             </View>
+                           </View>
+                         </TouchableOpacity>
+                       );
+                     })}
+                   </ScrollView>
+                 )}
+               </View>
+             ) : emailFolder.startsWith('group:') ? (
               (() => {
                 const MEMBER_COLORS = ['#7C3AED', '#EA580C', '#DB2777', '#0EA5E9', '#10B981', '#F59E0B', '#6366F1', '#EF4444'];
                 const channelName = emailGroupDetail?.channel === 'outlook' ? 'Outlook' : 'Gmail';
@@ -8662,129 +10196,165 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                   m.email.toLowerCase().includes(memberQuery),
                 );
                 const groupInitial = (emailGroupDetail?.name || '?').trim().charAt(0).toUpperCase() || '?';
-                const accent = emailGroupDetail?.color || emailTabMeta.color;
+
                 return (
-                  <View style={{ flex: 1 }}>
-                    {/* Header — back arrow, group identity, send-all + add-member actions */}
-                    <View style={{ paddingHorizontal: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft, backgroundColor: appTheme.surface }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                        <TouchableOpacity onPress={() => selectEmailFolder('inbox')} style={{ padding: 4 }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                          <ArrowLeft color={appTheme.text} size={22} />
-                        </TouchableOpacity>
-                        <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: accent, alignItems: 'center', justifyContent: 'center' }}>
-                          <Typography variant="body" color="#fff" style={{ fontWeight: '800', fontSize: 16 }}>{groupInitial}</Typography>
+                  <View style={{ flex: 1, backgroundColor: appTheme.darkMode ? appTheme.background : '#F0F4FF', marginHorizontal: -16, marginTop: -Math.max(insets.top, 16) - 16 }}>
+                    <ScrollView
+                      keyboardShouldPersistTaps="handled"
+                      showsVerticalScrollIndicator={false}
+                      contentContainerStyle={{ paddingBottom: insets.bottom + 130 }}
+                    >
+                      {/* ─── Animated Header (scrolls with content) ─── */}
+                      <View style={{ overflow: 'hidden', paddingTop: Math.max(insets.top, 16) + Math.max(insets.top, 16) + 18, paddingHorizontal: 16, paddingBottom: 36 }}>
+                        <AnimatedDotsBackground width={width} darkMode={appTheme.darkMode} />
+
+                        {/* Nav row */}
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+                          <TouchableOpacity
+                            onPress={() => selectEmailFolder('inbox')}
+                            activeOpacity={0.85}
+                            style={{ height: 42, borderRadius: 13, backgroundColor: '#0EA5E9', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7, paddingHorizontal: 14, shadowColor: '#0EA5E9', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.28, shadowRadius: 10, elevation: 4 }}
+                          >
+                            <ArrowLeft color={appTheme.darkMode ? '#fff' : '#1E293B'} size={20} />
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() => void openEmailGroupTemplatePicker()}
+                            activeOpacity={0.85}
+                            style={{ height: 42, borderRadius: 13, backgroundColor: '#0EA5E9', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7, paddingHorizontal: 14, shadowColor: '#0EA5E9', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.28, shadowRadius: 10, elevation: 4 }}
+                          >
+                            <Send color="#fff" size={16} />
+                            <Typography variant="caption" color="#fff" style={{ fontWeight: '800' }}>Send</Typography>
+                          </TouchableOpacity>
                         </View>
-                        <View style={{ flex: 1, minWidth: 0 }}>
-                          <Typography variant="body" color={appTheme.text} numberOfLines={1} style={{ fontWeight: '700', fontSize: 16 }}>{emailGroupDetail?.name || 'Loading group...'}</Typography>
-                          <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>{channelName} broadcast · {memberCount} member{memberCount === 1 ? '' : 's'}</Typography>
+
+                        {/* Avatar + identity */}
+                        <View style={{ alignItems: 'center', gap: 16, paddingHorizontal: 10 }}>
+                          <View style={{ position: 'relative' }}>
+                            <View style={{ width: 94, height: 94, borderRadius: 47, backgroundColor: '#2563EB', alignItems: 'center', justifyContent: 'center', shadowColor: '#2563EB', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.45, shadowRadius: 16, elevation: 10, borderWidth: 3, borderColor: '#fff' }}>
+                              <Typography variant="body" color="#fff" style={{ fontWeight: '900', fontSize: 34, lineHeight: 40 }}>{groupInitial}</Typography>
+                            </View>
+                            <View style={{ position: 'absolute', bottom: 4, right: 4, width: 24, height: 24, borderRadius: 12, backgroundColor: '#22C55E', alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' }}>
+                              <Check color="#fff" size={13} strokeWidth={3} />
+                            </View>
+                          </View>
+                          <Typography
+                            variant="body"
+                            color={appTheme.darkMode ? '#fff' : '#0F172A'}
+                            style={{ fontWeight: '800', fontSize: 22, lineHeight: 30, textAlign: 'center', letterSpacing: 0, maxWidth: '92%' }}
+                            numberOfLines={2}
+                          >
+                            {emailGroupDetail?.name || 'Loading...'}
+                          </Typography>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: appTheme.darkMode ? 'rgba(37,99,235,0.25)' : '#EEF2FF', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 5, borderWidth: 1, borderColor: appTheme.darkMode ? 'rgba(99,102,241,0.4)' : '#C7D2FE' }}>
+                              <Mail color="#4F46E5" size={12} strokeWidth={2.5} />
+                              <Typography variant="caption" style={{ color: '#4F46E5', fontWeight: '700', fontSize: 12 }}>{channelName} broadcast</Typography>
+                            </View>
+                          </View>
                         </View>
-                        <TouchableOpacity
-                          onPress={() => { if (emailGroupDetail) void openComposeToGroup(emailGroupDetail); }}
-                          disabled={!emailGroupDetail || memberCount === 0}
-                          activeOpacity={0.8}
-                          style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: (emailGroupDetail && memberCount > 0) ? accent : appTheme.softSurface, alignItems: 'center', justifyContent: 'center' }}
-                        >
-                          <Send color={(emailGroupDetail && memberCount > 0) ? '#fff' : appTheme.disabled} size={18} />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          onPress={() => Alert.alert('Add members', `Add members to "${emailGroupDetail?.name ?? 'this group'}" from the LAD web dashboard — they sync back here automatically.`)}
-                          activeOpacity={0.8}
-                          style={{ width: 40, height: 40, borderRadius: 20, borderWidth: 1, borderColor: appTheme.border, alignItems: 'center', justifyContent: 'center' }}
-                        >
-                          <UserPlus color={appTheme.muted} size={18} />
-                        </TouchableOpacity>
                       </View>
-                    </View>
 
-                    {emailGroupLoading ? (
-                      <ActivityIndicator color={emailTabMeta.color} style={{ marginTop: 40 }} />
-                    ) : (
-                      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 100 }}>
-                        {/* Stat cards — Members / Channel / Status */}
-                        <View style={{ flexDirection: 'row', gap: 10, marginBottom: 18 }}>
-                          <View style={{ flex: 1, borderWidth: 1, borderColor: appTheme.borderSoft, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: appTheme.surface }}>
-                            <Users color={accent} size={18} />
-                            <Typography variant="caption" color={appTheme.muted} style={{ marginTop: 8 }}>Members</Typography>
-                            <Typography variant="body" color={appTheme.text} style={{ fontWeight: '700', fontSize: 16 }}>{memberCount}</Typography>
-                          </View>
-                          <View style={{ flex: 1, borderWidth: 1, borderColor: appTheme.borderSoft, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: appTheme.surface }}>
-                            <Mail color={emailTabMeta.color} size={18} />
-                            <Typography variant="caption" color={appTheme.muted} style={{ marginTop: 8 }}>Channel</Typography>
-                            <Typography variant="body" color={appTheme.text} style={{ fontWeight: '700', fontSize: 16 }}>{channelName}</Typography>
-                          </View>
-                          <View style={{ flex: 1, borderWidth: 1, borderColor: appTheme.borderSoft, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 12, backgroundColor: appTheme.surface }}>
-                            <Check color="#10B981" size={18} />
-                            <Typography variant="caption" color={appTheme.muted} style={{ marginTop: 8 }}>Status</Typography>
-                            <Typography variant="body" color={appTheme.text} style={{ fontWeight: '700', fontSize: 16 }}>Active</Typography>
-                          </View>
-                        </View>
-
-                        {/* Members header + search */}
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                          <Typography variant="body" color={appTheme.text} style={{ fontWeight: '700', fontSize: 15 }}>Members ({memberCount})</Typography>
-                          <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: appTheme.borderSoft, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: appTheme.input }}>
-                            <Search color={appTheme.disabled} size={15} />
-                            <TextInput
-                              value={emailMemberSearch}
-                              onChangeText={setEmailMemberSearch}
-                              placeholder="Search members..."
-                              placeholderTextColor={appTheme.disabled}
-                              style={[WEB_INPUT_RESET, { flex: 1, color: appTheme.text, fontSize: 13, padding: 0 }]}
-                            />
-                          </View>
-                        </View>
-
-                        {/* Member rows */}
-                        {visibleMembers.length === 0 ? (
-                          <View style={{ alignItems: 'center', paddingVertical: 40 }}>
-                            <Users color={appTheme.disabled} size={30} />
-                            <Typography variant="bodySmall" color={appTheme.muted} style={{ marginTop: 12 }}>
-                              {memberCount === 0 ? 'No members in this group yet' : 'No members match your search'}
-                            </Typography>
-                          </View>
-                        ) : (
-                          visibleMembers.map((member, index) => {
-                            const displayName = member.contactName || member.email.split('@')[0] || 'Member';
-                            const initials = getInitials(displayName);
-                            const avatarColor = MEMBER_COLORS[index % MEMBER_COLORS.length];
-                            return (
-                              <View key={member.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft }}>
-                                <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: avatarColor, alignItems: 'center', justifyContent: 'center' }}>
-                                  <Typography variant="caption" color="#fff" style={{ fontWeight: '800', fontSize: 12 }}>{initials}</Typography>
-                                </View>
-                                <View style={{ flex: 1, minWidth: 0 }}>
-                                  <Typography variant="body" color={appTheme.text} numberOfLines={1} style={{ fontWeight: '600', fontSize: 14 }}>{displayName}</Typography>
-                                  <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>{member.email}</Typography>
-                                </View>
+                      {/* ─── Below header content ─── */}
+                      {emailGroupLoading ? (
+                        <ActivityIndicator color="#2563EB" style={{ marginTop: 48 }} />
+                      ) : (
+                        <>
+                          {/* Stat Cards */}
+                          <View style={{ flexDirection: 'row', gap: 12, paddingHorizontal: 16, paddingTop: 20, paddingBottom: 4 }}>
+                            {[
+                              { icon: <Users color="#6366F1" size={22} strokeWidth={1.8} />, iconBg: appTheme.darkMode ? 'rgba(99,102,241,0.2)' : '#EEF2FF', value: String(memberCount), label: 'Members' },
+                              { icon: <Mail color="#2563EB" size={22} strokeWidth={1.8} />, iconBg: appTheme.darkMode ? 'rgba(37,99,235,0.2)' : '#EEF2FF', value: channelName, label: 'Channel' },
+                              { icon: <Check color="#10B981" size={22} strokeWidth={2.5} />, iconBg: appTheme.darkMode ? 'rgba(16,185,129,0.2)' : '#ECFDF5', value: 'Active', label: 'Status' },
+                            ].map((card, ci) => (
+                              <View key={ci} style={{ flex: 1, borderRadius: 20, paddingVertical: 20, paddingHorizontal: 8, backgroundColor: appTheme.darkMode ? '#1E2340' : '#fff', alignItems: 'center', gap: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: appTheme.darkMode ? 0.3 : 0.06, shadowRadius: 8, elevation: 3 }}>
+                                <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: card.iconBg, alignItems: 'center', justifyContent: 'center' }}>{card.icon}</View>
+                                <Typography variant="body" color={appTheme.darkMode ? '#fff' : '#0F172A'} style={{ fontWeight: '800', fontSize: ci === 0 ? 22 : 16 }}>{card.value}</Typography>
+                                <Typography variant="caption" color={appTheme.darkMode ? 'rgba(255,255,255,0.5)' : '#64748B'} style={{ fontWeight: '500', fontSize: 12 }}>{card.label}</Typography>
                               </View>
-                            );
-                          })
-                        )}
+                            ))}
+                          </View>
 
-                        {/* Delete group */}
-                        <TouchableOpacity
-                          onPress={async () => {
-                            const g = emailGroupDetail;
-                            if (!g) return;
-                            const confirmed = await confirmAction('Delete group', `Delete "${g.name}"? This cannot be undone.`);
-                            if (!confirmed) return;
-                            try {
-                              await deleteEmailBroadcastGroup(g.id);
-                              loadEmailCommsGroups();
-                              selectEmailFolder('inbox');
-                            } catch (error) {
-                              Alert.alert('Delete failed', getActionErrorMessage(error, 'Unable to delete the group.'));
-                            }
-                          }}
-                          activeOpacity={0.75}
-                          style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 20 }}
-                        >
-                          <Trash2 color="#EF4444" size={18} />
-                          <Typography variant="body" style={{ color: '#EF4444', fontWeight: '600' }}>Delete group</Typography>
-                        </TouchableOpacity>
-                      </ScrollView>
-                    )}
-                  </View>
+                          {/* Members Section */}
+                          <View style={{ paddingHorizontal: 16, paddingTop: 24 }}>
+                            {/* Header row */}
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+                              <Typography variant="body" color={appTheme.darkMode ? '#fff' : '#0F172A'} style={{ fontWeight: '800', fontSize: 17 }}>Members ({memberCount})</Typography>
+                            </View>
+
+                            {/* Search */}
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 11, backgroundColor: appTheme.darkMode ? '#1E2340' : '#fff', marginBottom: 14, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 }}>
+                              <Search color={appTheme.darkMode ? 'rgba(255,255,255,0.4)' : '#94A3B8'} size={16} />
+                              <TextInput
+                                value={emailMemberSearch}
+                                onChangeText={setEmailMemberSearch}
+                                placeholder="Search members..."
+                                placeholderTextColor={appTheme.darkMode ? 'rgba(255,255,255,0.3)' : '#94A3B8'}
+                                style={[WEB_INPUT_RESET, { flex: 1, color: appTheme.darkMode ? '#fff' : '#0F172A', fontSize: 14, padding: 0, fontWeight: '500' }]}
+                              />
+                            </View>
+
+                            {/* Member List */}
+                            <View style={{ backgroundColor: appTheme.darkMode ? '#1E2340' : '#fff', borderRadius: 18, overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: appTheme.darkMode ? 0.3 : 0.07, shadowRadius: 10, elevation: 4 }}>
+                              {visibleMembers.length === 0 ? (
+                                <View style={{ alignItems: 'center', paddingVertical: 52 }}>
+                                  <View style={{ width: 64, height: 64, borderRadius: 32, backgroundColor: appTheme.darkMode ? 'rgba(99,102,241,0.15)' : '#EEF2FF', alignItems: 'center', justifyContent: 'center', marginBottom: 14 }}>
+                                    <Users color={appTheme.darkMode ? '#818CF8' : '#6366F1'} size={30} strokeWidth={1.5} />
+                                  </View>
+                                  <Typography variant="bodySmall" color={appTheme.darkMode ? 'rgba(255,255,255,0.5)' : '#64748B'} style={{ fontWeight: '600' }}>
+                                    {memberCount === 0 ? 'No members in this group yet' : 'No members match your search'}
+                                  </Typography>
+                                </View>
+                              ) : (
+                                visibleMembers.map((member, index) => {
+                                  const displayName = member.contactName || member.email.split('@')[0] || 'Member';
+                                  const initials = getInitials(displayName);
+                                  const avatarColor = MEMBER_COLORS[index % MEMBER_COLORS.length];
+                                  const isLast = index === visibleMembers.length - 1;
+                                  return (
+                                    <View key={member.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: isLast ? 0 : 1, borderBottomColor: appTheme.darkMode ? 'rgba(255,255,255,0.06)' : '#F1F5F9' }}>
+                                      <View style={{ width: 46, height: 46, borderRadius: 23, backgroundColor: avatarColor, alignItems: 'center', justifyContent: 'center', shadowColor: avatarColor, shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.35, shadowRadius: 6, elevation: 4 }}>
+                                        <Typography variant="caption" color="#fff" style={{ fontWeight: '800', fontSize: 15, letterSpacing: 0.3 }}>{initials}</Typography>
+                                      </View>
+                                      <View style={{ flex: 1, minWidth: 0 }}>
+                                        <Typography variant="body" color={appTheme.darkMode ? '#fff' : '#0F172A'} numberOfLines={1} style={{ fontWeight: '700', fontSize: 15 }}>{displayName}</Typography>
+                                        <Typography variant="caption" numberOfLines={1} style={{ marginTop: 2, fontSize: 12, color: appTheme.darkMode ? 'rgba(255,255,255,0.45)' : '#94A3B8' }}>{member.email}</Typography>
+                                      </View>
+                                      <TouchableOpacity style={{ padding: 6 }} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} onPress={() => Alert.alert(displayName, member.email)}>
+                                        <MoreVertical color={appTheme.darkMode ? 'rgba(255,255,255,0.4)' : '#CBD5E1'} size={18} />
+                                      </TouchableOpacity>
+                                    </View>
+                                  );
+                                })
+                              )}
+                            </View>
+
+                            {/* Delete Group */}
+                            <TouchableOpacity
+                              onPress={async () => {
+                                const g = emailGroupDetail;
+                                if (!g) return;
+                                const confirmed = await confirmAction('Delete group', `Delete "${g.name}"? This cannot be undone.`);
+                                if (!confirmed) return;
+                                try {
+                                  await deleteEmailBroadcastGroup(g.id);
+                                  loadEmailCommsGroups();
+                                  selectEmailFolder('inbox');
+                                } catch (error) {
+                                  Alert.alert('Delete failed', getActionErrorMessage(error, 'Unable to delete the group.'));
+                                }
+                              }}
+                              activeOpacity={0.75}
+                              style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 20, backgroundColor: appTheme.darkMode ? 'rgba(239,68,68,0.12)' : '#FFF5F5', paddingVertical: 17, borderRadius: 16, borderWidth: 1, borderColor: appTheme.darkMode ? 'rgba(239,68,68,0.2)' : '#FFE4E6' }}
+                            >
+                              <Trash2 color="#EF4444" size={18} strokeWidth={2} />
+                              <Typography variant="body" style={{ color: '#EF4444', fontWeight: '700', fontSize: 15 }}>Delete this group</Typography>
+                            </TouchableOpacity>
+                          </View>
+                        </>
+                      )}
+                    </ScrollView>
+
+                      </View>
                 );
               })()
             ) : (
@@ -8807,7 +10377,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
           onRefresh={() => void syncConversations({ force: true })}
           onEndReached={() => void fetchMoreConversations()}
           onEndReachedThreshold={0.35}
-          contentContainerStyle={[styles.conversationList, { paddingBottom: insets.bottom + 100 }]}
+          contentContainerStyle={[styles.conversationList, { paddingBottom: insets.bottom + 100 }, listSelectMode && { flexGrow: 1 }]}
           showsVerticalScrollIndicator={false}
           initialNumToRender={12}
           maxToRenderPerBatch={10}
@@ -8816,9 +10386,18 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
           onScroll={handleBottomTabScroll}
           scrollEventThrottle={16}
           ListFooterComponent={
-            isLoadingMoreConversations ? (
-              <ActivityIndicator color={appTheme.primaryAccent} style={styles.olderLoader} />
-            ) : null
+            <View>
+              {isLoadingMoreConversations ? (
+                <ActivityIndicator color={appTheme.primaryAccent} style={styles.olderLoader} />
+              ) : null}
+              {listSelectMode ? (
+                <TouchableOpacity
+                  activeOpacity={1}
+                  onPress={exitListSelectMode}
+                  style={{ minHeight: Math.max(220, width * 0.72) }}
+                />
+              ) : null}
+            </View>
           }
           ListEmptyComponent={
             <View style={styles.emptyList}>
@@ -8903,11 +10482,11 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
         )}
 
         {/* ── Gmail/Outlook compose FAB (mirrors ComposeWindow's compose button) ── */}
-        {(activeFilter === 'gmail' || activeFilter === 'outlook' || activeFilter === 'email') && (() => {
+        {!isKeyboardVisible && (activeFilter === 'gmail' || activeFilter === 'outlook' || activeFilter === 'email') && (() => {
           const provider = EMAIL_PROVIDER_META[activeFilter === 'outlook' ? 'outlook' : activeFilter === 'email' ? 'custom' : 'gmail'];
           return (
             <TouchableOpacity
-              onPress={openEmailComposeNew}
+              onPress={() => void openEmailComposeNew()}
               activeOpacity={0.85}
               style={{
                 position: 'absolute',
@@ -8941,7 +10520,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
         )}
 
         {/* ── Email folder pane — frosted glass overlay matching reference design (image 3) ── */}
-        {isEmailTabActive && (
+        {isEmailTabActive && !isEmailGroupFolder && (
           <Modal
             visible={emailSidebarOpen}
             transparent
@@ -8997,7 +10576,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                       {emailTabMeta.label}
                     </Typography>
                     <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={{ fontSize: 12 }}>
-                      {currentUser?.email || 'hello@yourcompany.com'}
+                      {emailSidebarAccountEmail || `Connect ${emailTabMeta.label} in Settings`}
                     </Typography>
                   </View>
                   <TouchableOpacity
@@ -9013,7 +10592,7 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                 <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingTop: 8, paddingBottom: insets.bottom + 28 }}>
                   {/* Compose button */}
                   <TouchableOpacity
-                    onPress={() => { setEmailSidebarOpen(false); openEmailComposeNew(); }}
+                    onPress={() => { setEmailSidebarOpen(false); void openEmailComposeNew(); }}
                     activeOpacity={0.85}
                     style={{ flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: emailTabMeta.color, borderRadius: 16, marginHorizontal: 14, paddingHorizontal: 18, paddingVertical: 14, marginBottom: 10, shadowColor: emailTabMeta.color, shadowOpacity: 0.28, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 3 }}
                   >
@@ -9063,45 +10642,6 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                       );
                     });
                   })()}
-
-                  {/* Labels */}
-                  <View style={{ height: 1, backgroundColor: appTheme.borderSoft, marginVertical: 10, marginHorizontal: 14 }} />
-                  <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 22, marginBottom: 6 }}>
-                    <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800', letterSpacing: 1.2, flex: 1, fontSize: 11, textTransform: 'uppercase' }}>Labels</Typography>
-                    <TouchableOpacity onPress={() => setEmailLabelCreateOpen((v) => !v)} activeOpacity={0.7} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                      <Plus color={appTheme.muted} size={18} />
-                    </TouchableOpacity>
-                  </View>
-                  {emailLabelCreateOpen && (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 18, marginBottom: 8 }}>
-                      <TextInput
-                        value={emailLabelName}
-                        onChangeText={setEmailLabelName}
-                        placeholder="Label name"
-                        placeholderTextColor={appTheme.disabled}
-                        style={[WEB_INPUT_RESET, { flex: 1, color: appTheme.text, fontSize: 13, borderWidth: 1, borderColor: appTheme.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }]}
-                      />
-                      <TouchableOpacity onPress={() => void submitCreateEmailLabel()} disabled={emailLabelBusy} activeOpacity={0.75}>
-                        {emailLabelBusy ? <ActivityIndicator color={emailTabMeta.color} size="small" /> : <Check color={emailTabMeta.color} size={18} />}
-                      </TouchableOpacity>
-                    </View>
-                  )}
-                  {whatsappLabels.length === 0 ? (
-                    <Typography variant="caption" color={appTheme.disabled} style={{ paddingHorizontal: 22, paddingVertical: 6 }}>
-                      No labels — create one above
-                    </Typography>
-                  ) : (
-                    whatsappLabels.map((label, index) => {
-                      const LABEL_COLORS = ['#8B5CF6', '#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#EC4899', '#6366F1'];
-                      const labelColor = label.color || LABEL_COLORS[index % LABEL_COLORS.length];
-                      return (
-                        <TouchableOpacity key={label.id} activeOpacity={0.7} style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginHorizontal: 8, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 14 }}>
-                          <Tag color={labelColor} size={18} fill={`${labelColor}22`} />
-                          <Typography variant="bodySmall" color={appTheme.text} numberOfLines={1} style={{ flex: 1, fontSize: 15, fontWeight: '500' }}>{label.name}</Typography>
-                        </TouchableOpacity>
-                      );
-                    })
-                  )}
 
                   {/* Broadcast groups */}
                   <View style={{ height: 1, backgroundColor: appTheme.borderSoft, marginVertical: 12, marginHorizontal: 14 }} />
@@ -9162,6 +10702,449 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
         </View>
 
         {/* ── Sent broadcast detail — real-mail view ── */}
+        {/* Group send template picker */}
+        <Modal
+          visible={emailGroupTemplateOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {
+            setEmailGroupTemplateOpen(false);
+            setEmailGroupTemplateError(null);
+          }}
+        >
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.58)', justifyContent: 'center', paddingHorizontal: 16, paddingVertical: Math.max(insets.top, 18) }}>
+            <View
+              style={{
+                alignSelf: 'center',
+                width: '100%',
+                maxWidth: 720,
+                maxHeight: Math.min(height - Math.max(insets.top + insets.bottom, 40) - 24, 720),
+                backgroundColor: appTheme.darkMode ? '#101827' : appTheme.surface,
+                borderRadius: 20,
+                borderWidth: 1,
+                borderColor: emailTabMeta.color,
+                overflow: 'hidden',
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 20 },
+                shadowOpacity: 0.34,
+                shadowRadius: 26,
+                elevation: 18,
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 20, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft }}>
+                <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: emailTabMeta.color, alignItems: 'center', justifyContent: 'center' }}>
+                  <Typography variant="bodySmall" color="#fff" style={{ fontWeight: '900' }}>
+                    {(emailGroupDetail?.name || '?').trim().charAt(0).toUpperCase() || '?'}
+                  </Typography>
+                </View>
+                <View style={{ flex: 1, minWidth: 0, flexShrink: 1 }}>
+                  <Typography variant="body" color={appTheme.text} style={{ fontWeight: '900', fontSize: 15, lineHeight: 19, flexShrink: 1 }} numberOfLines={2}>
+                    Send Email to "{emailGroupDetail?.name ?? 'Group'}"
+                  </Typography>
+                  <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
+                    {emailGroupDetail?.memberCount ?? 0} recipient{(emailGroupDetail?.memberCount ?? 0) === 1 ? '' : 's'} via {emailGroupDetail?.channel === 'outlook' ? 'Outlook' : 'Gmail'}
+                  </Typography>
+                </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    setEmailGroupTemplateOpen(false);
+                    setEmailGroupTemplateError(null);
+                  }}
+                  activeOpacity={0.75}
+                  style={{ width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <X color={appTheme.muted} size={22} />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView
+                nestedScrollEnabled
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{ padding: 20, gap: 12, paddingBottom: 24 }}
+                showsVerticalScrollIndicator
+              >
+                <TouchableOpacity
+                  activeOpacity={0.82}
+                  onPress={() => Alert.alert('Create template', 'Create a saved email template from the web dashboard. It will appear here after sync.')}
+                  style={{ borderWidth: 1.5, borderColor: '#5EEAD4', borderRadius: 12, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 14, backgroundColor: appTheme.darkMode ? 'rgba(20,184,166,0.07)' : 'rgba(20,184,166,0.06)' }}
+                >
+                  <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: `${emailTabMeta.color}20`, alignItems: 'center', justifyContent: 'center' }}>
+                    <Plus color={emailTabMeta.color} size={21} />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Typography variant="body" color={emailTabMeta.color} style={{ fontWeight: '900' }}>Create New Template</Typography>
+                    <Typography variant="caption" color={appTheme.muted}>Write a new email template</Typography>
+                  </View>
+                </TouchableOpacity>
+
+                <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '900', letterSpacing: 0.8, marginTop: 4 }}>
+                  SAVED TEMPLATES
+                </Typography>
+
+                {emailGroupTemplateError ? (
+                  <Typography variant="caption" color={Theme.colors.error}>{emailGroupTemplateError}</Typography>
+                ) : null}
+
+                {emailGroupTemplatesLoading ? (
+                  <View style={{ minHeight: 180, alignItems: 'center', justifyContent: 'center' }}>
+                    <ActivityIndicator color={emailTabMeta.color} size="large" />
+                  </View>
+                ) : emailGroupTemplates.length ? (
+                  emailGroupTemplates.map((template) => {
+                    const sending = emailGroupTemplateSendingId === template.id;
+                    return (
+                      <TouchableOpacity
+                        key={template.id}
+                        onPress={() => void selectEmailGroupTemplate(template)}
+                        disabled={Boolean(emailGroupTemplateSendingId)}
+                        activeOpacity={0.82}
+                        style={{
+                          borderWidth: 1,
+                          borderColor: emailTabMeta.color,
+                          borderRadius: 12,
+                          padding: 14,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 14,
+                          backgroundColor: appTheme.darkMode ? '#111827' : appTheme.input,
+                          opacity: emailGroupTemplateSendingId && !sending ? 0.58 : 1,
+                        }}
+                      >
+                        <View style={{ width: 44, height: 44, borderRadius: 10, backgroundColor: appTheme.darkMode ? '#EAF2FF' : '#EEF6FF', alignItems: 'center', justifyContent: 'center' }}>
+                          <Mail color={emailTabMeta.color} size={19} />
+                        </View>
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Typography variant="bodySmall" color={appTheme.text} style={{ fontWeight: '900', fontSize: 15 }} numberOfLines={1}>
+                            {template.name}
+                          </Typography>
+                          <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
+                            {template.subject || template.body}
+                          </Typography>
+                        </View>
+                        {sending ? <ActivityIndicator color={emailTabMeta.color} size="small" /> : null}
+                      </TouchableOpacity>
+                    );
+                  })
+                ) : (
+                  <View style={{ minHeight: 150, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: appTheme.borderSoft, borderRadius: 12, padding: 18 }}>
+                    <FileText color={appTheme.disabled} size={28} />
+                    <Typography variant="bodySmall" color={appTheme.muted} style={{ marginTop: 8 }}>No saved templates found for this account.</Typography>
+                  </View>
+                )}
+              </ScrollView>
+
+              <TouchableOpacity
+                activeOpacity={0.78}
+                onPress={() => {
+                  setEmailGroupTemplateOpen(false);
+                  setEmailGroupTemplateError(null);
+                }}
+                style={{ borderTopWidth: 1, borderTopColor: appTheme.borderSoft, minHeight: 58, alignItems: 'center', justifyContent: 'center' }}
+              >
+                <Typography variant="bodySmall" color={appTheme.text} style={{ fontWeight: '800' }}>Cancel</Typography>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Sent folder New Broadcast composer */}
+        <Modal visible={sentBroadcastOpen} transparent animationType="slide" onRequestClose={closeSentBroadcastComposer}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' }}
+          >
+            <View style={{ backgroundColor: appTheme.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '92%', paddingBottom: Math.max(insets.bottom, 14) }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: appTheme.borderSoft }}>
+                <Pencil color={emailTabMeta.color} size={18} />
+                <View style={{ flex: 1 }}>
+                  <Typography variant="body" color={appTheme.text} style={{ fontWeight: '800', fontSize: 16 }}>New Broadcast</Typography>
+                  <Typography variant="caption" color={appTheme.muted}>Send via a connected email account.</Typography>
+                </View>
+                <TouchableOpacity onPress={closeSentBroadcastComposer} style={{ padding: 6 }} activeOpacity={0.7}>
+                  <X color={appTheme.muted} size={20} />
+                </TouchableOpacity>
+              </View>
+
+              {sentBroadcastLoading ? (
+                <ActivityIndicator color={emailTabMeta.color} style={{ paddingVertical: 36 }} />
+              ) : (
+                <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 16, gap: 14 }}>
+                  <View style={{ gap: 8 }}>
+                    <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800' }}>From</Typography>
+                    {sentBroadcastActiveAccounts.length === 0 ? (
+                      <Typography variant="bodySmall" color={Theme.colors.error}>No active accounts. Connect an email account in Settings.</Typography>
+                    ) : (
+                      <View style={{ gap: 8 }}>
+                        {sentBroadcastActiveAccounts.map((account) => {
+                          const active = sentBroadcastAccountId === account.id;
+                          const providerId = account.provider === 'microsoft' ? 'outlook' : account.provider === 'custom_smtp' ? 'custom' : 'gmail';
+                          return (
+                            <TouchableOpacity
+                              key={account.id}
+                              onPress={() => {
+                                setSentBroadcastAccountId(account.id);
+                                const nextChannel = getBroadcastProviderForAccount(account);
+                                const nextGroup = nextChannel
+                                  ? sentBroadcastGroups.find((group) => group.channel === nextChannel)
+                                  : null;
+                                setSentBroadcastGroupId(nextGroup?.id ?? '');
+                                if (account.provider === 'custom_smtp' || !nextChannel) {
+                                  setSentBroadcastMode('manual');
+                                } else {
+                                  setSentBroadcastMode('group');
+                                }
+                              }}
+                              activeOpacity={0.78}
+                              style={{ flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderColor: active ? emailTabMeta.color : appTheme.border, backgroundColor: active ? `${emailTabMeta.color}10` : appTheme.input, borderRadius: 10, padding: 10 }}
+                            >
+                              <ProviderLogo provider={providerId as EmailProviderId} size={24} />
+                              <View style={{ flex: 1, minWidth: 0 }}>
+                                <Typography variant="bodySmall" color={appTheme.text} style={{ fontWeight: '700' }} numberOfLines={1}>{account.email}</Typography>
+                                {account.displayName ? <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>{account.displayName}</Typography> : null}
+                              </View>
+                              {active ? <Check color={emailTabMeta.color} size={18} /> : null}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={{ gap: 8 }}>
+                    <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800' }}>Recipients</Typography>
+                    <View style={{ flexDirection: 'row', borderWidth: 1, borderColor: appTheme.border, borderRadius: 10, padding: 3, backgroundColor: appTheme.input }}>
+                      {(['group', 'manual'] as const).map((mode) => {
+                        const active = sentBroadcastMode === mode;
+                        const disabled = mode === 'group' && !getBroadcastProviderForAccount(sentBroadcastSelectedAccount);
+                        return (
+                          <TouchableOpacity
+                            key={mode}
+                            disabled={disabled}
+                            onPress={() => setSentBroadcastMode(mode)}
+                            activeOpacity={0.75}
+                            style={{ flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: 8, backgroundColor: active ? emailTabMeta.color : 'transparent', opacity: disabled ? 0.45 : 1 }}
+                          >
+                            <Typography variant="caption" color={active ? '#FFF' : appTheme.text} style={{ fontWeight: '800', textTransform: 'capitalize' }}>{mode}</Typography>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+
+                    {sentBroadcastMode === 'group' ? (
+                      <View style={{ gap: 8 }}>
+                        {sentBroadcastAvailableGroups.length === 0 ? (
+                          <Typography variant="bodySmall" color={appTheme.muted}>No saved groups for this sender.</Typography>
+                        ) : (
+                          sentBroadcastAvailableGroups.map((group) => {
+                            const active = sentBroadcastGroupId === group.id;
+                            return (
+                              <TouchableOpacity
+                                key={group.id}
+                                onPress={() => setSentBroadcastGroupId(group.id)}
+                                activeOpacity={0.78}
+                                style={{ flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderColor: active ? emailTabMeta.color : appTheme.border, backgroundColor: active ? `${emailTabMeta.color}10` : appTheme.input, borderRadius: 10, padding: 10 }}
+                              >
+                                <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: group.color || emailTabMeta.color }} />
+                                <Typography variant="bodySmall" color={appTheme.text} style={{ flex: 1, fontWeight: '700' }} numberOfLines={1}>{group.name}</Typography>
+                                <Typography variant="caption" color={appTheme.muted}>{group.memberCount} member{group.memberCount === 1 ? '' : 's'}</Typography>
+                                {active ? <Check color={emailTabMeta.color} size={18} /> : null}
+                              </TouchableOpacity>
+                            );
+                          })
+                        )}
+                      </View>
+                    ) : (
+                      <View style={{ gap: 6 }}>
+                        <TextInput
+                          value={sentBroadcastRecipients}
+                          onChangeText={setSentBroadcastRecipients}
+                          placeholder="name@example.com, Alex <alex@example.com>"
+                          placeholderTextColor={appTheme.disabled}
+                          multiline
+                          autoCapitalize="none"
+                          keyboardType="email-address"
+                          style={[WEB_INPUT_RESET, { minHeight: 76, borderWidth: 1, borderColor: appTheme.border, borderRadius: 10, padding: 10, color: appTheme.text, backgroundColor: appTheme.input, textAlignVertical: 'top' }]}
+                        />
+                        <Typography variant="caption" color={appTheme.muted}>
+                          {sentBroadcastParsedRecipients.length} parsed. Use comma, semicolon, or one recipient per line.
+                        </Typography>
+                      </View>
+                    )}
+                  </View>
+
+                  <View style={{ gap: 8, position: 'relative', zIndex: 20 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                      <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800' }}>Template</Typography>
+                      {sentBroadcastTemplateId ? (
+                        <TouchableOpacity
+                          onPress={() => {
+                            setSentBroadcastTemplateId('');
+                            setSentBroadcastTemplateDropdownOpen(false);
+                          }}
+                          activeOpacity={0.7}
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 2, paddingHorizontal: 6 }}
+                        >
+                          <X color={appTheme.disabled} size={12} />
+                          <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '700' }}>Clear</Typography>
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
+
+                    <TouchableOpacity
+                      activeOpacity={0.82}
+                      onPress={() => setSentBroadcastTemplateDropdownOpen((value) => !value)}
+                      style={{
+                        minHeight: 48,
+                        borderWidth: 1,
+                        borderColor: sentBroadcastTemplateDropdownOpen ? emailTabMeta.color : appTheme.border,
+                        borderRadius: 10,
+                        backgroundColor: appTheme.input,
+                        paddingHorizontal: 12,
+                        paddingVertical: 9,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 10,
+                      }}
+                    >
+                      <FileText color={sentBroadcastSelectedTemplate ? emailTabMeta.color : appTheme.disabled} size={17} />
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Typography
+                          variant="bodySmall"
+                          color={sentBroadcastSelectedTemplate ? appTheme.text : appTheme.muted}
+                          style={{ fontWeight: sentBroadcastSelectedTemplate ? '800' : '500' }}
+                          numberOfLines={1}
+                        >
+                          {sentBroadcastSelectedTemplate?.name ?? 'Start from a saved template (optional)'}
+                        </Typography>
+                        {sentBroadcastSelectedTemplate ? (
+                          <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
+                            {sentBroadcastSelectedTemplate.subject || sentBroadcastSelectedTemplate.body}
+                          </Typography>
+                        ) : null}
+                      </View>
+                      {sentBroadcastTemplatesLoading ? (
+                        <ActivityIndicator color={emailTabMeta.color} size="small" />
+                      ) : (
+                        <ChevronDown
+                          color={appTheme.muted}
+                          size={17}
+                          style={sentBroadcastTemplateDropdownOpen ? styles.filterChevronOpen : undefined}
+                        />
+                      )}
+                    </TouchableOpacity>
+
+                    {sentBroadcastTemplatesError ? (
+                      <Typography variant="caption" color={Theme.colors.error}>{sentBroadcastTemplatesError}</Typography>
+                    ) : null}
+
+                    {sentBroadcastTemplateDropdownOpen ? (
+                      <View
+                        style={{
+                          borderWidth: 1,
+                          borderColor: emailTabMeta.color,
+                          borderRadius: 10,
+                          backgroundColor: appTheme.darkMode ? '#17233A' : appTheme.surface,
+                          overflow: 'hidden',
+                          maxHeight: 280,
+                          shadowColor: '#000',
+                          shadowOffset: { width: 0, height: 12 },
+                          shadowOpacity: 0.18,
+                          shadowRadius: 20,
+                          elevation: 10,
+                        }}
+                      >
+                        {sentBroadcastTemplatesLoading ? (
+                          <View style={{ minHeight: 76, alignItems: 'center', justifyContent: 'center' }}>
+                            <ActivityIndicator color={emailTabMeta.color} size="small" />
+                          </View>
+                        ) : sentBroadcastTemplates.length ? (
+                          <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
+                            {sentBroadcastTemplates.map((template) => {
+                              const active = sentBroadcastTemplateId === template.id;
+                              return (
+                                <TouchableOpacity
+                                  key={template.id}
+                                  onPress={() => applySentBroadcastTemplate(template)}
+                                  activeOpacity={0.78}
+                                  style={{
+                                    minHeight: 44,
+                                    paddingHorizontal: 14,
+                                    paddingVertical: 10,
+                                    backgroundColor: active ? `${emailTabMeta.color}24` : 'transparent',
+                                    borderBottomWidth: 1,
+                                    borderBottomColor: appTheme.borderSoft,
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    gap: 10,
+                                  }}
+                                >
+                                  <FileText color={active ? emailTabMeta.color : appTheme.muted} size={15} />
+                                  <View style={{ flex: 1, minWidth: 0 }}>
+                                    <Typography variant="bodySmall" color={appTheme.text} style={{ fontWeight: active ? '800' : '600' }} numberOfLines={1}>
+                                      {template.name}
+                                    </Typography>
+                                    <Typography variant="caption" color={appTheme.muted} numberOfLines={1}>
+                                      {template.subject || template.body}
+                                    </Typography>
+                                  </View>
+                                  {active ? <Check color={emailTabMeta.color} size={17} /> : null}
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </ScrollView>
+                        ) : (
+                          <View style={{ minHeight: 76, alignItems: 'center', justifyContent: 'center', padding: 12 }}>
+                            <Typography variant="bodySmall" color={appTheme.muted}>No saved templates found for this account.</Typography>
+                          </View>
+                        )}
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={{ gap: 8 }}>
+                    <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800' }}>Subject</Typography>
+                    <TextInput
+                      value={sentBroadcastSubject}
+                      onChangeText={setSentBroadcastSubject}
+                      placeholder="Subject"
+                      placeholderTextColor={appTheme.disabled}
+                      style={[WEB_INPUT_RESET, { minHeight: 44, borderWidth: 1, borderColor: appTheme.border, borderRadius: 10, paddingHorizontal: 12, color: appTheme.text, backgroundColor: appTheme.input }]}
+                    />
+                  </View>
+
+                  <View style={{ gap: 8 }}>
+                    <Typography variant="caption" color={appTheme.muted} style={{ fontWeight: '800' }}>Body</Typography>
+                    <TextInput
+                      value={sentBroadcastBody}
+                      onChangeText={setSentBroadcastBody}
+                      placeholder="Write your broadcast..."
+                      placeholderTextColor={appTheme.disabled}
+                      multiline
+                      style={[WEB_INPUT_RESET, { minHeight: 150, borderWidth: 1, borderColor: appTheme.border, borderRadius: 10, padding: 12, color: appTheme.text, backgroundColor: appTheme.input, textAlignVertical: 'top', lineHeight: 21 }]}
+                    />
+                  </View>
+
+                  {sentBroadcastError ? (
+                    <Typography variant="caption" color={Theme.colors.error}>{sentBroadcastError}</Typography>
+                  ) : null}
+
+                  <TouchableOpacity
+                    onPress={() => void submitSentBroadcast()}
+                    disabled={sentBroadcastSending || sentBroadcastActiveAccounts.length === 0}
+                    activeOpacity={0.85}
+                    style={{ minHeight: 46, borderRadius: 23, backgroundColor: emailTabMeta.color, opacity: sentBroadcastSending || sentBroadcastActiveAccounts.length === 0 ? 0.6 : 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                  >
+                    {sentBroadcastSending ? <ActivityIndicator color="#FFF" size="small" /> : <Send color="#FFF" size={16} />}
+                    <Typography variant="bodySmall" color="#FFF" style={{ fontWeight: '800' }}>
+                      Send{sentBroadcastSendCount ? ` to ${sentBroadcastSendCount}` : ''}
+                    </Typography>
+                  </TouchableOpacity>
+                </ScrollView>
+              )}
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
+
         <Modal visible={Boolean(sentRunOpen)} transparent animationType="slide" onRequestClose={() => setSentRunOpen(null)}>
           <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' }}>
             <View style={{ backgroundColor: appTheme.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '88%', paddingBottom: Math.max(insets.bottom, 16) }}>
@@ -9221,6 +11204,34 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: Theme.spacing.xl,
     paddingBottom: Theme.spacing.md,
+  },
+  mainChatsHeader: {
+    paddingBottom: 10,
+    borderBottomWidth: 0,
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  subscreenHeader: {
+    paddingHorizontal: Theme.spacing.xl,
+    paddingBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    zIndex: 10,
+  },
+  subscreenBackButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  subscreenIconButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   headerTopRow: {
     flexDirection: 'row',
@@ -9398,6 +11409,9 @@ const styles = StyleSheet.create({
   },
   refreshText: { color: Theme.colors.surface, fontWeight: '600' },
   content: { flex: 1, paddingHorizontal: Theme.spacing.xl, position: 'relative' },
+  contentFullBleed: {
+    paddingHorizontal: 0,
+  },
   listDismissLayer: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 80,
@@ -9480,6 +11494,45 @@ const styles = StyleSheet.create({
   filterDropdownText: {
     color: Theme.colors.text,
     fontWeight: '600',
+  },
+  channelFilterWrap: {
+    marginTop: -Theme.spacing.sm,
+    marginBottom: Theme.spacing.md,
+    paddingHorizontal: Theme.spacing.xl,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Theme.spacing.sm,
+    alignItems: 'center',
+  },
+  channelFilterPill: {
+    height: 36,
+    minWidth: 74,
+    flexGrow: 1,
+    flexBasis: '22%',
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  channelFilterPillText: {
+    fontWeight: '800',
+    fontSize: 12,
+  },
+  filterSheetOption: {
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+  },
+  filterSheetOptionText: {
+    flex: 1,
+    fontWeight: '700',
   },
   conversationList: {
     paddingTop: Theme.spacing.xs,
@@ -9606,6 +11659,21 @@ const styles = StyleSheet.create({
   channelPillText: {
     fontWeight: '600',
     fontSize: 11,
+  },
+  stagePill: {
+    minHeight: 22,
+    borderRadius: 11,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    flexShrink: 1,
+  },
+  stageDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
   },
   companyText: {
     flex: 1,
@@ -9991,25 +12059,28 @@ const styles = StyleSheet.create({
   },
   quickActionMenu: {
     position: 'absolute',
-    left: 48,
+    left: 18,
+    right: 18,
     bottom: 72,
-    width: 320,
-    borderRadius: 16,
+    maxHeight: 360,
+    borderRadius: 24,
     borderWidth: 1,
     borderColor: Theme.colors.border,
     backgroundColor: Theme.colors.surface,
-    padding: Theme.spacing.lg,
+    paddingVertical: Theme.spacing.md,
+    paddingHorizontal: Theme.spacing.md,
     zIndex: 35,
     ...Theme.shadows.large,
   },
   quickActionTitle: {
-    fontWeight: '600',
-    marginBottom: Theme.spacing.md,
+    fontWeight: '800',
+    letterSpacing: 0,
+    marginBottom: Theme.spacing.sm,
   },
   quickActionGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    rowGap: Theme.spacing.lg,
+    gap: Theme.spacing.sm,
   },
   templateMenu: {
     position: 'absolute',
@@ -10135,6 +12206,9 @@ const styles = StyleSheet.create({
   templateList: {
     maxHeight: 260,
   },
+  templateListContent: {
+    paddingBottom: Theme.spacing.xs,
+  },
   templateItem: {
     borderRadius: 12,
     borderWidth: 1,
@@ -10170,20 +12244,27 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   attachmentActionItem: {
-    width: '33.33%',
+    minHeight: 78,
+    width: '31.6%',
     alignItems: 'center',
-    gap: Theme.spacing.sm,
+    justifyContent: 'center',
+    gap: 7,
+    borderRadius: 16,
+    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 9,
   },
   attachmentActionIcon: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
   },
   attachmentActionLabel: {
-    minHeight: 36,
-    paddingHorizontal: 4,
+    fontWeight: '800',
+    textAlign: 'center',
+    lineHeight: 14,
   },
   quickActionItem: {
     flexDirection: 'row',
@@ -10430,6 +12511,12 @@ const styles = StyleSheet.create({
   },
   businessProfileLineTitle: {
     fontWeight: '600',
+  },
+  contactMetadataList: {
+    marginTop: Theme.spacing.sm,
+    paddingTop: Theme.spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    gap: Theme.spacing.sm,
   },
   businessProfileTextBlock: {
     gap: 3,
@@ -10849,6 +12936,21 @@ const styles = StyleSheet.create({
     alignItems: 'stretch',
     padding: Theme.spacing.md,
     gap: Theme.spacing.md,
+  },
+  unsupportedWorkflowContent: {
+    minHeight: 88,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Theme.spacing.xs,
+    paddingHorizontal: Theme.spacing.sm,
+  },
+  unsupportedWorkflowTitle: {
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  unsupportedWorkflowCopy: {
+    textAlign: 'center',
+    lineHeight: 17,
   },
   assignmentMemberRow: {
     minHeight: 48,
@@ -11305,15 +13407,59 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginBottom: 2,
   },
-  // Location card inside bubble
+  // Location message bubble — keep normal padding (card is self-contained)
+  locationBubble: {
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+    overflow: 'hidden',
+  },
+  // Location card — matches frontend-2 max-w-xs compact card
   locationCard: {
+    width: 240,
     flexDirection: 'column',
+    overflow: 'hidden',
     borderRadius: 10,
-    borderWidth: 1,
+  },
+  locationMapPreview: {
+    height: 128,
+    width: '100%',
+    // bg-gray-800 equivalent — shows behind map image or when image hidden
+    backgroundColor: '#1F2937',
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  locationMapPlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#1F2937',
+  },
+  locationPinOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    pointerEvents: 'none' as any,
+  },
+  locationLabelBar: {
+    // bg-gray-900 equivalent
+    backgroundColor: '#111827',
+    paddingHorizontal: 12,
     paddingVertical: 8,
-    paddingHorizontal: 10,
-    marginBottom: 4,
-    gap: 10,
+  },
+  locationLabelText: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  locationCoords: {
+    color: '#9CA3AF',
+    fontSize: 10,
+    marginTop: 2,
   },
   locationCardIcon: {
     width: 36,

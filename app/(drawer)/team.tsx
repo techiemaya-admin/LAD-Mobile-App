@@ -42,9 +42,6 @@ const PAGE_CAPABILITIES = [
   { key: 'view_scraper', label: 'Scraper' },
   { key: 'view_make_call', label: 'Make a Call' },
   { key: 'view_call_logs', label: 'Call Logs' },
-  { key: 'view_pipeline', label: 'Pipeline' },
-  { key: 'view_pricing', label: 'Pricing' },
-  { key: 'view_settings', label: 'Settings' },
 ];
 
 const CAPABILITY_LABELS = PAGE_CAPABILITIES.reduce<Record<string, string>>((labels, capability) => {
@@ -167,6 +164,10 @@ export default function TeamScreen() {
     }
     if (!inviteEmail.trim()) {
       Alert.alert('Email required', 'Please enter an email address.');
+      return;
+    }
+    if (!invitePassword.trim()) {
+      Alert.alert('Password required', 'Please enter a password for the new member.');
       return;
     }
     setInviteLoading(true);
@@ -480,7 +481,7 @@ export default function TeamScreen() {
                 <View style={[styles.passwordInputWrap, { backgroundColor: appTheme.input, borderColor: appTheme.border }]}>
                   <TextInput
                     style={[styles.passwordInput, { color: appTheme.text }]}
-                    placeholder="Enter or auto-generate"
+                    placeholder="Enter password"
                     placeholderTextColor={appTheme.muted}
                     value={invitePassword}
                     onChangeText={setInvitePassword}
@@ -490,9 +491,6 @@ export default function TeamScreen() {
                     {inviteShowPassword ? <EyeOff color={appTheme.muted} size={18} /> : <Eye color={appTheme.muted} size={18} />}
                   </TouchableOpacity>
                 </View>
-                <TouchableOpacity style={[styles.autoGenBtn, { backgroundColor: appTheme.primarySoft, borderColor: appTheme.primaryAccent }]} onPress={autoGenPassword}>
-                  <Typography variant="caption" color={appTheme.primaryAccent} style={{ fontWeight: '700' }}>Auto-Gen</Typography>
-                </TouchableOpacity>
               </View>
 
               {/* Phone */}
@@ -598,10 +596,11 @@ export default function TeamScreen() {
 
             {/* Footer */}
             <View style={[styles.modalFooter, { borderTopColor: appTheme.borderSoft }]}>
-              <TouchableOpacity style={[styles.modalBtn, styles.modalBtnCancel, { borderColor: appTheme.border }]} onPress={() => { setInviteModalVisible(false); resetInviteForm(); }}>
-                <Typography variant="body" color={appTheme.text}>Cancel</Typography>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.modalBtn, styles.modalBtnPrimary, { backgroundColor: appTheme.primaryAccent }]} onPress={() => void handleInvite()} disabled={inviteLoading}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnPrimary, { backgroundColor: appTheme.primaryAccent, opacity: (inviteName.trim() && inviteEmail.trim() && invitePassword.trim()) ? 1 : 0.45 }]}
+                onPress={() => void handleInvite()}
+                disabled={inviteLoading || !inviteName.trim() || !inviteEmail.trim() || !invitePassword.trim()}
+              >
                 {inviteLoading ? <ActivityIndicator color="#fff" /> : <Typography variant="body" color="#fff" style={{ fontWeight: '700' }}>Add Member</Typography>}
               </TouchableOpacity>
             </View>

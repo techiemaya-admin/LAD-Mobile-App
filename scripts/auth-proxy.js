@@ -388,6 +388,10 @@ const server = http.createServer(async (req, res) => {
       req.url === '/api/labels' ||
       req.url.startsWith('/api/labels?') ||
       req.url.startsWith('/api/labels/');
+    // Lead import/scrape — mirrors lad-frontend-2's whatsapp-conversations/leads proxies:
+    //   channel=personal → WAPA /api/whatsapp-conversations/leads/<x>
+    //   else (waba)      → BNI  /api/leads/<x>
+    const isLeadsRoute = /^\/api\/leads\/(import|scrape)(\?|$)/.test(req.url);
     // Email conversations — mirrors lad-frontend-2's email-conversations proxy:
     // contacts/messages live on the WABA (BNI) service under /api/email/*.
     const isEmailConversationsRoute = req.url.startsWith('/api/email-conversations/');
@@ -423,7 +427,7 @@ const server = http.createServer(async (req, res) => {
       ? wapaServiceUrl
       : isBniRoute
       ? bniServiceUrl
-      : isChatGroupsRoute || isLabelsRoute
+      : isChatGroupsRoute || isLabelsRoute || isLeadsRoute
         ? channel === 'personal'
           ? wapaServiceUrl
           : bniServiceUrl
@@ -500,7 +504,7 @@ const server = http.createServer(async (req, res) => {
         ? `/api/linkedin-conversations${conversationPath}`
         : `/api/whatsapp-conversations${conversationPath}`;
     }
-    if (isChatGroupsRoute || isLabelsRoute) {
+    if (isChatGroupsRoute || isLabelsRoute || isLeadsRoute) {
       const groupUrl = new URL(req.url, 'http://localhost');
       groupUrl.searchParams.delete('channel');
       const query = groupUrl.searchParams.toString();

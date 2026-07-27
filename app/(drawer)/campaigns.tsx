@@ -1,16 +1,16 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
-import { MoreVertical, Pause, Play, Plus, RefreshCw } from 'lucide-react-native';
-import Theme from '@/constants/theme';
-import { Typography } from '@/components/ui/Typography';
-import { GlassCard } from '@/components/ui/GlassCard';
-import { Badge } from '@/components/ui/Badge';
-import { CampaignItem, CampaignStats, deleteCampaign, getCampaigns, getCampaignStats, updateCampaignLifecycle } from '@/src/services/settingsHub';
-import { useAppTheme } from '@/src/theme/appTheme';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { Badge } from '@/components/ui/Badge';
+import { GlassCard } from '@/components/ui/GlassCard';
+import { Typography } from '@/components/ui/Typography';
+import Theme from '@/constants/theme';
+import { CampaignItem, CampaignStats, deleteCampaign, getCampaigns, getCampaignStats, restartCampaign, updateCampaignLifecycle } from '@/src/services/settingsHub';
+import { useAppTheme } from '@/src/theme/appTheme';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 import { useRouter } from 'expo-router';
+import { MoreVertical, Pause, Play, Plus, RefreshCw, RotateCcw } from 'lucide-react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
 const formatPercent = (value: number) => `${Math.round((value || 0) * 10) / 10}%`;
@@ -92,6 +92,20 @@ export default function CampaignsScreen() {
     }
   };
 
+  const handleRestartCampaign = async (campaign: CampaignItem) => {
+    setOpenMenuId('');
+    setBusyId(campaign.id);
+
+    try {
+      await restartCampaign(campaign.id);
+      await loadCampaigns(true);
+    } catch (err) {
+      Alert.alert('Restart failed', err instanceof Error ? err.message : 'Unable to restart this campaign.');
+    } finally {
+      setBusyId('');
+    }
+  };
+
   const openCampaignMenu = (campaign: CampaignItem) => {
     setOpenMenuId((current) => current === campaign.id ? '' : campaign.id);
   };
@@ -117,6 +131,29 @@ export default function CampaignsScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: () => void handleDeleteCampaign(campaign),
+        },
+      ],
+    );
+  };
+
+  const confirmRestartCampaign = (campaign: CampaignItem) => {
+    const message = 'All execution history will be cleared and every lead will be re-processed from step 1.';
+
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      if (window.confirm(`Restart this campaign from the beginning? ${message}`)) {
+        void handleRestartCampaign(campaign);
+      }
+      return;
+    }
+
+    Alert.alert(
+      'Restart from beginning?',
+      message,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Restart',
+          onPress: () => void handleRestartCampaign(campaign),
         },
       ],
     );
@@ -148,124 +185,144 @@ export default function CampaignsScreen() {
       >
         <View style={styles.contentMaxWidth}>
           {openMenuId ? <Pressable style={styles.menuDismissLayer} onPress={closeCampaignMenu} /> : null}
-        <View style={styles.statsGrid}>
-          <GlassCard style={styles.statCard}>
-            <Typography variant="h2">{formatNumber(stats?.totalCampaigns ?? campaigns.length)}</Typography>
-            <Typography variant="caption" color={appTheme.muted}>Total Campaigns</Typography>
-          </GlassCard>
-          <GlassCard style={styles.statCard}>
-            <Typography variant="h2">{formatNumber(stats?.totalLeads ?? 0)}</Typography>
-            <Typography variant="caption" color={appTheme.muted}>Total Leads</Typography>
-          </GlassCard>
-          <GlassCard style={styles.statCard}>
-            <Typography variant="h2">{formatNumber(stats?.activeCampaigns ?? 0)}</Typography>
-            <Typography variant="caption" color={appTheme.muted}>Active</Typography>
-          </GlassCard>
-        </View>
+          <View style={styles.statsGrid}>
+            <GlassCard style={styles.statCard}>
+              <Typography variant="h2">{formatNumber(stats?.totalCampaigns ?? campaigns.length)}</Typography>
+              <Typography variant="caption" color={appTheme.muted}>Total Campaigns</Typography>
+            </GlassCard>
+            <GlassCard style={styles.statCard}>
+              <Typography variant="h2">{formatNumber(stats?.totalLeads ?? 0)}</Typography>
+              <Typography variant="caption" color={appTheme.muted}>Total Leads</Typography>
+            </GlassCard>
+            <GlassCard style={styles.statCard}>
+              <Typography variant="h2">{formatNumber(stats?.totalSent ?? campaigns.reduce((sum, item) => sum + item.sentCount, 0))}</Typography>
+              <Typography variant="caption" color={appTheme.muted}>Connection Requests Sent</Typography>
+            </GlassCard>
+            <GlassCard style={styles.statCard}>
+              <Typography variant="h2">{formatNumber(stats?.activeCampaigns ?? 0)}</Typography>
+              <Typography variant="caption" color={appTheme.muted}>Active</Typography>
+            </GlassCard>
+          </View>
 
-        {error ? (
-          <GlassCard style={styles.messageCard}>
-            <Typography variant="body" color={Theme.colors.error}>{error}</Typography>
-          </GlassCard>
-        ) : null}
+          {error ? (
+            <GlassCard style={styles.messageCard}>
+              <Typography variant="body" color={Theme.colors.error}>{error}</Typography>
+            </GlassCard>
+          ) : null}
 
-        {loading ? (
-          <ActivityIndicator color={appTheme.primaryAccent} style={styles.loader} />
-        ) : campaigns.length === 0 ? (
-          <GlassCard style={styles.messageCard}>
-            <Typography variant="h4">No campaigns found</Typography>
-            <Typography variant="bodySmall" color={appTheme.muted}>Campaigns created in LAD web will appear here.</Typography>
-          </GlassCard>
-        ) : (
-          campaigns.map((campaign) => {
-            const active = isActiveStatus(String(campaign.status));
-            const sentBase = campaign.sentCount || campaign.leadsCount;
-            const replyRate = sentBase ? (campaign.repliedCount / sentBase) * 100 : 0;
+          {loading ? (
+            <ActivityIndicator color={appTheme.primaryAccent} style={styles.loader} />
+          ) : campaigns.length === 0 ? (
+            <GlassCard style={styles.messageCard}>
+              <Typography variant="h4">No campaigns found</Typography>
+              <Typography variant="bodySmall" color={appTheme.muted}>Campaigns created in LAD web will appear here.</Typography>
+            </GlassCard>
+          ) : (
+            campaigns.map((campaign) => {
+              const active = isActiveStatus(String(campaign.status));
+              const sentBase = campaign.sentCount || campaign.leadsCount;
+              const replyRate = sentBase ? (campaign.repliedCount / sentBase) * 100 : 0;
 
-            return (
-              <GlassCard
-                key={campaign.id}
-                style={[styles.campaignCard, openMenuId === campaign.id && styles.campaignCardMenuOpen]}
-              >
-                {openMenuId === campaign.id ? (
-                  <Pressable style={styles.campaignCardDismissLayer} onPress={closeCampaignMenu} />
-                ) : null}
-                <View style={styles.cardHeader}>
-                  <View style={styles.cardTitleBlock}>
-                    <Typography variant="h4" numberOfLines={2}>{campaign.name}</Typography>
-                    <View style={styles.badgeRow}>
-                      <Badge
-                        label={String(campaign.status).toUpperCase()}
-                        variant={active ? 'success' : String(campaign.status).toLowerCase() === 'paused' ? 'warning' : 'default'}
-                      />
-                      {campaign.type ? <Badge label={campaign.type} variant="info" /> : null}
+              return (
+                <GlassCard
+                  key={campaign.id}
+                  style={[styles.campaignCard, openMenuId === campaign.id && styles.campaignCardMenuOpen]}
+                >
+                  {openMenuId === campaign.id ? (
+                    <Pressable style={styles.campaignCardDismissLayer} onPress={closeCampaignMenu} />
+                  ) : null}
+                  <View style={styles.cardHeader}>
+                    <View style={styles.cardTitleBlock}>
+                      <Typography variant="h4" numberOfLines={2}>{campaign.name}</Typography>
+                      <View style={styles.badgeRow}>
+                        <Badge
+                          label={String(campaign.status).toUpperCase()}
+                          variant={active ? 'success' : String(campaign.status).toLowerCase() === 'paused' ? 'warning' : 'default'}
+                        />
+                        {campaign.type ? <Badge label={campaign.type} variant="info" /> : null}
+                      </View>
+                    </View>
+                    <View style={styles.campaignMenuWrap}>
+                      <TouchableOpacity
+                        style={styles.menuButton}
+                        onPress={() => openCampaignMenu(campaign)}
+                        disabled={busyId === campaign.id}
+                        activeOpacity={0.72}
+                      >
+                        <MoreVertical color={appTheme.muted} size={20} />
+                      </TouchableOpacity>
+                      {openMenuId === campaign.id ? (
+                        <View style={[styles.actionMenu, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
+                          <TouchableOpacity
+                            style={styles.actionMenuItem}
+                            onPress={() => void handleLifecycle(campaign)}
+                            disabled={busyId === campaign.id}
+                            activeOpacity={0.72}
+                          >
+                            {active ? <Pause color={appTheme.primaryAccent} size={16} /> : <Play color={appTheme.primaryAccent} size={16} />}
+                            <Typography variant="bodySmall" color={appTheme.text} style={styles.actionMenuText}>
+                              {active ? 'Pause Campaign' : String(campaign.status).toLowerCase() === 'paused' ? 'Resume Campaign' : 'Start Campaign'}
+                            </Typography>
+                          </TouchableOpacity>
+                          {['stopped', 'completed', 'paused', 'running', 'active'].includes(String(campaign.status).toLowerCase()) ? (
+                            <>
+                              <View style={[styles.actionMenuDivider, { backgroundColor: appTheme.border }]} />
+                              <TouchableOpacity
+                                style={styles.actionMenuItem}
+                                onPress={() => confirmRestartCampaign(campaign)}
+                                disabled={busyId === campaign.id}
+                                activeOpacity={0.72}
+                              >
+                                <RotateCcw color={appTheme.primaryAccent} size={16} />
+                                <Typography variant="bodySmall" color={appTheme.text} style={styles.actionMenuText}>
+                                  Restart from Beginning
+                                </Typography>
+                              </TouchableOpacity>
+                            </>
+                          ) : null}
+                          <View style={[styles.actionMenuDivider, { backgroundColor: appTheme.border }]} />
+                          <TouchableOpacity
+                            style={styles.actionMenuItem}
+                            onPress={() => confirmDeleteCampaign(campaign)}
+                            disabled={busyId === campaign.id}
+                            activeOpacity={0.72}
+                          >
+                            <Typography variant="bodySmall" color={Theme.colors.error} style={styles.actionMenuText}>
+                              Delete Campaign
+                            </Typography>
+                          </TouchableOpacity>
+                        </View>
+                      ) : null}
                     </View>
                   </View>
-                  <View style={styles.campaignMenuWrap}>
-                    <TouchableOpacity
-                      style={styles.menuButton}
-                      onPress={() => openCampaignMenu(campaign)}
-                      disabled={busyId === campaign.id}
-                      activeOpacity={0.72}
-                    >
-                      <MoreVertical color={appTheme.muted} size={20} />
-                    </TouchableOpacity>
-                    {openMenuId === campaign.id ? (
-                      <View style={[styles.actionMenu, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
-                        <TouchableOpacity
-                          style={styles.actionMenuItem}
-                          onPress={() => void handleLifecycle(campaign)}
-                          disabled={busyId === campaign.id}
-                          activeOpacity={0.72}
-                        >
-                          {active ? <Pause color={appTheme.primaryAccent} size={16} /> : <Play color={appTheme.primaryAccent} size={16} />}
-                          <Typography variant="bodySmall" color={appTheme.text} style={styles.actionMenuText}>
-                            {active ? 'Pause Campaign' : String(campaign.status).toLowerCase() === 'paused' ? 'Resume Campaign' : 'Start Campaign'}
-                          </Typography>
-                        </TouchableOpacity>
-                        <View style={[styles.actionMenuDivider, { backgroundColor: appTheme.border }]} />
-                        <TouchableOpacity
-                          style={styles.actionMenuItem}
-                          onPress={() => confirmDeleteCampaign(campaign)}
-                          disabled={busyId === campaign.id}
-                          activeOpacity={0.72}
-                        >
-                          <Typography variant="bodySmall" color={Theme.colors.error} style={styles.actionMenuText}>
-                            Delete Campaign
-                          </Typography>
-                        </TouchableOpacity>
-                      </View>
-                    ) : null}
-                  </View>
-                </View>
 
-                <View style={styles.metricsRow}>
-                  <View style={styles.metric}>
-                    <Typography variant="caption" color={appTheme.muted}>Leads</Typography>
-                    <Typography variant="h3">{formatNumber(campaign.leadsCount)}</Typography>
+                  <View style={styles.metricsRow}>
+                    <View style={styles.metric}>
+                      <Typography variant="caption" color={appTheme.muted}>Leads</Typography>
+                      <Typography variant="h3">{formatNumber(campaign.leadsCount)}</Typography>
+                    </View>
+                    <View style={styles.metric}>
+                      <Typography variant="caption" color={appTheme.muted}>Sent</Typography>
+                      <Typography variant="h3">{formatNumber(campaign.sentCount)}</Typography>
+                    </View>
+                    <View style={styles.metric}>
+                      <Typography variant="caption" color={appTheme.muted}>Reply Rate</Typography>
+                      <Typography variant="h3">{formatPercent(replyRate)}</Typography>
+                    </View>
+                    <TouchableOpacity style={[styles.actionButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => handleLifecycle(campaign)} disabled={busyId === campaign.id}>
+                      {busyId === campaign.id ? (
+                        <ActivityIndicator color={appTheme.primaryAccent} />
+                      ) : active ? (
+                        <Pause color={appTheme.primaryAccent} size={20} />
+                      ) : (
+                        <Play color={appTheme.primaryAccent} size={20} />
+                      )}
+                    </TouchableOpacity>
                   </View>
-                  <View style={styles.metric}>
-                    <Typography variant="caption" color={appTheme.muted}>Sent</Typography>
-                    <Typography variant="h3">{formatNumber(campaign.sentCount)}</Typography>
-                  </View>
-                  <View style={styles.metric}>
-                    <Typography variant="caption" color={appTheme.muted}>Reply Rate</Typography>
-                    <Typography variant="h3">{formatPercent(replyRate)}</Typography>
-                  </View>
-                  <TouchableOpacity style={[styles.actionButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => handleLifecycle(campaign)} disabled={busyId === campaign.id}>
-                    {busyId === campaign.id ? (
-                      <ActivityIndicator color={appTheme.primaryAccent} />
-                    ) : active ? (
-                      <Pause color={appTheme.primaryAccent} size={20} />
-                    ) : (
-                      <Play color={appTheme.primaryAccent} size={20} />
-                    )}
-                  </TouchableOpacity>
-                </View>
-              </GlassCard>
-            );
-          })
-        )}
+                </GlassCard>
+              );
+            })
+          )}
         </View>
       </ScrollView>
     </AnimatedScreen>
@@ -363,7 +420,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 38,
     right: 0,
-    width: 190,
+    width: 242,
     borderRadius: 10,
     borderWidth: 1,
     paddingVertical: Theme.spacing.xs,

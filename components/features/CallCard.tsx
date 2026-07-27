@@ -5,10 +5,10 @@ import { Typography } from '@/components/ui/Typography';
 import { Avatar } from '@/components/ui/Avatar';
 import { Badge } from '@/components/ui/Badge';
 import { GlassCard } from '@/components/ui/GlassCard';
+import { LadLogoMark } from '@/components/ui/LadLogoMark';
 import { CallRecord } from '@/types/calls';
 import { getCallStatusDisplayMeta } from '@/src/utils/callStatus';
 import {
-  Bot,
   ChevronDown,
   ChevronUp,
   PhoneIncoming,
@@ -77,7 +77,7 @@ export const CallCard: React.FC<CallCardProps> = memo(({ call, onPress }) => {
   const isManualDial = call.type === 'manual-dial';
   const PHONE_RE = /^\+?[\d\s\-\.\(\)]{7,15}$/;
   const nameIsPhone = PHONE_RE.test((call.name ?? '').trim());
-  const displayName = (!call.name || nameIsPhone) ? 'Manual Dial' : call.name;
+  const displayName = (!call.name || nameIsPhone || call.name === 'Manual Dial') ? (call.phone || 'Unknown Contact') : call.name;
 
   const renderIcon = () => {
     switch (call.type) {
@@ -100,7 +100,7 @@ export const CallCard: React.FC<CallCardProps> = memo(({ call, onPress }) => {
     switch (call.type) {
       case 'incoming': return 'Voice Call';
       case 'outgoing': return 'Voice Call';
-      case 'manual-dial': return 'Manual dial';
+      case 'manual-dial': return 'Voice Call';
       case 'missed': return 'Missed Call';
       case 'video': return 'Video Call';
       default: return 'Voice Call';
@@ -178,7 +178,7 @@ export const CallCard: React.FC<CallCardProps> = memo(({ call, onPress }) => {
         activeOpacity={0.7}
       >
         <View style={styles.summaryLabel}>
-          <Bot color={appTheme.primaryAccent} size={16} />
+          <LadLogoMark size={17} color={appTheme.primaryAccent} />
           <Typography variant="bodySmall" style={[styles.summaryTitle, { color: appTheme.primaryAccent }]}>AI Summary</Typography>
         </View>
         {isSummaryOpen ? (

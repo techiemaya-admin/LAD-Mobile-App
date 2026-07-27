@@ -1,4 +1,5 @@
 import { apiPost } from '@/src/api';
+import { deriveConfig } from '@/src/services/workflowConfigSync';
 
 export interface LeadTargeting {
   job_titles?: string[];
@@ -57,6 +58,95 @@ export interface OutreachJourneyStep {
   recommended: boolean;
   reason?: string;
 }
+
+/**
+ * One node in the visual workflow builder — mirrors the web's WorkflowPreviewStep.
+ * Also doubles as the canonical `SyncStep` shape consumed by
+ * `workflowConfigSync.ts`'s deriveConfig/applyConfig — the per-step content
+ * fields (message/subject/delay/condition) are what let a wizard edit and a
+ * canvas edit reconcile onto the same array.
+ */
+export interface WorkflowStepDef {
+  id: string;
+  type: string;
+  title: string;
+  description?: string;
+  channel: string;
+  message?: string;
+  subject?: string;
+  delayDays?: number;
+  delayHours?: number;
+  condition?: string;
+  leadLimit?: number;
+  /** Connected account selection for this step's channel (email sender id / WhatsApp account id / voice agent id). */
+  accountId?: string;
+  phoneNumber?: string;
+}
+
+/** Platform catalogue for the workflow builder's "Add Step" picker (mirrors web). */
+export const WORKFLOW_PLATFORMS = [
+  { id: 'linkedin', label: 'LinkedIn', color: '#0A66C2', desc: 'Social outreach' },
+  { id: 'email', label: 'Email', color: '#EA4335', desc: 'Direct mailing' },
+  { id: 'whatsapp', label: 'WhatsApp', color: '#25D366', desc: 'Instant messaging' },
+  { id: 'voice', label: 'Voice', color: '#8B5CF6', desc: 'AI phone calls' },
+] as const;
+
+export const WORKFLOW_PLATFORM_ACTIONS: Record<string, { type: string; title: string; desc: string }[]> = {
+  linkedin: [
+    { type: 'linkedin_connect', title: 'Connect', desc: 'Send connection request' },
+    { type: 'linkedin_message', title: 'Message', desc: 'Send follow-up message' },
+    { type: 'linkedin_visit', title: 'Visit', desc: 'View LinkedIn profile' },
+  ],
+  email: [
+    { type: 'email_send', title: 'Send Email', desc: 'Automated email' },
+  ],
+  whatsapp: [
+    { type: 'whatsapp_send', title: 'WhatsApp', desc: 'Direct message' },
+  ],
+  voice: [
+    { type: 'voice_agent_call', title: 'AI Call', desc: 'AI voice interaction' },
+  ],
+};
+
+let workflowStepSeq = 0;
+const workflowStepId = (type: string) => `${type}-${Date.now()}-${workflowStepSeq++}`;
+
+/**
+ * Base workflow derived from the selected channels — same structural build the
+ * web derives from its checkpoint config (LinkedIn source + actions first, then
+ * each follow-up channel in market order).
+ */
+export const buildWorkflowSteps = (channels: string[], includeLeadSource = true): WorkflowStepDef[] => {
+  const selected = channels.length ? channels : ['linkedin', 'email', 'whatsapp', 'voice'];
+  const steps: WorkflowStepDef[] = [];
+
+  if (selected.includes('linkedin')) {
+    if (includeLeadSource) {
+      steps.push({ id: workflowStepId('lead_generation'), type: 'lead_generation', title: 'Lead Search', description: 'LinkedIn lead source', channel: 'linkedin' });
+    }
+    steps.push({ id: workflowStepId('linkedin_visit'), type: 'linkedin_visit', title: 'Visit', description: 'View LinkedIn profile', channel: 'linkedin' });
+    steps.push({ id: workflowStepId('linkedin_connect'), type: 'linkedin_connect', title: 'Connect', description: 'Send connection request', channel: 'linkedin' });
+    steps.push({ id: workflowStepId('linkedin_message'), type: 'linkedin_message', title: 'Message', description: 'Send follow-up message', channel: 'linkedin' });
+  }
+  if (selected.includes('email')) {
+    steps.push({ id: workflowStepId('email_send'), type: 'email_send', title: 'Send Email', description: 'Automated email', channel: 'email' });
+  }
+  if (selected.includes('whatsapp')) {
+    steps.push({ id: workflowStepId('whatsapp_send'), type: 'whatsapp_send', title: 'WhatsApp', description: 'Direct message', channel: 'whatsapp' });
+  }
+  if (selected.includes('voice')) {
+    steps.push({ id: workflowStepId('voice_agent_call'), type: 'voice_agent_call', title: 'AI Call', description: 'AI voice interaction', channel: 'voice' });
+  }
+  return steps;
+};
+
+export const createWorkflowStep = (platformId: string, action: { type: string; title: string; desc: string }): WorkflowStepDef => ({
+  id: workflowStepId(action.type),
+  type: action.type,
+  title: action.title,
+  description: action.desc,
+  channel: platformId,
+});
 
 export interface LeadChatResponse {
   response?: string;
@@ -214,33 +304,12 @@ const mapLeadForCampaign = (lead: MobileAssistantLead) => ({
   _source: 'mobile_ai_assistant',
 });
 
-export const buildCampaignPayload = ({
-  name,
-  leads,
-  targeting,
-  channels,
-  searchQuery,
-  campaignDays = 30,
-}: {
-  name: string;
-  leads: MobileAssistantLead[];
-  targeting?: LeadTargeting | null;
-  channels: string[];
-  searchQuery: string;
-  campaignDays?: number;
-}) => {
-  const selected = channels.length ? channels : ['linkedin', 'email'];
-  let order = 0;
-  const steps: Record<string, unknown>[] = [];
+/** Per-step backend config, populated from the step's own message/subject/delay/condition fields (set by the CheckpointWizard or the Flow canvas's step editor). */
+const buildStepConfig = (step: WorkflowStepDef, targeting: LeadTargeting | null | undefined, searchQuery: string, leadCount: number): Record<string, unknown> => {
   const t = targeting || {};
-
-  if (selected.includes('linkedin')) {
-    steps.push({
-      type: 'lead_generation',
-      title: 'LinkedIn Lead Search',
-      channel: 'linkedin',
-      order_index: order++,
-      config: {
+  switch (step.type) {
+    case 'lead_generation':
+      return {
         source: 'linkedin_search',
         leadGenerationFilters: {
           keywords: t.keywords?.join(' ') || searchQuery,
@@ -249,27 +318,64 @@ export const buildCampaignPayload = ({
           job_titles: t.job_titles || [],
           profile_language: t.profile_language || [],
         },
-        leadGenerationLimit: Math.max(10, leads.length || 10),
+        leadGenerationLimit: Math.max(10, leadCount || 10),
         icp_input: searchQuery,
-        icp_threshold: 0,
-      },
-    });
-    steps.push({ type: 'linkedin_visit', title: 'Visit LinkedIn Profile', channel: 'linkedin', order_index: order++, config: { delayDays: 0, delayHours: 0 } });
-    steps.push({ type: 'linkedin_connect', title: 'Send LinkedIn Connection Request', channel: 'linkedin', order_index: order++, config: { message: '', delayDays: 0, delayHours: 2 } });
-    steps.push({ type: 'linkedin_message', title: 'Send LinkedIn Follow-up Message', channel: 'linkedin', order_index: order++, config: { message: '', delayDays: 2, delayHours: 0 } });
+        icp_threshold: step.leadLimit ?? 0,
+      };
+    case 'linkedin_visit':
+      return { delayDays: step.delayDays ?? 0, delayHours: step.delayHours ?? 0 };
+    case 'linkedin_connect':
+      return { message: step.message || '', delayDays: step.delayDays ?? 0, delayHours: step.delayHours ?? 2 };
+    case 'linkedin_message':
+      return { message: step.message || '', delayDays: step.delayDays ?? 2, delayHours: step.delayHours ?? 0 };
+    case 'email_send':
+      return { subject: step.subject || '', body: step.message || '', senderAccountId: step.accountId || '', delayDays: step.delayDays ?? 3, delayHours: step.delayHours ?? 0 };
+    case 'whatsapp_send':
+      return { whatsappMessage: step.message || '', accountId: step.accountId || '', delayDays: step.delayDays ?? 4, delayHours: step.delayHours ?? 0 };
+    case 'voice_agent_call':
+      return { agentId: step.accountId || '', phoneNumber: step.phoneNumber || '', delayDays: step.delayDays ?? 5, delayHours: step.delayHours ?? 0 };
+    case 'wait_for_condition':
+      return { condition: step.condition || '' };
+    default:
+      return {};
   }
+};
 
-  if (selected.includes('email')) {
-    steps.push({ type: 'email_send', title: 'Send Follow-up Email', channel: 'email', order_index: order++, config: { subject: '', body: '', delayDays: selected.includes('linkedin') ? 3 : 0, delayHours: 0 } });
-  }
-
-  if (selected.includes('whatsapp')) {
-    steps.push({ type: 'whatsapp_send', title: 'Send WhatsApp Message', channel: 'whatsapp', order_index: order++, config: { whatsappMessage: '', delayDays: selected.includes('linkedin') ? 4 : 0, delayHours: 0 } });
-  }
-
-  if (selected.includes('voice')) {
-    steps.push({ type: 'voice_agent_call', title: 'AI Voice Call', channel: 'voice', order_index: order++, config: { delayDays: selected.includes('linkedin') ? 5 : 0, delayHours: 0 } });
-  }
+export const buildCampaignPayload = ({
+  name,
+  leads,
+  targeting,
+  workflowSteps,
+  searchQuery,
+  campaignDays = 30,
+  campaignConfig,
+}: {
+  name: string;
+  leads: MobileAssistantLead[];
+  targeting?: LeadTargeting | null;
+  /** Canonical step array (also the Flow canvas's data source) — steps.length/order/content drive the whole payload. */
+  workflowSteps: WorkflowStepDef[];
+  searchQuery: string;
+  campaignDays?: number;
+  campaignConfig?: {
+    icpThreshold?: number;
+    enableAiPersonalization?: boolean;
+    enableAiConnectionPersonalization?: boolean;
+    enableAiFollowupPersonalization?: boolean;
+    enableDailyWebPresence?: boolean;
+    enableDailyPosts?: boolean;
+  };
+}) => {
+  const { nextChannels, actions, triggerCondition } = deriveConfig(workflowSteps);
+  const selected = nextChannels.length ? nextChannels : ['linkedin'];
+  const t = targeting || {};
+  const steps = workflowSteps.map((step, index) => ({
+    type: step.type,
+    title: step.title,
+    channel: step.channel,
+    order_index: index,
+    config: buildStepConfig(step, targeting, searchQuery, leads.length),
+  }));
 
   return {
     name: name || 'AI Growth Campaign',
@@ -285,8 +391,8 @@ export const buildCampaignPayload = ({
       search_query: searchQuery,
       campaign_days: campaignDays,
       next_channels: selected,
-      trigger_condition: selected.length > 1 ? 'connection_accepted' : null,
-      linkedin_actions: selected.includes('linkedin') ? ['profile_view', 'connect', 'message'] : [],
+      trigger_condition: triggerCondition || (selected.length > 1 ? 'connection_accepted' : null),
+      linkedin_actions: actions.length ? actions : (selected.includes('linkedin') ? ['profile_view', 'connect', 'message'] : []),
       location: t.locations?.[0] || '',
       industries: t.industries || [],
       job_titles: t.job_titles || [],
@@ -300,13 +406,17 @@ export const buildCampaignPayload = ({
         profile_language: t.profile_language || [],
       },
       checkpoint_selections: {
-        icp_threshold: 0,
-        linkedin_actions: selected.includes('linkedin') ? ['profile_view', 'connect', 'message'] : [],
+        icp_threshold: campaignConfig?.icpThreshold ?? 0,
+        linkedin_actions: actions.length ? actions : (selected.includes('linkedin') ? ['profile_view', 'connect', 'message'] : []),
         next_channels: selected,
-        trigger_condition: selected.length > 1 ? 'connection_accepted' : null,
+        trigger_condition: triggerCondition || (selected.length > 1 ? 'connection_accepted' : null),
         campaign_days: campaignDays,
         campaign_name: name || 'AI Growth Campaign',
-        enable_ai_personalization: true,
+        enable_ai_personalization: campaignConfig?.enableAiPersonalization ?? true,
+        enable_ai_connection_personalization: campaignConfig?.enableAiConnectionPersonalization ?? true,
+        enable_ai_followup_personalization: campaignConfig?.enableAiFollowupPersonalization ?? true,
+        enable_daily_web_presence: campaignConfig?.enableDailyWebPresence ?? false,
+        enable_daily_posts: campaignConfig?.enableDailyPosts ?? false,
         ai_tone: 'professional',
         ai_goal: 'get_meeting',
       },

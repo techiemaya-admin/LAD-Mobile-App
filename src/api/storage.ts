@@ -175,6 +175,18 @@ class SafeStorage {
   }
 
   async clear() {
+    // Keys whose values must survive a sign-out (e.g. user theme preference).
+    const PERSIST_KEYS = ['lad.app-preferences.v1'];
+
+    // Save the values we want to keep before wiping storage.
+    const preserved: Record<string, string> = {};
+    for (const key of PERSIST_KEYS) {
+      const value = await this.getFromAsyncStorage(key);
+      if (value != null) {
+        preserved[key] = value;
+      }
+    }
+
     this.memoryStore.clear();
     if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
       try {
@@ -194,6 +206,12 @@ class SafeStorage {
           SecureStore.deleteItemAsync(key).catch(() => undefined),
         ),
       );
+    }
+
+    // Restore persisted preference keys after the wipe.
+    for (const [key, value] of Object.entries(preserved)) {
+      await this.setInAsyncStorage(key, value);
+      this.memoryStore.set(key, value);
     }
   }
 }
@@ -263,6 +281,38 @@ const readTenantClaim = (record: Record<string, unknown>): string | null => {
   return null;
 };
 
+const readTenantClaimDeep = (payload: unknown): string | null => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return null;
+  }
+
+  const queue: Record<string, unknown>[] = [payload as Record<string, unknown>];
+  const seen = new WeakSet<object>();
+
+  for (let index = 0; index < queue.length && index < 24; index += 1) {
+    const record = queue[index];
+    if (seen.has(record)) {
+      continue;
+    }
+
+    seen.add(record);
+
+    const tenantId = readTenantClaim(record);
+    if (tenantId) {
+      return tenantId;
+    }
+
+    for (const key of ['user', 'profile', 'account', 'data', 'tenant', 'organization']) {
+      const nested = record[key];
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        queue.push(nested as Record<string, unknown>);
+      }
+    }
+  }
+
+  return null;
+};
+
 /**
  * Resolve the tenant id from the JWT itself.
  *
@@ -298,6 +348,27 @@ export const getTenantIdFromToken = (token: string | null | undefined): string |
 };
 
 export async function getActiveTenantId() {
+  const selectedTenantId = await safeStorage.getItem('selectedTenantId');
+  if (selectedTenantId && selectedTenantId !== 'default') {
+    return selectedTenantId;
+  }
+
+  for (const key of ['userData', 'user']) {
+    const raw = await safeStorage.getItem(key);
+    if (!raw) {
+      continue;
+    }
+
+    try {
+      const tenantId = readTenantClaimDeep(JSON.parse(raw));
+      if (tenantId) {
+        return tenantId;
+      }
+    } catch {
+      // Ignore malformed cached auth profile data.
+    }
+  }
+
   const token = await getAuthToken();
   return getTenantIdFromToken(token);
 }

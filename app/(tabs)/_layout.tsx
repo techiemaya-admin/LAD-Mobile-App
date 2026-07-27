@@ -7,6 +7,7 @@ export default function TabsLayout() {
       backBehavior="history"
       screenOptions={{
         headerShown: false,
+        tabBarHideOnKeyboard: true,
       }}
       tabBar={(props) => <ArtBottomTabBar {...props} />}
     >

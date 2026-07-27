@@ -49,23 +49,18 @@ export const unwrapApiList = <T,>(payload: unknown): T[] => {
 
   if (payload && typeof payload === 'object') {
     const record = payload as Record<string, unknown>;
-    if (Array.isArray(record.data)) {
-      return record.data as T[];
+    for (const key of ['data', 'agents', 'numbers', 'items', 'results', 'records', 'rows']) {
+      if (Array.isArray(record[key])) {
+        return record[key] as T[];
+      }
     }
     if (record.data && typeof record.data === 'object') {
       const nested = record.data as Record<string, unknown>;
-      if (Array.isArray(nested.data)) {
-        return nested.data as T[];
+      for (const key of ['data', 'agents', 'numbers', 'items', 'results', 'records', 'rows']) {
+        if (Array.isArray(nested[key])) {
+          return nested[key] as T[];
+        }
       }
-      if (Array.isArray(nested.items)) {
-        return nested.items as T[];
-      }
-    }
-    if (Array.isArray(record.items)) {
-      return record.items as T[];
-    }
-    if (Array.isArray(record.results)) {
-      return record.results as T[];
     }
   }
 
@@ -174,36 +169,33 @@ export const normalizeVoiceNumbers = (payload: unknown): VoiceNumberOption[] => 
       baseNumber,
       countryCode,
       provider: number.provider ? String(number.provider) : undefined,
-      assignedAgentId: number.assignedAgentId ? String(number.assignedAgentId) : number.assigned_agent_id ? String(number.assigned_agent_id) : undefined,
+      assignedAgentId: number.assignedAgentId
+        ? String(number.assignedAgentId)
+        : number.assigned_agent_id
+          ? String(number.assigned_agent_id)
+          : number.agent_id
+            ? String(number.agent_id)
+            : number.agentId
+              ? String(number.agentId)
+              : number.voice_agent_id
+                ? String(number.voice_agent_id)
+                : undefined,
     };
   })
   .filter((number) => number.id && number.phoneNumber);
 
-const mergeAgentWithSettings = (agent: VoiceAgentOption, settingsAgent?: VoiceAgentOption): VoiceAgentOption => {
-  if (!settingsAgent) {
-    return agent;
-  }
-
-  return {
-    id: agent.id,
-    name: agent.name || settingsAgent.name,
-    language: agent.language || settingsAgent.language,
-    accent: agent.accent || settingsAgent.accent,
-    gender: agent.gender || settingsAgent.gender,
-    provider: agent.provider || settingsAgent.provider,
-    description: agent.description || settingsAgent.description,
-    voiceId: agent.voiceId || settingsAgent.voiceId,
-    voiceGender: agent.voiceGender || settingsAgent.voiceGender,
-    voiceLanguage: agent.voiceLanguage || settingsAgent.voiceLanguage,
-    agentInstructions: agent.agentInstructions || settingsAgent.agentInstructions,
-    systemInstructions: agent.systemInstructions || settingsAgent.systemInstructions,
-    outboundStarterPrompt: agent.outboundStarterPrompt || settingsAgent.outboundStarterPrompt,
-  };
-};
-
 type VoiceCallOptions = {
   agents: VoiceAgentOption[];
   numbers: VoiceNumberOption[];
+};
+
+const uniqueById = <T extends { id: string }>(items: T[]) => {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (!item.id || seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
 };
 
 const VOICE_CALL_OPTIONS_CACHE_MS = 60 * 1000;
@@ -221,22 +213,14 @@ export const fetchVoiceCallOptions = async (options: { force?: boolean } = {}) =
   }
 
   voiceCallOptionsRequest = (async () => {
-    const [agentsResponse, settingsAgentsResponse, numbersResponse] = await Promise.all([
-      apiGet<unknown>('/api/voice-agent/user/available-agents'),
-      apiGet<unknown>('/api/voice-agent/settings/agents').catch(() => null),
-      // Match LAD-Frontend-2's number pool: it loads from /available-numbers.
-      // Using the same endpoint ensures the from-numbers shown here are the same
-      // verified, dispatch-capable numbers the working web app uses.
-      apiGet<unknown>('/api/voice-agent/available-numbers').catch(() => apiGet<unknown>('/api/voice-agent/user/available-numbers')),
+    const [agentsResponse, numbersResponse] = await Promise.all([
+      apiGet<unknown>('/api/voice-agent/user/available-agents').catch(() => ({ data: [] })),
+      apiGet<unknown>('/api/voice-agent/user/available-numbers').catch(() => ({ data: [] })),
     ]);
 
-    const settingsAgents = settingsAgentsResponse ? normalizeVoiceAgents(settingsAgentsResponse.data) : [];
-    const settingsById = new Map(settingsAgents.map((agent) => [agent.id, agent]));
-    const agents = normalizeVoiceAgents(agentsResponse.data).map((agent) => mergeAgentWithSettings(agent, settingsById.get(agent.id)));
-
     const value = {
-      agents,
-      numbers: normalizeVoiceNumbers(numbersResponse.data),
+      agents: uniqueById(normalizeVoiceAgents(agentsResponse.data)),
+      numbers: uniqueById(normalizeVoiceNumbers(numbersResponse.data)),
     };
     voiceCallOptionsCache = { value, fetchedAt: Date.now() };
     return value;

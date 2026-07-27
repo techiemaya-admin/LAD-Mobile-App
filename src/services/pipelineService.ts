@@ -418,8 +418,11 @@ export async function reorderCRMStages(stageOrders: { key: string; order: number
 
 export async function getCRMLeads(filters?: CRMFilters): Promise<{ leads: CRMLead[]; pagination?: CRMPagination }> {
   const response = await apiGet<unknown>('/api/deals-pipeline/leads', { params: buildQueryParams(filters) });
+  const rows = getArrayPayload(response.data, ['leads', 'data', 'items', 'results']);
+  // Cap raw rows before normalization in case the backend ignores `limit`.
+  const limited = filters?.limit ? rows.slice(0, Number(filters.limit)) : rows;
   return {
-    leads: getArrayPayload(response.data, ['leads', 'data', 'items', 'results']).map(normalizeLead),
+    leads: limited.map(normalizeLead),
     pagination: normalizePagination(response.data),
   };
 }
@@ -488,7 +491,8 @@ export async function getCRMPipelineData(page = 1, limit = 100): Promise<{
   const response = await apiGet<unknown>('/api/deals-pipeline/pipeline/board', { params: { page, limit } });
   return {
     stages: sortStages(getArrayPayload(response.data, ['stages', 'columns']).map(normalizeStage)),
-    leads: getArrayPayload(response.data, ['leads', 'items', 'results']).map(normalizeLead),
+    // Cap raw rows before normalization in case the backend ignores `limit`.
+    leads: getArrayPayload(response.data, ['leads', 'items', 'results']).slice(0, limit).map(normalizeLead),
     pagination: normalizePagination(response.data),
   };
 }
@@ -501,7 +505,7 @@ export async function getCRMPipelineLeads(params: {
 }) {
   const response = await apiGet<unknown>('/api/deals-pipeline/leads', { params: buildQueryParams(params) });
   return {
-    leads: getArrayPayload(response.data, ['leads', 'data', 'items', 'results']).map(normalizeLead),
+    leads: getArrayPayload(response.data, ['leads', 'data', 'items', 'results']).slice(0, params.limit).map(normalizeLead),
     pagination: normalizePagination(response.data),
   };
 }
@@ -532,32 +536,45 @@ export async function getCRMPriorities() {
 export async function fetchCRMData(filters: CRMFilters = {}): Promise<CRMData> {
   const page = Number(filters.page ?? 1);
   const limit = Number(filters.limit ?? 100);
-  const [board, stats, statuses, priorities, sources] = await Promise.all([
+  const hasLeadFilters = Boolean(
+    filters.search ||
+    filters.stage ||
+    filters.status ||
+    filters.priority ||
+    filters.source ||
+    filters.assigned_to,
+  );
+  const [board, filteredLeads, stats, statuses, priorities, sources] = await Promise.all([
     safe(getCRMPipelineData(page, limit), { stages: [], leads: [], pagination: undefined }),
+    hasLeadFilters
+      ? safe(getCRMLeads(filters), { leads: [], pagination: undefined })
+      : Promise.resolve({ leads: [], pagination: undefined }),
     safe(getCRMStats(filters), normalizeStats({}, [])),
     safe(getCRMStatuses(), FALLBACK_STATUSES),
     safe(getCRMPriorities(), FALLBACK_PRIORITIES),
     safe(getCRMSources(), FALLBACK_SOURCES),
   ]);
 
+  const leads = hasLeadFilters ? filteredLeads.leads : board.leads;
+  const pagination = hasLeadFilters ? filteredLeads.pagination : board.pagination;
   let stages = board.stages;
   if (!stages.length) stages = await safe(getCRMStages(), []);
   if (!stages.length) {
-    stages = Array.from(new Set(board.leads.map((lead) => String(lead.stage || 'new'))))
+    stages = Array.from(new Set(leads.map((lead) => String(lead.stage || 'new'))))
       .map((stage, index) => normalizeStage({ key: stage, label: stage }, index));
   }
 
   return {
     stages: sortStages(stages),
-    leads: board.leads,
+    leads,
     stats: {
-      ...normalizeStats(stats, board.leads),
+      ...normalizeStats(stats, leads),
       ...stats,
     },
     statuses,
     priorities,
     sources,
-    pagination: board.pagination,
+    pagination,
   };
 }
 

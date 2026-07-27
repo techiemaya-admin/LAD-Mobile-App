@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Modal, Platform, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
-import { Clock, ClipboardList, ChevronDown, Check } from 'lucide-react-native';
+import { Clock, ClipboardList, ChevronDown, Check, X } from 'lucide-react-native';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { useAppTheme } from '@/src/theme/appTheme';
@@ -132,7 +132,7 @@ export const BusinessHoursModal: React.FC<BusinessHoursModalProps> = ({
       backgroundColor: appTheme.surface,
       borderRadius: 16,
       overflow: 'hidden',
-      maxHeight: '90%',
+      maxHeight: '95%',
     },
     topAccent: {
       height: 3,
@@ -299,6 +299,13 @@ export const BusinessHoursModal: React.FC<BusinessHoursModalProps> = ({
                   Configure availability & timezone
                 </Typography>
               </View>
+              <TouchableOpacity
+                onPress={onClose}
+                style={{ padding: 8, borderRadius: 20, backgroundColor: appTheme.softSurface }}
+                accessibilityLabel="Close business hours"
+              >
+                <X color={appTheme.muted} size={20} />
+              </TouchableOpacity>
             </View>
 
             {/* Operating Hours */}

@@ -18,5 +18,5 @@ export {
   isApiRequestError,
 } from './apiClient';
 export type { ApiClient, ApiResponse, RequestOptions } from './apiClient';
-export { clearAuthTokens, expireAuthSession, getAuthToken, isJwtExpired, safeStorage } from './storage';
+export { clearAuthTokens, expireAuthSession, getActiveTenantId, getAuthToken, isJwtExpired, safeStorage } from './storage';
 export * from './tokenStorage';

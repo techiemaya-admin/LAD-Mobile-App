@@ -1,13 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   Linking,
   Modal,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Platform,
   RefreshControl,
   ScrollView,
-  Share,
   StyleSheet,
   TextInput,
   TouchableOpacity,
@@ -53,8 +56,9 @@ import { Typography } from '@/components/ui/Typography';
 import { useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
-import { SkeletonActivityRow, SkeletonSummaryCard } from '@/components/ui/SkeletonLoader';
+import { SkeletonActivityRow } from '@/components/ui/SkeletonLoader';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
+import { exportXlsxRowsFile, type FileExportResult } from '@/src/utils/fileExport';
 import {
   CRM_STAGES,
   ChannelKey,
@@ -63,7 +67,6 @@ import {
   ProspectCRMData,
   ProspectEvent,
   ProspectFollowup,
-  buildCounts,
   deleteProspect,
   enrichProspect,
   fetchProspectCRMData,
@@ -78,6 +81,7 @@ import { getTeamMembers, TeamMember } from '@/src/services/settingsHub';
 import { assignCRMLeadsToUser } from '@/src/services/pipelineService';
 
 type IconComponent = React.ComponentType<{ color?: string; size?: number; strokeWidth?: number }>;
+type FilterOption = { key: string; label: string };
 
 type VisibleView = 'board' | 'all' | 'prospects' | 'leads' | 'clients';
 
@@ -101,6 +105,7 @@ const EMPTY_DATA: ProspectCRMData = {
   prospects: [],
   contacts: [],
   kanbanLeads: [],
+  stageCounts: {},
   counts: { all: 0, prospects: 0, leads: 0, clients: 0 },
 };
 type CrmScreenCache = {
@@ -108,6 +113,11 @@ type CrmScreenCache = {
   lastSyncedAt: number;
 };
 const CRM_CACHE_KEY = 'tabs.crm.data';
+const CRM_PAGE_SIZE = 100;
+const CRM_RECENT_ROW_LIMIT = CRM_PAGE_SIZE;
+const CRM_SEARCH_ROW_LIMIT = 500;
+const CRM_SEARCH_DEBOUNCE_MS = 320;
+const CRM_LOAD_MORE_THRESHOLD_PX = 420;
 
 const CHANNELS: Record<string, { label: string; color: string; Icon: IconComponent }> = {
   linkedin: { label: 'LinkedIn', color: T.linkedin, Icon: BriefcaseBusiness },
@@ -176,6 +186,108 @@ const TYPE_FILTER_OPTS: Array<{ key: string; label: string }> = [
   { key: 'imported', label: 'Imported' },
   { key: 'inbound', label: 'Inbound' },
 ];
+
+const UNASSIGNED_OWNER_FILTER = '__unassigned';
+
+const getOwnerFilterValue = (contact: CrmContact) => {
+  const owner = contact.ownerName?.trim();
+  return owner ? owner.toLowerCase() : UNASSIGNED_OWNER_FILTER;
+};
+
+const getOwnerFilterLabel = (key: string, options: FilterOption[]) => (
+  options.find((option) => option.key === key)?.label || (key === UNASSIGNED_OWNER_FILTER ? 'Unassigned' : titleCase(key))
+);
+
+const buildOwnerFilterOptions = (contacts: CrmContact[]): FilterOption[] => {
+  const owners = new Map<string, string>();
+  let hasUnassigned = false;
+
+  contacts.forEach((contact) => {
+    const owner = contact.ownerName?.trim();
+    if (!owner) {
+      hasUnassigned = true;
+      return;
+    }
+    owners.set(owner.toLowerCase(), owner);
+  });
+
+  const options = Array.from(owners.entries())
+    .sort((a, b) => a[1].localeCompare(b[1]))
+    .map(([key, label]) => ({ key, label }));
+
+  return [
+    { key: 'all', label: 'All Owners' },
+    ...options,
+    ...(hasUnassigned ? [{ key: UNASSIGNED_OWNER_FILTER, label: 'Unassigned' }] : []),
+  ];
+};
+
+const capCRMDataRows = (crmData: ProspectCRMData, limit = CRM_RECENT_ROW_LIMIT): ProspectCRMData => {
+  if (crmData.contacts.length <= limit && crmData.kanbanLeads.length <= limit) {
+    return crmData;
+  }
+
+  const contacts = crmData.contacts.slice(0, limit);
+  const visibleIds = new Set(contacts.map((contact) => contact.id));
+
+  return {
+    ...crmData,
+    contacts,
+    prospects: crmData.prospects.filter((prospect) => visibleIds.has(prospect.id)).slice(0, limit),
+    kanbanLeads: crmData.kanbanLeads.filter((lead) => visibleIds.has(lead.contact.id)).slice(0, limit),
+  };
+};
+
+const countContactsByView = (contacts: CrmContact[]): ProspectCRMData['counts'] => ({
+  all: contacts.length,
+  prospects: contacts.filter((contact) => contact.type === 'prospect').length,
+  leads: contacts.filter((contact) => contact.type === 'lead').length,
+  clients: contacts.filter((contact) => contact.type === 'client').length,
+});
+
+const maxCounts = (...counts: ProspectCRMData['counts'][]): ProspectCRMData['counts'] => ({
+  all: Math.max(...counts.map((count) => count.all)),
+  prospects: Math.max(...counts.map((count) => count.prospects)),
+  leads: Math.max(...counts.map((count) => count.leads)),
+  clients: Math.max(...counts.map((count) => count.clients)),
+});
+
+const mergeById = <T extends { id: string }>(current: T[], incoming: T[]): T[] => {
+  const merged = [...current];
+  const indexById = new Map(merged.map((item, index) => [item.id, index]));
+
+  incoming.forEach((item) => {
+    const index = indexById.get(item.id);
+    if (index === undefined) {
+      indexById.set(item.id, merged.length);
+      merged.push(item);
+      return;
+    }
+    merged[index] = item;
+  });
+
+  return merged;
+};
+
+const mergeCRMDataPages = (current: ProspectCRMData, incoming: ProspectCRMData): ProspectCRMData => {
+  const contacts = mergeById(current.contacts, incoming.contacts);
+  const visibleCounts = countContactsByView(contacts);
+
+  return {
+    prospects: mergeById(current.prospects, incoming.prospects),
+    contacts,
+    kanbanLeads: mergeById(current.kanbanLeads, incoming.kanbanLeads),
+    stageCounts: incoming.stageCounts ?? current.stageCounts,
+    counts: maxCounts(current.counts, incoming.counts, visibleCounts),
+  };
+};
+
+const getViewTotalCount = (crmData: ProspectCRMData, view: VisibleView) => {
+  if (view === 'prospects') return crmData.counts.prospects;
+  if (view === 'leads') return crmData.counts.leads;
+  if (view === 'clients') return crmData.counts.clients;
+  return crmData.counts.all;
+};
 
 function getStageFilterOpts(view: VisibleView): Array<{ key: string; label: string }> {
   const base = [{ key: 'all', label: 'All Stages' }];
@@ -292,37 +404,53 @@ export default function CRMScreen() {
     : isCompact
       ? Math.min(380, Math.max(320, width - horizontalPadding * 2))
       : 280;
+  const cachedCRM = readScreenCache<CrmScreenCache>(CRM_CACHE_KEY);
 
-  const [data, setData] = useState<ProspectCRMData>(() => readScreenCache<CrmScreenCache>(CRM_CACHE_KEY)?.value.data ?? EMPTY_DATA);
+  const [data, setData] = useState<ProspectCRMData>(() => cachedCRM?.value.data ?? EMPTY_DATA);
+  const [searchData, setSearchData] = useState<ProspectCRMData | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [view, setView] = useState<VisibleView>('board');
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [stageFilter, setStageFilter] = useState<string>('all');
   const [channelFilter, setChannelFilter] = useState<string>('all');
-  const [loading, setLoading] = useState(() => !readScreenCache<CrmScreenCache>(CRM_CACHE_KEY));
+  const [ownerFilter, setOwnerFilter] = useState<string>('all');
+  const [loading, setLoading] = useState(() => !cachedCRM);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [pagingExhausted, setPagingExhausted] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(() => {
-    const cached = readScreenCache<CrmScreenCache>(CRM_CACHE_KEY);
-    return cached ? new Date(cached.value.lastSyncedAt) : null;
-  });
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(() => cachedCRM ? new Date(cachedCRM.value.lastSyncedAt) : null);
   const [selectedContact, setSelectedContact] = useState<CrmContact | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [events, setEvents] = useState<ProspectEvent[]>([]);
   const [followups, setFollowups] = useState<ProspectFollowup[]>([]);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [exportingRows, setExportingRows] = useState(false);
+  const [exportResult, setExportResult] = useState<FileExportResult | null>(null);
   const crmPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dataRef = useRef(data);
+  const nextOffsetRef = useRef(Math.max(CRM_PAGE_SIZE, Math.ceil(data.contacts.length / CRM_PAGE_SIZE) * CRM_PAGE_SIZE));
+  const loadMoreInFlightRef = useRef(false);
+
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
 
   // Silent background refresh every 90 s while the CRM tab is focused
   useFocusEffect(
     useCallback(() => {
       crmPollRef.current = setInterval(() => {
-        fetchProspectCRMData({ limit: 200 })
+        fetchProspectCRMData({ limit: CRM_RECENT_ROW_LIMIT })
           .then((next) => {
-            setData(next);
+            const refreshed = mergeCRMDataPages(next, dataRef.current);
+            dataRef.current = refreshed;
+            setData(refreshed);
             const syncedAt = Date.now();
             setLastSyncedAt(new Date(syncedAt));
-            writeScreenCache(CRM_CACHE_KEY, { data: next, lastSyncedAt: syncedAt });
+            writeScreenCache(CRM_CACHE_KEY, { data: refreshed, lastSyncedAt: syncedAt });
           })
           .catch(() => { /* silent */ });
       }, 90_000);
@@ -347,11 +475,16 @@ export default function CRMScreen() {
     setError(null);
 
     try {
-      const next = await fetchProspectCRMData({ limit: 200 });
-      setData(next);
+      const next = await fetchProspectCRMData({ limit: CRM_RECENT_ROW_LIMIT });
+      const capped = capCRMDataRows(next);
+      dataRef.current = capped;
+      setData(capped);
+      nextOffsetRef.current = CRM_PAGE_SIZE;
+      setPagingExhausted(capped.contacts.length === 0 || (capped.contacts.length < CRM_PAGE_SIZE && capped.contacts.length >= capped.counts.all));
+      setLoadMoreError(null);
       const syncedAt = Date.now();
       setLastSyncedAt(new Date(syncedAt));
-      writeScreenCache(CRM_CACHE_KEY, { data: next, lastSyncedAt: syncedAt });
+      writeScreenCache(CRM_CACHE_KEY, { data: capped, lastSyncedAt: syncedAt });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Could not load prospects.');
     } finally {
@@ -366,12 +499,94 @@ export default function CRMScreen() {
     }
   }, [loadCRM, loading]);
 
+  const hasSearchQuery = query.trim().length > 0;
+  const isListSearchActive = view !== 'board' && hasSearchQuery;
+  const hasMoreRows = !isListSearchActive
+    && !pagingExhausted
+    && data.contacts.length > 0
+    && (data.contacts.length < data.counts.all || data.contacts.length >= nextOffsetRef.current);
+
+  const loadMoreCRM = useCallback(async () => {
+    if (loading || refreshing || loadMoreInFlightRef.current || !hasMoreRows) return;
+
+    loadMoreInFlightRef.current = true;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+
+    const offset = nextOffsetRef.current;
+    try {
+      const next = await fetchProspectCRMData({ limit: CRM_PAGE_SIZE, offset });
+      const merged = mergeCRMDataPages(dataRef.current, next);
+      const syncedAt = Date.now();
+
+      dataRef.current = merged;
+      nextOffsetRef.current = offset + CRM_PAGE_SIZE;
+      setData(merged);
+      setLastSyncedAt(new Date(syncedAt));
+      setPagingExhausted(next.contacts.length === 0 || (next.contacts.length < CRM_PAGE_SIZE && merged.counts.all > 0 && merged.contacts.length >= merged.counts.all));
+      writeScreenCache(CRM_CACHE_KEY, { data: merged, lastSyncedAt: syncedAt });
+    } catch (loadError) {
+      setLoadMoreError(loadError instanceof Error ? loadError.message : 'Could not load more CRM contacts.');
+    } finally {
+      loadMoreInFlightRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [hasMoreRows, loading, refreshing]);
+
+  const handleCRMScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    handleBottomTabScroll(event);
+
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    if (distanceFromBottom <= CRM_LOAD_MORE_THRESHOLD_PX) {
+      void loadMoreCRM();
+    }
+  }, [handleBottomTabScroll, loadMoreCRM]);
+
+  useEffect(() => {
+    const normalized = query.trim();
+    if (!normalized) {
+      setSearchData(null);
+      setSearchLoading(false);
+      setSearchError(null);
+      return undefined;
+    }
+
+    let mounted = true;
+    setSearchLoading(true);
+    setSearchError(null);
+
+    const timer = setTimeout(() => {
+      fetchProspectCRMData({ limit: CRM_SEARCH_ROW_LIMIT, search: normalized })
+        .then((next) => {
+          if (mounted) setSearchData(next);
+        })
+        .catch((searchLoadError) => {
+          if (!mounted) return;
+          setSearchData(null);
+          setSearchError(searchLoadError instanceof Error ? searchLoadError.message : 'Could not search CRM data.');
+        })
+        .finally(() => {
+          if (mounted) setSearchLoading(false);
+        });
+    }, CRM_SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      mounted = false;
+      clearTimeout(timer);
+    };
+  }, [query]);
+
+  const activeData = isListSearchActive && searchData ? searchData : data;
+
   const baseRows = useMemo(() => {
-    if (view === 'prospects') return data.contacts.filter((contact) => contact.type === 'prospect');
-    if (view === 'leads') return data.contacts.filter((contact) => contact.type === 'lead');
-    if (view === 'clients') return data.contacts.filter((contact) => contact.type === 'client');
-    return data.contacts;
-  }, [data.contacts, view]);
+    if (view === 'prospects') return activeData.contacts.filter((contact) => contact.type === 'prospect');
+    if (view === 'leads') return activeData.contacts.filter((contact) => contact.type === 'lead');
+    if (view === 'clients') return activeData.contacts.filter((contact) => contact.type === 'client');
+    return activeData.contacts;
+  }, [activeData.contacts, view]);
+
+  const ownerFilterOptions = useMemo(() => buildOwnerFilterOptions(activeData.contacts), [activeData.contacts]);
 
   const tableRows = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -389,11 +604,16 @@ export default function CRMScreen() {
       ].some((item) => String(item || '').toLowerCase().includes(normalized));
 
       const matchesType = view !== 'all' || typeFilter === 'all' || contact.type === typeFilter;
-      const matchesStage = stageFilter === 'all' || contact.stage === stageFilter;
-      const matchesChannel = channelFilter === 'all' || (contact.channels || []).some((ch: string) => ch === channelFilter);
-      return matchesQuery && matchesType && matchesStage && matchesChannel;
+      const matchesStage = view === 'all' || stageFilter === 'all' || contact.stage === stageFilter;
+      const matchesChannel = view === 'all' || channelFilter === 'all' || (contact.channels || []).some((ch: string) => ch === channelFilter);
+      const matchesOwner = ownerFilter === 'all' || getOwnerFilterValue(contact) === ownerFilter;
+      return matchesQuery && matchesType && matchesStage && matchesChannel && matchesOwner;
     });
-  }, [baseRows, query, stageFilter, typeFilter, channelFilter, view]);
+  }, [baseRows, query, stageFilter, typeFilter, channelFilter, ownerFilter, view]);
+
+  const boardLeads = useMemo(() => {
+    return data.kanbanLeads;
+  }, [data.kanbanLeads]);
 
   useEffect(() => {
     if (!selectedContact) return;
@@ -442,7 +662,8 @@ export default function CRMScreen() {
         prospects: current.prospects.map((item) => item.id === prospect.id ? prospect : item),
         contacts,
         kanbanLeads: current.kanbanLeads.map((lead) => lead.id === updated.id ? { ...lead, contact: updated } : lead),
-        counts: buildCounts(contacts),
+        stageCounts: current.stageCounts,
+        counts: current.counts,
       };
     });
   };
@@ -455,11 +676,19 @@ export default function CRMScreen() {
         setSelectedContact(null);
         setData((current) => {
           const contacts = current.contacts.filter((item) => item.id !== contact.id);
+          const stageCounts = { ...(current.stageCounts ?? {}) };
+          stageCounts[contact.stage] = Math.max(0, (stageCounts[contact.stage] || 0) - 1);
+          const typeKey: keyof ProspectCRMData['counts'] = contact.type === 'lead' ? 'leads' : contact.type === 'client' ? 'clients' : 'prospects';
           return {
             prospects: current.prospects.filter((item) => item.id !== contact.id),
             contacts,
             kanbanLeads: current.kanbanLeads.filter((item) => item.id !== contact.id),
-            counts: buildCounts(contacts),
+            stageCounts,
+            counts: {
+              ...current.counts,
+              all: Math.max(0, current.counts.all - 1),
+              [typeKey]: Math.max(0, current.counts[typeKey] - 1),
+            },
           };
         });
       } catch (removeError) {
@@ -518,21 +747,29 @@ export default function CRMScreen() {
         contact.lastActivityAt || '',
       ]),
     ];
-    const csv = rows.map((row) => row.map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+    return exportXlsxRowsFile(
+      `crm-prospects-${new Date().toISOString().slice(0, 10)}.xlsx`,
+      'CRM Prospects',
+      rows,
+      'Save CRM prospects Excel file',
+    );
+  };
 
-    if (Platform.OS === 'web') {
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `crm-prospects-${new Date().toISOString().slice(0, 10)}.csv`;
-      link.click();
-      URL.revokeObjectURL(url);
+  const handleExportRows = useCallback(async () => {
+    if (exportingRows) {
       return;
     }
 
-    await Share.share({ message: csv, title: `CRM export ${new Date().toISOString().slice(0, 10)}` });
-  };
+    setError(null);
+    setExportingRows(true);
+    try {
+      setExportResult(await exportRows());
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : 'Unable to download CRM export.');
+    } finally {
+      setExportingRows(false);
+    }
+  }, [exportingRows, exportRows]);
 
   const lastSynced = lastSyncedAt
     ? lastSyncedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -554,7 +791,7 @@ export default function CRMScreen() {
         ]}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadCRM(true)} tintColor={palette.primary} />}
         showsVerticalScrollIndicator={false}
-        onScroll={handleBottomTabScroll}
+        onScroll={handleCRMScroll}
         scrollEventThrottle={16}
       >
         <View style={styles.pageHeader}>
@@ -606,7 +843,7 @@ export default function CRMScreen() {
             <SkeletonActivityRow />
             <SkeletonActivityRow />
           </View>
-        ) : data.contacts.length === 0 && !error ? (
+        ) : activeData.contacts.length === 0 && !error ? (
           <View style={[styles.emptyBox, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
             <Inbox color={palette.disabled} size={26} />
             <Typography variant="bodySmall" color={palette.muted} align="center">
@@ -614,31 +851,71 @@ export default function CRMScreen() {
             </Typography>
           </View>
         ) : view === 'board' ? (
-          <KanbanBoard
-            leads={data.kanbanLeads}
-            selectedId={selectedContact?.id ?? null}
-            columnWidth={columnWidth}
-            compact={isCompact}
-            onSelect={(lead) => openProfile(lead.contact)}
-          />
+          <>
+            <BoardSummary
+              totalCount={getViewTotalCount(data, 'board') || data.kanbanLeads.length}
+            />
+            <KanbanBoard
+              leads={boardLeads}
+              stageCounts={data.stageCounts}
+              selectedId={selectedContact?.id ?? null}
+              columnWidth={columnWidth}
+              compact={isCompact}
+              onSelect={(lead) => openProfile(lead.contact)}
+            />
+          </>
         ) : (
           <ContactList
             view={view}
             rows={tableRows}
-            totalCount={baseRows.length}
+            totalCount={getViewTotalCount(activeData, view) || baseRows.length}
             query={query}
             setQuery={setQuery}
+            searching={searchLoading}
+            searchError={searchError}
             typeFilter={typeFilter}
             setTypeFilter={setTypeFilter}
             stageFilter={stageFilter}
             setStageFilter={setStageFilter}
             channelFilter={channelFilter}
             setChannelFilter={setChannelFilter}
+            ownerFilter={ownerFilter}
+            setOwnerFilter={setOwnerFilter}
+            ownerOptions={ownerFilterOptions}
             onSelect={openProfile}
             onRemove={confirmRemove}
-            onExport={() => void exportRows()}
+            onExport={() => void handleExportRows()}
+            exporting={exportingRows}
           />
         )}
+
+        {!isListSearchActive && (loadingMore || loadMoreError || hasMoreRows) ? (
+          <View style={[
+            styles.loadMoreState,
+            { borderColor: palette.borderSoft, backgroundColor: palette.surfaceElevated },
+            loadingMore && styles.loadMoreStateActive,
+          ]}>
+            {loadingMore ? (
+              <>
+                <LoadMorePulse color={palette.primary} />
+                <Typography variant="caption" color={palette.primaryText} style={styles.tableActionText}>
+                  Loading next 100 contacts
+                </Typography>
+              </>
+            ) : loadMoreError ? (
+              <>
+                <Typography variant="caption" color={palette.errorText} style={styles.flexText}>{loadMoreError}</Typography>
+                <TouchableOpacity onPress={() => void loadMoreCRM()} activeOpacity={0.78} style={[styles.retryButton, { borderColor: palette.errorBorder }]}>
+                  <Typography variant="caption" color={palette.errorText} style={styles.tableActionText}>Retry</Typography>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <Typography variant="caption" color={palette.disabled}>
+                Scroll to load the next 100 contacts
+              </Typography>
+            )}
+          </View>
+        ) : null}
 
         <View style={styles.footer}>
           <Typography variant="caption" color={palette.disabled}>
@@ -649,6 +926,36 @@ export default function CRMScreen() {
           </Typography>
         </View>
       </ScrollView>
+
+      <Modal
+        visible={Boolean(exportResult)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setExportResult(null)}
+      >
+        <View style={styles.exportModalBackdrop}>
+          <View style={[styles.exportModalCard, { backgroundColor: palette.surfaceElevated, borderColor: palette.borderSoft }]}>
+            <View style={[styles.exportIconShell, { backgroundColor: palette.successBg, borderColor: palette.successBorder }]}>
+              <Check color={palette.successText} size={24} />
+            </View>
+            <Typography variant="h3" color={palette.text} style={styles.exportModalTitle}>
+              {exportResult?.title ?? 'Export ready'}
+            </Typography>
+            <Typography variant="bodySmall" color={palette.muted} align="center" style={styles.exportModalMessage}>
+              {exportResult?.message}
+            </Typography>
+            <TouchableOpacity
+              activeOpacity={0.82}
+              onPress={() => setExportResult(null)}
+              style={[styles.exportDoneButton, { backgroundColor: palette.primary }]}
+            >
+              <Typography variant="bodySmall" color="#FFFFFF" style={styles.exportDoneText}>
+                Done
+              </Typography>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       <ProspectDetailModal
         visible={Boolean(selectedContact)}
@@ -796,14 +1103,42 @@ function ViewPills({
   );
 }
 
+function BoardSummary({
+  totalCount,
+}: {
+  totalCount: number;
+}) {
+  const palette = useCrmPalette();
+
+  return (
+    <View style={[styles.tableShell, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
+      <View style={styles.tableHeader}>
+        <View style={styles.tableTitleBlock}>
+          <View style={styles.tableTitleRow}>
+            <Typography variant="bodyLarge" color={palette.primaryText} style={styles.tableTitle}>Board</Typography>
+            <View style={[styles.countPill, { backgroundColor: palette.badgeBg }]}>
+              <Typography variant="caption" color={palette.primaryText} style={styles.countText}>
+                {totalCount}
+              </Typography>
+            </View>
+          </View>
+          <Typography variant="caption" color={palette.muted}>Pipeline contacts grouped by current stage.</Typography>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function KanbanBoard({
   leads,
+  stageCounts,
   selectedId,
   columnWidth,
   compact,
   onSelect,
 }: {
   leads: KanbanLead[];
+  stageCounts?: Record<string, number>;
   selectedId: string | null;
   columnWidth: number;
   compact: boolean;
@@ -821,11 +1156,12 @@ function KanbanBoard({
           showsHorizontalScrollIndicator={false}
           style={styles.stageTabScroller}
           contentContainerStyle={styles.stageTabRow}
+          decelerationRate="fast"
+          overScrollMode="never"
         >
           {CRM_STAGES.map((stage) => {
             const active = activeStageKey === stage.key;
-            const count = leads.filter((lead) => lead.stageKey === stage.key).length;
-            const color = STAGE_COLOR[stage.key] || T.primary;
+            const count = stageCounts?.[stage.key] ?? leads.filter((lead) => lead.stageKey === stage.key).length;
             return (
               <TouchableOpacity
                 key={stage.key}
@@ -833,15 +1169,20 @@ function KanbanBoard({
                 onPress={() => setActiveStageKey(stage.key)}
                 style={[
                   styles.stageTab,
-                  { backgroundColor: palette.surfaceElevated, borderColor: palette.border },
-                  active && [styles.stageTabActive, { backgroundColor: color, borderColor: color }],
+                  { backgroundColor: palette.surfaceElevated, borderColor: palette.borderSoft },
+                  active && [styles.stageTabActive, { backgroundColor: palette.primary, borderColor: palette.primary }],
                 ]}
               >
-                <Typography variant="caption" color={active ? '#fff' : palette.primaryText} style={styles.stageTabText}>
+                <Typography
+                  variant="caption"
+                  color={active ? '#fff' : palette.primaryText}
+                  style={styles.stageTabText}
+                  numberOfLines={1}
+                >
                   {getStageLabel(stage)}
                 </Typography>
                 <View style={[styles.stageTabCount, { backgroundColor: active ? '#fff' : palette.neutralPill }, active && styles.stageTabCountActive]}>
-                  <Typography variant="caption" color={active ? color : palette.muted} style={styles.stageTabCountText}>
+                  <Typography variant="caption" color={active ? palette.primary : palette.muted} style={styles.stageTabCountText}>
                     {count}
                   </Typography>
                 </View>
@@ -859,6 +1200,7 @@ function KanbanBoard({
       >
         {visibleStages.map((stage) => {
           const stageLeads = leads.filter((lead) => lead.stageKey === stage.key);
+          const stageCount = stageCounts?.[stage.key] ?? stageLeads.length;
           const pipelineValue = stageLeads.reduce((sum, lead) => sum + (lead.value || 0), 0);
           return (
             <View key={stage.key} style={[styles.boardColumn, { width: columnWidth, backgroundColor: palette.softSurface }]}>
@@ -868,7 +1210,7 @@ function KanbanBoard({
                     {getStageLabel(stage)}
                   </Typography>
                   <View style={[styles.countPill, { backgroundColor: palette.badgeBg }]}>
-                    <Typography variant="caption" color={palette.primaryText} style={styles.countText}>{stageLeads.length}</Typography>
+                    <Typography variant="caption" color={palette.primaryText} style={styles.countText}>{stageCount}</Typography>
                   </View>
                 </View>
                 <TouchableOpacity activeOpacity={0.76} style={styles.columnAdd}>
@@ -939,36 +1281,223 @@ function KanbanCard({ lead, selected, onPress }: { lead: KanbanLead; selected: b
   );
 }
 
+function FiltersModal({
+  visible,
+  onClose,
+  stageOpts,
+  stageFilter,
+  setStageFilter,
+  typeFilter,
+  setTypeFilter,
+  channelFilter,
+  setChannelFilter,
+  ownerFilter,
+  setOwnerFilter,
+  ownerOptions,
+  palette,
+  showType,
+  showStage = true,
+  showChannel = true,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  stageOpts: FilterOption[];
+  stageFilter: string;
+  setStageFilter: (value: string) => void;
+  typeFilter: string;
+  setTypeFilter: (value: string) => void;
+  channelFilter: string;
+  setChannelFilter: (value: string) => void;
+  ownerFilter: string;
+  setOwnerFilter: (value: string) => void;
+  ownerOptions: FilterOption[];
+  palette: ReturnType<typeof useCrmPalette>;
+  showType: boolean;
+  showStage?: boolean;
+  showChannel?: boolean;
+}) {
+  const activeCount = (showStage && stageFilter !== 'all' ? 1 : 0) + (showType && typeFilter !== 'all' ? 1 : 0) + (showChannel && channelFilter !== 'all' ? 1 : 0) + (ownerFilter !== 'all' ? 1 : 0);
+
+  const clearAll = () => {
+    setStageFilter('all');
+    setTypeFilter('all');
+    setChannelFilter('all');
+    setOwnerFilter('all');
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={[styles.detailSheet, styles.filterSheet, { backgroundColor: palette.surface, borderColor: palette.border }]}>
+          <View style={[styles.modalHeader, { borderBottomColor: palette.borderSoft, paddingHorizontal: 24, paddingVertical: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
+            <Typography variant="h3" color={palette.primaryText} style={{ fontWeight: '700' }}>Filters</Typography>
+            <TouchableOpacity onPress={onClose} activeOpacity={0.76} style={[styles.closeButton, { backgroundColor: palette.softSurface }]}>
+              <X color={palette.primaryText} size={20} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            style={styles.filterModalScroll}
+            contentContainerStyle={styles.filterModalContent}
+            showsVerticalScrollIndicator
+            nestedScrollEnabled
+            keyboardShouldPersistTaps="handled"
+          >
+            {showStage ? (
+              <FilterSection label="STAGE" options={stageOpts} activeKey={stageFilter} onChange={setStageFilter} palette={palette} />
+            ) : null}
+            {showType ? (
+              <FilterSection label="TYPE" options={TYPE_FILTER_OPTS} activeKey={typeFilter} onChange={setTypeFilter} palette={palette} />
+            ) : null}
+            {showChannel ? (
+              <FilterSection label="CHANNEL" options={CHANNEL_FILTER_OPTS} activeKey={channelFilter} onChange={setChannelFilter} palette={palette} />
+            ) : null}
+            <FilterSection label="OWNER" options={ownerOptions} activeKey={ownerFilter} onChange={setOwnerFilter} palette={palette} />
+          </ScrollView>
+
+          <View style={[styles.filterFooter, { borderTopColor: palette.borderSoft, backgroundColor: palette.surface }]}>
+            <TouchableOpacity onPress={clearAll} activeOpacity={0.8} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: palette.border, alignItems: 'center', justifyContent: 'center' }}>
+              <Typography variant="body" color={palette.primaryText} style={{ fontWeight: '600' }}>Clear ({activeCount})</Typography>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={onClose} activeOpacity={0.8} style={{ flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: T.primary, alignItems: 'center', justifyContent: 'center' }}>
+              <Typography variant="body" color="#fff" style={{ fontWeight: '600' }}>Apply</Typography>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function FilterSection({
+  label,
+  options,
+  activeKey,
+  onChange,
+  palette,
+}: {
+  label: string;
+  options: FilterOption[];
+  activeKey: string;
+  onChange: (value: string) => void;
+  palette: ReturnType<typeof useCrmPalette>;
+}) {
+  return (
+    <View style={{ gap: 14 }}>
+      <Typography variant="caption" color={palette.muted} style={{ fontWeight: '700', letterSpacing: 0.5 }}>{label}</Typography>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+        {options.map((opt) => (
+          <FilterChip key={opt.key} label={opt.label} active={activeKey === opt.key} onPress={() => onChange(opt.key)} />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function ActiveFilterBar({
+  stageFilter,
+  setStageFilter,
+  typeFilter,
+  setTypeFilter,
+  channelFilter,
+  setChannelFilter,
+  ownerFilter,
+  setOwnerFilter,
+  ownerOptions,
+  clearAll,
+  showType,
+  showStage = true,
+  showChannel = true,
+}: {
+  stageFilter: string;
+  setStageFilter: (value: string) => void;
+  typeFilter: string;
+  setTypeFilter: (value: string) => void;
+  channelFilter: string;
+  setChannelFilter: (value: string) => void;
+  ownerFilter: string;
+  setOwnerFilter: (value: string) => void;
+  ownerOptions: FilterOption[];
+  clearAll: () => void;
+  showType: boolean;
+  showStage?: boolean;
+  showChannel?: boolean;
+}) {
+  return (
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.activeFilterBar}>
+      {showStage && stageFilter !== 'all' && (
+        <ActiveFilterPill label={STAGE_LABEL[stageFilter] || titleCase(stageFilter)} onClear={() => setStageFilter('all')} />
+      )}
+      {showType && typeFilter !== 'all' && (
+        <ActiveFilterPill label={TYPE_META[typeFilter]?.label || titleCase(typeFilter)} onClear={() => setTypeFilter('all')} />
+      )}
+      {showChannel && channelFilter !== 'all' && (
+        <ActiveFilterPill label={CHANNELS[channelFilter]?.label || titleCase(channelFilter)} onClear={() => setChannelFilter('all')} />
+      )}
+      {ownerFilter !== 'all' && (
+        <ActiveFilterPill label={getOwnerFilterLabel(ownerFilter, ownerOptions)} onClear={() => setOwnerFilter('all')} />
+      )}
+      <TouchableOpacity onPress={clearAll} activeOpacity={0.7} style={styles.clearAllInline}>
+        <Typography variant="caption" color={T.danger} style={{ fontWeight: '600' }}>Clear</Typography>
+      </TouchableOpacity>
+    </ScrollView>
+  );
+}
+
+function ActiveFilterPill({ label, onClear }: { label: string; onClear: () => void }) {
+  const palette = useCrmPalette();
+  return (
+    <TouchableOpacity onPress={onClear} activeOpacity={0.7} style={[styles.activeFilterPill, { borderColor: palette.primary }]}>
+      <Typography variant="caption" color={palette.primary} style={{ fontWeight: '600' }}>
+        {label}
+      </Typography>
+      <X color={palette.primary} size={11} />
+    </TouchableOpacity>
+  );
+}
+
 function ContactList({
   view,
   rows,
   totalCount,
   query,
   setQuery,
+  searching,
+  searchError,
   typeFilter,
   setTypeFilter,
   stageFilter,
   setStageFilter,
   channelFilter,
   setChannelFilter,
+  ownerFilter,
+  setOwnerFilter,
+  ownerOptions,
   onSelect,
   onRemove,
   onExport,
+  exporting,
 }: {
   view: Exclude<VisibleView, 'board'>;
   rows: CrmContact[];
   totalCount: number;
   query: string;
   setQuery: (value: string) => void;
+  searching?: boolean;
+  searchError?: string | null;
   typeFilter: string;
   setTypeFilter: (value: string) => void;
   stageFilter: string;
   setStageFilter: (value: string) => void;
   channelFilter: string;
   setChannelFilter: (value: string) => void;
+  ownerFilter: string;
+  setOwnerFilter: (value: string) => void;
+  ownerOptions: FilterOption[];
   onSelect: (contact: CrmContact) => void;
   onRemove: (contact: CrmContact) => void;
   onExport: () => void;
+  exporting?: boolean;
 }) {
   const palette = useCrmPalette();
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -983,12 +1512,19 @@ function ContactList({
         : 'Every contact in this tenant: imported, prospected, inbound, and customer.';
 
   const stageOpts = getStageFilterOpts(view);
-  const activeCount = (stageFilter !== 'all' ? 1 : 0) + (typeFilter !== 'all' ? 1 : 0) + (channelFilter !== 'all' ? 1 : 0);
+  const showType = view === 'all';
+  const showStage = view !== 'all';
+  const showChannel = view !== 'all';
+  const activeCount = (showStage && stageFilter !== 'all' ? 1 : 0)
+    + (showType && typeFilter !== 'all' ? 1 : 0)
+    + (showChannel && channelFilter !== 'all' ? 1 : 0)
+    + (ownerFilter !== 'all' ? 1 : 0);
 
   const clearAll = () => {
     setStageFilter('all');
     setTypeFilter('all');
     setChannelFilter('all');
+    setOwnerFilter('all');
   };
 
   return (
@@ -1017,8 +1553,17 @@ function ContactList({
             </Typography>
             <ChevronDown color={filtersOpen || activeCount > 0 ? palette.primary : palette.primaryText} size={13} style={{ transform: [{ rotate: filtersOpen ? '180deg' : '0deg' }] }} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={onExport} activeOpacity={0.78} style={[styles.tableActionButton, { borderColor: palette.border }]}>
-            <Download color={palette.primaryText} size={15} />
+          <TouchableOpacity
+            onPress={onExport}
+            disabled={exporting}
+            activeOpacity={0.78}
+            style={[styles.tableActionButton, { borderColor: palette.border }, exporting && styles.disabledButton]}
+          >
+            {exporting ? (
+              <ActivityIndicator color={palette.primaryText} size="small" />
+            ) : (
+              <Download color={palette.primaryText} size={15} />
+            )}
           </TouchableOpacity>
         </View>
       </View>
@@ -1032,91 +1577,56 @@ function ContactList({
           placeholderTextColor={palette.disabled}
           style={[styles.searchInput, WEB_INPUT_RESET, { color: palette.text }]}
         />
-        {query.length > 0 && (
+        {searching ? (
+          <ActivityIndicator color={palette.primary} size="small" />
+        ) : query.length > 0 && (
           <TouchableOpacity onPress={() => setQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <X color={palette.disabled} size={15} />
           </TouchableOpacity>
         )}
       </View>
 
-      {filtersOpen && (
-        <View style={[styles.filterPanel, { borderTopColor: palette.borderSoft, backgroundColor: palette.softSurface ?? palette.input }]}>
-          <View style={styles.filterPanelRow}>
-            <View style={styles.filterPanelSection}>
-              <Typography variant="caption" color={palette.muted} style={styles.filterSectionLabel}>STAGE</Typography>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipScroll}>
-                {stageOpts.map((opt) => (
-                  <FilterChip key={opt.key} label={opt.label} active={stageFilter === opt.key} onPress={() => setStageFilter(opt.key)} />
-                ))}
-              </ScrollView>
-            </View>
-          </View>
-
-          {view === 'all' && (
-            <View style={[styles.filterPanelRow, { borderTopWidth: 1, borderTopColor: palette.borderSoft }]}>
-              <View style={styles.filterPanelSection}>
-                <Typography variant="caption" color={palette.muted} style={styles.filterSectionLabel}>TYPE</Typography>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipScroll}>
-                  {TYPE_FILTER_OPTS.map((opt) => (
-                    <FilterChip key={opt.key} label={opt.label} active={typeFilter === opt.key} onPress={() => setTypeFilter(opt.key)} />
-                  ))}
-                </ScrollView>
-              </View>
-            </View>
-          )}
-
-          <View style={[styles.filterPanelRow, { borderTopWidth: 1, borderTopColor: palette.borderSoft }]}>
-            <View style={styles.filterPanelSection}>
-              <Typography variant="caption" color={palette.muted} style={styles.filterSectionLabel}>CHANNEL</Typography>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterChipScroll}>
-                {CHANNEL_FILTER_OPTS.map((opt) => (
-                  <FilterChip key={opt.key} label={opt.label} active={channelFilter === opt.key} onPress={() => setChannelFilter(opt.key)} />
-                ))}
-              </ScrollView>
-            </View>
-          </View>
-
-          {activeCount > 0 && (
-            <View style={[styles.filterPanelRow, { borderTopWidth: 1, borderTopColor: palette.borderSoft, paddingVertical: 10 }]}>
-              <TouchableOpacity onPress={clearAll} activeOpacity={0.7} style={styles.clearAllBtn}>
-                <X color={T.danger} size={12} />
-                <Typography variant="caption" color={T.danger} style={{ fontWeight: '600' }}>Clear all filters</Typography>
-              </TouchableOpacity>
-            </View>
-          )}
+      {searchError ? (
+        <View style={[styles.inlineSearchError, { backgroundColor: palette.errorBg, borderColor: palette.errorBorder }]}>
+          <Typography variant="caption" color={palette.errorText}>{searchError}</Typography>
         </View>
-      )}
+      ) : null}
 
-      {!filtersOpen && activeCount > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.activeFilterBar}>
-          {stageFilter !== 'all' && (
-            <TouchableOpacity onPress={() => setStageFilter('all')} activeOpacity={0.7} style={[styles.activeFilterPill, { borderColor: palette.primary }]}>
-              <Typography variant="caption" color={palette.primary} style={{ fontWeight: '600' }}>
-                {STAGE_LABEL[stageFilter] || titleCase(stageFilter)}
-              </Typography>
-              <X color={palette.primary} size={11} />
-            </TouchableOpacity>
-          )}
-          {typeFilter !== 'all' && (
-            <TouchableOpacity onPress={() => setTypeFilter('all')} activeOpacity={0.7} style={[styles.activeFilterPill, { borderColor: palette.primary }]}>
-              <Typography variant="caption" color={palette.primary} style={{ fontWeight: '600' }}>
-                {TYPE_META[typeFilter]?.label || titleCase(typeFilter)}
-              </Typography>
-              <X color={palette.primary} size={11} />
-            </TouchableOpacity>
-          )}
-          {channelFilter !== 'all' && (
-            <TouchableOpacity onPress={() => setChannelFilter('all')} activeOpacity={0.7} style={[styles.activeFilterPill, { borderColor: palette.primary }]}>
-              <Typography variant="caption" color={palette.primary} style={{ fontWeight: '600' }}>
-                {CHANNELS[channelFilter]?.label || titleCase(channelFilter)}
-              </Typography>
-              <X color={palette.primary} size={11} />
-            </TouchableOpacity>
-          )}
-          <TouchableOpacity onPress={clearAll} activeOpacity={0.7} style={styles.clearAllInline}>
-            <Typography variant="caption" color={T.danger} style={{ fontWeight: '600' }}>Clear</Typography>
-          </TouchableOpacity>
-        </ScrollView>
+      <FiltersModal
+          visible={filtersOpen}
+          onClose={() => setFiltersOpen(false)}
+          stageOpts={stageOpts}
+          stageFilter={stageFilter}
+          setStageFilter={setStageFilter}
+          typeFilter={typeFilter}
+          setTypeFilter={setTypeFilter}
+          channelFilter={channelFilter}
+          setChannelFilter={setChannelFilter}
+          ownerFilter={ownerFilter}
+          setOwnerFilter={setOwnerFilter}
+          ownerOptions={ownerOptions}
+          palette={palette}
+          showType={showType}
+          showStage={showStage}
+          showChannel={showChannel}
+        />
+
+        {activeCount > 0 && (
+        <ActiveFilterBar
+          stageFilter={stageFilter}
+          setStageFilter={setStageFilter}
+          typeFilter={typeFilter}
+          setTypeFilter={setTypeFilter}
+          channelFilter={channelFilter}
+          setChannelFilter={setChannelFilter}
+          ownerFilter={ownerFilter}
+          setOwnerFilter={setOwnerFilter}
+          ownerOptions={ownerOptions}
+          clearAll={clearAll}
+          showType={showType}
+          showStage={showStage}
+          showChannel={showChannel}
+        />
       )}
 
       <View style={styles.rowsWrap}>
@@ -1221,6 +1731,55 @@ function ContactRow({
         <ChevronRight color={palette.disabled} size={16} />
       </View>
     </TouchableOpacity>
+  );
+}
+
+function LoadMorePulse({ color }: { color: string }) {
+  const dots = useRef([new Animated.Value(0.35), new Animated.Value(0.35), new Animated.Value(0.35)]).current;
+
+  useEffect(() => {
+    const animations = dots.map((dot) => (
+      Animated.sequence([
+        Animated.timing(dot, {
+          toValue: 1,
+          duration: 320,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(dot, {
+          toValue: 0.35,
+          duration: 320,
+          easing: Easing.in(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    ));
+    const loop = Animated.loop(Animated.stagger(130, animations));
+    loop.start();
+    return () => loop.stop();
+  }, [dots]);
+
+  return (
+    <View style={styles.loadPulse} accessibilityLabel="Loading more contacts">
+      {dots.map((opacity, index) => (
+        <Animated.View
+          key={index}
+          style={[
+            styles.loadPulseDot,
+            {
+              backgroundColor: color,
+              opacity,
+              transform: [{
+                scale: opacity.interpolate({
+                  inputRange: [0.35, 1],
+                  outputRange: [0.72, 1],
+                }),
+              }],
+            },
+          ]}
+        />
+      ))}
+    </View>
   );
 }
 
@@ -1520,9 +2079,9 @@ function KpiTile({ label, value }: { label: string; value: string }) {
 function FilterChip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   const palette = useCrmPalette();
   return (
-    <TouchableOpacity activeOpacity={0.78} onPress={onPress} style={[styles.filterChip, { borderColor: active ? T.primary : palette.border, backgroundColor: active ? T.primary : palette.surface }, active && styles.filterChipActive]}>
+    <TouchableOpacity activeOpacity={0.78} onPress={onPress} style={[styles.filterChip, { borderColor: active ? T.primary : palette.border, backgroundColor: active ? T.primary : palette.surfaceElevated }, active && styles.filterChipActive]}>
       {active ? <Check color="#fff" size={13} /> : null}
-      <Typography variant="caption" color={active ? '#fff' : palette.primaryText} style={styles.tableActionText}>{label}</Typography>
+      <Typography variant="caption" color={active ? '#fff' : palette.primaryText} style={styles.filterChipText}>{label}</Typography>
     </TouchableOpacity>
   );
 }
@@ -1996,50 +2555,65 @@ const styles = StyleSheet.create({
     paddingLeft: 0,
   },
   boardWrap: {
-    gap: Theme.spacing.md,
+    gap: 14,
+    marginTop: Theme.spacing.md,
+    overflow: 'visible',
   },
   stageTabScroller: {
     width: '100%',
     maxWidth: '100%',
+    minHeight: 48,
   },
   stageTabRow: {
-    gap: Theme.spacing.sm,
-    paddingBottom: 2,
+    gap: 8,
+    paddingHorizontal: 1,
+    paddingRight: Theme.spacing.lg,
+    paddingVertical: 4,
+    alignItems: 'center',
   },
   stageTab: {
-    minHeight: 38,
-    borderRadius: 19,
+    height: 40,
+    minWidth: 94,
+    maxWidth: 132,
+    flexShrink: 0,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#dbe3ef',
     backgroundColor: '#fff',
-    paddingLeft: Theme.spacing.md,
-    paddingRight: 6,
+    paddingHorizontal: 12,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Theme.spacing.xs,
+    justifyContent: 'space-between',
+    gap: 8,
   },
   stageTabActive: {
     shadowColor: T.primary,
-    shadowOpacity: 0.16,
-    shadowRadius: 6,
+    shadowOpacity: 0.14,
+    shadowRadius: 8,
+    elevation: 2,
   },
   stageTabText: {
     fontWeight: '600',
+    flexShrink: 1,
+    lineHeight: 16,
   },
   stageTabCount: {
-    minWidth: 24,
-    height: 24,
-    borderRadius: 12,
+    minWidth: 22,
+    height: 20,
+    borderRadius: 10,
     backgroundColor: '#f1f5f9',
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 6,
+    flexShrink: 0,
   },
   stageTabCountActive: {
     backgroundColor: '#fff',
   },
   stageTabCountText: {
     fontWeight: '600',
+    fontSize: 11,
+    lineHeight: 13,
   },
   boardScroller: {
     gap: Theme.spacing.md,
@@ -2259,40 +2833,52 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   filterChip: {
-    minHeight: 32,
-    borderRadius: 16,
+    minHeight: 34,
+    borderRadius: 17,
     borderWidth: 1,
     borderColor: '#dbe3ef',
-    paddingHorizontal: Theme.spacing.sm,
+    paddingHorizontal: Theme.spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 5,
   },
   filterChipActive: {
     backgroundColor: T.primary,
     borderColor: T.primary,
+    shadowColor: T.primary,
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+  },
+  filterChipText: {
+    fontWeight: '700',
   },
   filterPanel: {
     borderTopWidth: 1,
     marginTop: 2,
+    paddingHorizontal: Theme.spacing.lg,
+    paddingTop: Theme.spacing.md,
+    paddingBottom: Theme.spacing.md,
+    gap: Theme.spacing.md,
   },
   filterPanelRow: {
-    paddingHorizontal: Theme.spacing.lg,
-    paddingTop: 10,
-    paddingBottom: 6,
+    paddingTop: 0,
+    paddingBottom: 0,
+  },
+  filterPanelRowSeparated: {
+    borderTopWidth: 1,
+    paddingTop: Theme.spacing.md,
   },
   filterPanelSection: {
-    gap: 6,
+    gap: 8,
   },
   filterSectionLabel: {
     fontWeight: '700',
-    letterSpacing: 0.6,
+    letterSpacing: 0.4,
     fontSize: 10,
-    marginBottom: 2,
   },
   filterChipScroll: {
-    gap: 6,
-    paddingRight: Theme.spacing.lg,
+    gap: 8,
+    paddingRight: Theme.spacing.md,
   },
   activeFilterBar: {
     paddingHorizontal: Theme.spacing.lg,
@@ -2391,11 +2977,54 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: Theme.spacing.md,
   },
+  loadMoreState: {
+    minHeight: 50,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  loadMoreStateActive: {
+    borderStyle: 'solid',
+  },
+  loadPulse: {
+    width: 34,
+    height: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  loadPulseDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  retryButton: {
+    minHeight: 30,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: Theme.spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   noMatches: {
     minHeight: 120,
     alignItems: 'center',
     justifyContent: 'center',
     gap: Theme.spacing.sm,
+  },
+  inlineSearchError: {
+    marginHorizontal: Theme.spacing.lg,
+    marginTop: Theme.spacing.sm,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: Theme.spacing.md,
+    paddingVertical: Theme.spacing.sm,
   },
   avatar: {
     alignItems: 'center',
@@ -2465,12 +3094,75 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(15, 23, 42, 0.42)',
     justifyContent: 'flex-end',
   },
+  exportModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.46)',
+    justifyContent: 'center',
+    paddingHorizontal: Theme.spacing.xl,
+  },
+  exportModalCard: {
+    width: '100%',
+    maxWidth: 420,
+    alignSelf: 'center',
+    alignItems: 'center',
+    borderRadius: 18,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.xl,
+    paddingVertical: Theme.spacing.xl,
+    ...Theme.shadows.large,
+  },
+  exportIconShell: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Theme.spacing.md,
+  },
+  exportModalTitle: {
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: Theme.spacing.xs,
+  },
+  exportModalMessage: {
+    lineHeight: 20,
+    marginBottom: Theme.spacing.lg,
+  },
+  exportDoneButton: {
+    minHeight: 44,
+    borderRadius: 22,
+    paddingHorizontal: Theme.spacing.xxl,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  exportDoneText: {
+    fontWeight: '800',
+  },
   detailSheet: {
     maxHeight: '92%',
     backgroundColor: '#fff',
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     overflow: 'hidden',
+  },
+  filterSheet: {
+    maxHeight: '85%',
+  },
+  filterModalScroll: {
+    flexShrink: 1,
+  },
+  filterModalContent: {
+    padding: 24,
+    paddingBottom: 24,
+    gap: 28,
+  },
+  filterFooter: {
+    borderTopWidth: 1,
+    padding: 24,
+    paddingBottom: 36,
+    flexDirection: 'row',
+    gap: 12,
   },
   modalHeader: {
     minHeight: 74,

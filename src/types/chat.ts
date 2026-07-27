@@ -175,7 +175,12 @@ export interface ChatConversation {
   ownerType?: 'AI' | 'human_agent';
   conversationState?: string;
   messageCount?: number;
+  /** Backend conversation/contact metadata preserved for the contact details view. */
+  metadata?: Record<string, unknown>;
+  contactMetadata?: Record<string, unknown>;
   waBackendChannel?: 'personal' | 'waba';
+  /** The connected account ID this conversation belongs to (e.g. WhatsApp phone_number_id). */
+  accountId?: string;
 }
 
 export interface ConnectedIntegration {
@@ -237,6 +242,10 @@ export interface SendMessageParams {
   mediaType?: string;
   mediaFilename?: string;
   mediaCaption?: string;
+  latitude?: number;
+  longitude?: number;
+  locationName?: string;
+  locationAddress?: string;
 }
 
 export interface CurrentUser {

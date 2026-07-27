@@ -148,6 +148,16 @@ const HEATMAP_CHANNEL: Record<string, string> = {
   system: 'intent',
 };
 
+type ActivityPeriodDays = 7 | 30 | 90;
+
+const ACTIVITY_PERIOD_OPTIONS: { days: ActivityPeriodDays; label: string }[] = [
+  { days: 7, label: '7 Days' },
+  { days: 30, label: '30 Days' },
+  { days: 90, label: '90 Days' },
+];
+
+const ACTIVITY_HEATMAP_CHANNELS = ['linkedin', 'whatsapp', 'email', 'voice', 'instagram', 'intent'];
+
 const STAGE_META: Record<string, { label: string; color: string }> = {
   new: { label: 'New', color: '#64748b' },
   contacted: { label: 'Contacted', color: T.info },
@@ -638,6 +648,7 @@ export default function CrmProfileScreen() {
   const [graphVisible, setGraphVisible] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const [activityPeriodDays, setActivityPeriodDays] = useState<ActivityPeriodDays>(30);
   const enrichTriggered = useRef(false);
 
   const loadProfile = useCallback(async (asRefresh = false) => {
@@ -740,6 +751,18 @@ export default function CrmProfileScreen() {
 
   const warmPath = useMemo(() => contact ? buildWarmPath(contact) : EMPTY_WARM_PATH, [contact]);
   const profileActivity = useMemo(() => contact ? resolveProfileActivity(contact, events) : [], [contact, events]);
+  const filteredProfileActivity = useMemo(() => {
+    const now = Date.now();
+    const periodMs = activityPeriodDays * 24 * 60 * 60 * 1000;
+    return profileActivity.filter((event) => {
+      const occurredAt = new Date(event.occurred_at).getTime();
+      if (!Number.isFinite(occurredAt)) {
+        return false;
+      }
+      const age = now - occurredAt;
+      return age >= 0 && age <= periodMs;
+    });
+  }, [activityPeriodDays, profileActivity]);
   const temperature = useMemo(() => contact ? engagementTemperature(contact, profileActivity) : null, [contact, profileActivity]);
 
   useEffect(() => {
@@ -895,7 +918,12 @@ export default function CrmProfileScreen() {
               onToggle={toggleWarmPath}
             />
 
-            <ActivityHeatmap events={profileActivity} compact={isPhone} />
+            <ActivityHeatmap
+              events={filteredProfileActivity}
+              compact={isPhone}
+              periodDays={activityPeriodDays}
+              onPeriodChange={setActivityPeriodDays}
+            />
 
             <View style={[styles.twoColumnGrid, isCompact && styles.singleColumnGrid]}>
               <FitSignalsCard contact={contact} />
@@ -906,7 +934,7 @@ export default function CrmProfileScreen() {
 
             {isCompact ? (
               <View style={styles.mobileBottomStack}>
-                <RecentActivityCard events={profileActivity} />
+                <RecentActivityCard events={filteredProfileActivity} />
                 <ActionsCard
                   contact={contact}
                   warmPath={warmPath}
@@ -918,7 +946,7 @@ export default function CrmProfileScreen() {
             ) : (
               <View style={styles.bottomGrid}>
                 <View style={styles.feedColumn}>
-                  <RecentActivityCard events={profileActivity} />
+                  <RecentActivityCard events={filteredProfileActivity} />
                 </View>
                 <View style={styles.sideColumn}>
                   <ActionsCard
@@ -1690,43 +1718,114 @@ function WarmMeta({ icon: Icon, label }: { icon: IconComponent; label: string })
   );
 }
 
-function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact: boolean }) {
+function ActivityHeatmap({
+  events,
+  compact,
+  periodDays,
+  onPeriodChange,
+}: {
+  events: ProspectEvent[];
+  compact: boolean;
+  periodDays: ActivityPeriodDays;
+  onPeriodChange: (days: ActivityPeriodDays) => void;
+}) {
   const palette = useProfilePalette();
-  const days = 30;
-  const channels = ['linkedin', 'whatsapp', 'email', 'voice', 'instagram', 'intent'];
+  const { width } = useWindowDimensions();
+  const [periodMenuOpen, setPeriodMenuOpen] = useState(false);
+  const selectedPeriod = ACTIVITY_PERIOD_OPTIONS.find((option) => option.days === periodDays) ?? ACTIVITY_PERIOD_OPTIONS[1];
+  const labelWidth = compact ? 78 : 94;
+  const sumWidth = compact ? 24 : 30;
+  const cellGap = compact ? 2 : 3;
+  const availableCellWidth = Math.max(140, width - (compact ? 104 : 156) - labelWidth - sumWidth);
+  const fittedCellSize = Math.floor((availableCellWidth - (periodDays - 1) * cellGap) / periodDays);
+  const cellSize = compact
+    ? Math.max(4, Math.min(8, fittedCellSize))
+    : Math.max(7, Math.min(12, fittedCellSize));
+  const cellsWidth = periodDays * cellSize + Math.max(0, periodDays - 1) * cellGap;
   const grid = useMemo(() => {
     const out: Record<string, number[]> = {};
-    channels.forEach((channel) => { out[channel] = new Array(days).fill(0); });
+    ACTIVITY_HEATMAP_CHANNELS.forEach((channel) => { out[channel] = new Array(periodDays).fill(0); });
     events.forEach((event) => {
       const date = new Date(event.occurred_at);
       const diff = Math.floor((Date.now() - date.getTime()) / (1000 * 60 * 60 * 24));
-      if (diff < 0 || diff >= days) return;
+      if (diff < 0 || diff >= periodDays) return;
       const key = HEATMAP_CHANNEL[String(event.channel).toLowerCase()] || 'intent';
       const weight = activityWeight(event);
-      if (!out[key]) out.intent[days - 1 - diff] += weight;
-      else out[key][days - 1 - diff] += weight;
+      if (!out[key]) out.intent[periodDays - 1 - diff] += weight;
+      else out[key][periodDays - 1 - diff] += weight;
     });
     return out;
-  }, [events]);
-  const max = Math.max(1, ...channels.flatMap((channel) => grid[channel]));
-  const cellSize = compact ? 10 : 18;
+  }, [events, periodDays]);
+  const max = Math.max(1, ...ACTIVITY_HEATMAP_CHANNELS.flatMap((channel) => grid[channel]));
 
   return (
-    <Card>
-      <CardHeader title="Activity" subtitle={`Last ${days} days - all channels`} />
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+    <Card style={styles.activityCard}>
+      <CardHeader
+        title="Activity"
+        subtitle={`Last ${periodDays} days - all channels`}
+        action={(
+          <View style={styles.activityPeriodWrap}>
+            <TouchableOpacity
+              activeOpacity={0.78}
+              onPress={() => setPeriodMenuOpen((open) => !open)}
+              style={[styles.activityPeriodPill, { backgroundColor: palette.badgeBg, borderColor: palette.primary }]}
+            >
+              <Typography variant="caption" color={palette.primaryStrong} style={styles.activityPeriodText}>
+                {selectedPeriod.label}
+              </Typography>
+              <ChevronDown color={palette.primary} size={13} />
+            </TouchableOpacity>
+          </View>
+        )}
+      />
+      {periodMenuOpen ? (
+        <View style={[styles.activityPeriodMenu, { backgroundColor: palette.surfaceElevated, borderColor: palette.border }]}>
+          {ACTIVITY_PERIOD_OPTIONS.map((option) => {
+            const active = option.days === periodDays;
+            return (
+              <TouchableOpacity
+                key={option.days}
+                activeOpacity={0.78}
+                onPress={() => {
+                  onPeriodChange(option.days);
+                  setPeriodMenuOpen(false);
+                }}
+                style={[
+                  styles.activityPeriodOption,
+                  active && { backgroundColor: palette.badgeBg },
+                ]}
+              >
+                <Typography
+                  variant="caption"
+                  color={active ? palette.primaryStrong : palette.muted}
+                  style={active ? styles.boldText : undefined}
+                >
+                  {option.label}
+                </Typography>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      ) : null}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.heatScrollContent}
+      >
         <View style={styles.heatmapInner}>
-          {channels.map((channel) => {
+          {ACTIVITY_HEATMAP_CHANNELS.map((channel) => {
             const meta = channelMeta(channel);
             const Icon = meta.Icon;
             const sum = grid[channel].reduce((a, b) => a + b, 0);
             return (
               <View key={channel} style={styles.heatRow}>
-                <View style={styles.heatLabel}>
+                <View style={[styles.heatLabel, { width: labelWidth }]}>
                   <Icon color={meta.color === T.primary ? palette.primary : meta.color} size={13} />
-                  <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText}>{meta.label}</Typography>
+                  <Typography variant="caption" color={palette.primaryStrong} style={styles.boldText} numberOfLines={1}>
+                    {meta.label}
+                  </Typography>
                 </View>
-                <View style={styles.heatCells}>
+                <View style={[styles.heatCells, { gap: cellGap }]}>
                   {grid[channel].map((value, index) => (
                     <View
                       key={index}
@@ -1735,6 +1834,7 @@ function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact
                         {
                           width: cellSize,
                           height: cellSize,
+                          borderRadius: cellSize / 2,
                           backgroundColor: value ? meta.color : 'transparent',
                           borderColor: value ? meta.color : palette.borderSoft,
                           opacity: value ? 0.25 + (value / max) * 0.75 : 1,
@@ -1743,12 +1843,12 @@ function ActivityHeatmap({ events, compact }: { events: ProspectEvent[]; compact
                     />
                   ))}
                 </View>
-                <Typography variant="caption" color={palette.muted} style={styles.heatSum}>{sum}</Typography>
+                <Typography variant="caption" color={palette.muted} style={[styles.heatSum, { width: sumWidth }]}>{sum}</Typography>
               </View>
             );
           })}
-          <View style={styles.heatFooter}>
-            <Typography variant="caption" color={palette.muted}>{days} days ago</Typography>
+          <View style={[styles.heatFooter, { marginLeft: labelWidth + Theme.spacing.sm, width: cellsWidth }]}>
+            <Typography variant="caption" color={palette.muted}>{periodDays} days ago</Typography>
             <Typography variant="caption" color={palette.muted}>Today</Typography>
           </View>
         </View>
@@ -2853,9 +2953,51 @@ const styles = StyleSheet.create({
     borderTopWidth: 2,
     borderRadius: 999,
   },
+  activityCard: {
+    overflow: 'visible',
+    zIndex: 20,
+  },
+  activityPeriodWrap: {
+    position: 'relative',
+    zIndex: 30,
+    alignItems: 'flex-end',
+  },
+  activityPeriodPill: {
+    minHeight: 30,
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: Theme.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  activityPeriodText: {
+    fontWeight: '900',
+  },
+  activityPeriodMenu: {
+    position: 'absolute',
+    top: 58,
+    right: Theme.spacing.lg,
+    width: 112,
+    borderWidth: 1,
+    borderRadius: 12,
+    overflow: 'hidden',
+    ...Theme.shadows.medium,
+    zIndex: 100,
+    elevation: 40,
+  },
+  activityPeriodOption: {
+    minHeight: 36,
+    justifyContent: 'center',
+    paddingHorizontal: Theme.spacing.sm,
+  },
+  heatScrollContent: {
+    paddingRight: Theme.spacing.xs,
+  },
   heatmapInner: {
-    gap: 7,
+    gap: 8,
     paddingBottom: 2,
+    minWidth: '100%',
   },
   heatRow: {
     flexDirection: 'row',
@@ -2863,28 +3005,25 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   heatLabel: {
-    width: 90,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
   },
   heatCells: {
     flexDirection: 'row',
-    gap: 3,
   },
   heatCell: {
-    borderRadius: 3,
     borderWidth: 1,
     borderColor: '#edf2f7',
   },
   heatSum: {
-    width: 28,
     textAlign: 'right',
+    fontWeight: '800',
   },
   heatFooter: {
-    marginLeft: 90 + Theme.spacing.sm,
     flexDirection: 'row',
     justifyContent: 'space-between',
+    paddingTop: 4,
   },
   twoColumnGrid: {
     flexDirection: 'row',
