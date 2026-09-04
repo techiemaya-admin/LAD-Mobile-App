@@ -1,3 +1,4 @@
+import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,

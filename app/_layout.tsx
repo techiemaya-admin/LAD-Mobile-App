@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, View } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -42,10 +42,17 @@ export default function RootLayout() {
   useEffect(() => {
     async function loadAssets() {
       try {
-        await Promise.all([
+        const assetsToLoad: any[] = [
           Asset.loadAsync(require('../assets/videos/hero-character-dark.mp4')),
-          Asset.loadAsync(require('../assets/videos/hero-character.webm')),
-        ]);
+        ];
+        if (Platform.OS !== 'ios') {
+          try {
+            assetsToLoad.push(Asset.loadAsync(require('../assets/videos/hero-character.webm')));
+          } catch {
+            // Ignore webm require on platforms that do not support it
+          }
+        }
+        await Promise.allSettled(assetsToLoad);
       } catch (e) {
         console.warn('Failed to load assets', e);
       } finally {
@@ -115,21 +122,37 @@ export default function RootLayout() {
         <GestureHandlerRootView style={{ flex: 1 }}>
           <KeyboardProvider>
             <StatusBar style={appTheme.statusBarStyle} />
-            {(!isAssetsLoaded || isLoading) ? (
-              <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: appTheme.background }}>
-                <ActivityIndicator color={appTheme.primaryAccent} />
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: appTheme.background },
+                animation: Platform.OS === 'ios' ? 'default' : 'fade',
+                gestureEnabled: true,
+              }}
+            >
+              <Stack.Screen name="index" />
+              <Stack.Screen name="(auth)" options={{ gestureEnabled: false }} />
+              <Stack.Screen name="(tabs)" options={{ gestureEnabled: false }} />
+              <Stack.Screen name="(drawer)" options={{ animation: 'default', gestureEnabled: true }} />
+              <Stack.Screen name="crm/[id]" options={{ animation: 'default', gestureEnabled: true }} />
+              <Stack.Screen name="campaigns/[id]" options={{ animation: 'default', gestureEnabled: true }} />
+              <Stack.Screen name="modals" options={{ presentation: 'modal', gestureEnabled: true }} />
+            </Stack>
+            {(!isAssetsLoaded || isLoading) && (
+              <View
+                style={[
+                  StyleSheet.absoluteFill,
+                  {
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    backgroundColor: appTheme.background,
+                    zIndex: 9999,
+                  },
+                ]}
+              >
+                <ActivityIndicator color={appTheme.primaryAccent} size="large" />
               </View>
-            ) : (
-              <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: appTheme.background } }}>
-                <Stack.Screen name="(auth)" />
-                <Stack.Screen name="(tabs)" />
-                <Stack.Screen name="(drawer)" />
-                <Stack.Screen name="crm/[id]" />
-                <Stack.Screen name="campaigns/[id]" />
-                <Stack.Screen name="modals" options={{ presentation: 'modal' }} />
-              </Stack>
             )}
-            {!isLoading ? <FloatingAssistantButton /> : null}
           </KeyboardProvider>
         </GestureHandlerRootView>
       </SafeAreaProvider>

@@ -2498,11 +2498,17 @@ const ActionMenuItem = ({
   onPress: () => void;
 }) => {
   const appTheme = useAppTheme();
+  const isDanger = color === '#FF3B91' || color === Theme.colors.error;
   const itemColor = color || appTheme.text;
+  const iconBg = isDanger
+    ? (appTheme.darkMode ? 'rgba(239, 68, 68, 0.16)' : 'rgba(239, 68, 68, 0.08)')
+    : (appTheme.darkMode ? 'rgba(255, 255, 255, 0.06)' : 'rgba(15, 23, 42, 0.04)');
 
   return (
-    <TouchableOpacity style={styles.actionMenuItem} activeOpacity={0.78} onPress={onPress}>
-      <Icon color={itemColor} size={18} />
+    <TouchableOpacity style={styles.actionMenuItem} activeOpacity={0.7} onPress={onPress}>
+      <View style={[styles.actionMenuIconWrap, { backgroundColor: iconBg }]}>
+        <Icon color={itemColor} size={15} />
+      </View>
       <Typography variant="body" color={itemColor} style={styles.actionMenuText}>
         {label}
       </Typography>
@@ -2580,19 +2586,25 @@ const ChannelFilterPill = ({
 const DetailLine = ({
   icon: Icon,
   children,
+  onPress,
 }: {
   icon: React.ComponentType<{ color?: string; size?: number }>;
   children: React.ReactNode;
+  onPress?: () => void;
 }) => {
   const appTheme = useAppTheme();
+  const Wrapper = onPress ? TouchableOpacity : View;
 
   return (
-    <View style={styles.detailLine}>
-      <Icon color={appTheme.muted} size={18} />
+    <Wrapper style={styles.detailLine} {...(onPress ? { activeOpacity: 0.72, onPress } : {})}>
+      <View style={[styles.detailLineIconWrap, { backgroundColor: appTheme.darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.04)' }]}>
+        <Icon color={appTheme.primaryAccent} size={15} />
+      </View>
       <Typography variant="body" color={appTheme.text} style={styles.detailLineText}>
         {children}
       </Typography>
-    </View>
+      {onPress ? <ChevronRight color={appTheme.muted} size={16} /> : null}
+    </Wrapper>
   );
 };
 
@@ -3560,13 +3572,38 @@ const UnsupportedWorkflowPanel = ({
   const appTheme = useAppTheme();
 
   return (
-    <View style={[styles.workflowCard, { backgroundColor: appTheme.warningSoft, borderColor: Theme.colors.warning }]}>
+    <View
+      style={[
+        styles.workflowCard,
+        {
+          backgroundColor: appTheme.darkMode ? 'rgba(245, 158, 11, 0.07)' : '#FFFDF5',
+          borderColor: appTheme.darkMode ? 'rgba(245, 158, 11, 0.22)' : '#FDE68A',
+        },
+      ]}
+    >
       <View style={styles.unsupportedWorkflowContent}>
-        <Icon color={Theme.colors.warning} size={24} />
-        <Typography variant="bodySmall" color={Theme.colors.warning} style={styles.unsupportedWorkflowTitle}>
+        <View
+          style={[
+            styles.unsupportedWorkflowIconBadge,
+            {
+              backgroundColor: appTheme.darkMode ? 'rgba(245, 158, 11, 0.16)' : '#FEF3C7',
+            },
+          ]}
+        >
+          <Icon color="#D97706" size={20} />
+        </View>
+        <Typography
+          variant="bodySmall"
+          color={appTheme.darkMode ? '#FBBF24' : '#92400E'}
+          style={styles.unsupportedWorkflowTitle}
+        >
           {title}
         </Typography>
-        <Typography variant="caption" color={Theme.colors.warning} style={styles.unsupportedWorkflowCopy}>
+        <Typography
+          variant="caption"
+          color={appTheme.darkMode ? '#FDE68A' : '#78350F'}
+          style={styles.unsupportedWorkflowCopy}
+        >
           {description}
         </Typography>
       </View>
@@ -4002,14 +4039,33 @@ const ContactDetailsPanel = ({
   if (isWhatsAppContact) {
     return (
       <View style={[styles.contactPanel, fullPage && styles.contactPanelFullPage, styles.whatsAppContactPanel, { backgroundColor: appTheme.darkMode ? appTheme.background : appTheme.surface, borderLeftColor: sectionBorderColor }]}>
-        <View style={[styles.whatsAppContactHeader, { paddingTop: Math.max(insets.top, 14), backgroundColor: appTheme.surface, borderBottomColor: sectionBorderColor }]}>
-          <TouchableOpacity onPress={onClose} style={styles.darkIconButton} activeOpacity={0.72}>
-            <X color={appTheme.text} size={22} />
+        <View
+          style={[
+            styles.whatsAppContactHeader,
+            {
+              paddingTop: Math.max(insets.top, 14),
+              backgroundColor: appTheme.surface,
+              borderBottomColor: sectionBorderColor,
+            },
+          ]}
+        >
+          <TouchableOpacity
+            onPress={onClose}
+            style={[
+              styles.darkIconButton,
+              {
+                backgroundColor: appTheme.darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.04)',
+                borderColor: appTheme.darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.05)',
+              },
+            ]}
+            activeOpacity={0.72}
+          >
+            <X color={appTheme.text} size={18} strokeWidth={2.2} />
           </TouchableOpacity>
-          <Typography variant="body" color={appTheme.text} style={styles.whatsAppContactHeaderTitle}>
-            Contact info
+          <Typography variant="bodyLarge" color={appTheme.text} style={styles.whatsAppContactHeaderTitle}>
+            Contact Info
           </Typography>
-          <View style={styles.darkIconButton} />
+          <View style={styles.headerRightSpacer} />
         </View>
 
         <ScrollView contentContainerStyle={[styles.whatsAppContactBody, { paddingBottom: Math.max(insets.bottom, 0) + 32 }]} showsVerticalScrollIndicator={false}>
@@ -4131,53 +4187,209 @@ const ContactDetailsPanel = ({
 
   return (
     <View style={[styles.contactPanel, fullPage && styles.contactPanelFullPage, { backgroundColor: appTheme.surface, borderLeftColor: appTheme.border }]}>
-      <View style={[styles.whatsAppContactHeader, { paddingTop: fullPage ? Math.max(insets.top, 14) : 0, borderBottomColor: appTheme.border }]}>
-        <TouchableOpacity onPress={onClose} style={styles.darkIconButton} activeOpacity={0.72}>
-          <X color={appTheme.text} size={22} />
+      <View
+        style={[
+          styles.whatsAppContactHeader,
+          {
+            paddingTop: fullPage ? Math.max(insets.top, 14) : 0,
+            borderBottomColor: appTheme.darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)',
+          },
+        ]}
+      >
+        <TouchableOpacity
+          onPress={onClose}
+          style={[
+            styles.darkIconButton,
+            {
+              backgroundColor: appTheme.darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.04)',
+              borderColor: appTheme.darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.05)',
+            },
+          ]}
+          activeOpacity={0.72}
+        >
+          <X color={appTheme.text} size={18} strokeWidth={2.2} />
         </TouchableOpacity>
-        <Typography variant="body" color={appTheme.text} style={styles.whatsAppContactHeaderTitle}>
+        <Typography variant="bodyLarge" color={appTheme.text} style={styles.whatsAppContactHeaderTitle}>
           Contact Details
         </Typography>
-        <View style={styles.darkIconButton} />
+        <View style={styles.headerRightSpacer} />
       </View>
 
       <ScrollView contentContainerStyle={[styles.contactPanelBody, { paddingBottom: Math.max(insets.bottom, 0) + 108 }]} showsVerticalScrollIndicator={false}>
         <View style={styles.contactHero}>
-          <View style={styles.largeAvatar}>
-            <Typography variant="h2" color={appTheme.primaryAccent}>
-              {getInitials(conversation.name) || '?'}
-            </Typography>
-            <View style={styles.heroChannelBadge}>
-              <ChannelGlyph channel={conversation.channel} size={18} color={getChannelColor(conversation.channel)} />
+          <View style={styles.heroAvatarContainer}>
+            <View
+              style={[
+                styles.heroAvatarRing,
+                {
+                  borderColor: appTheme.darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(15,23,42,0.08)',
+                },
+              ]}
+            >
+              <Avatar
+                src={conversation.avatar}
+                fallback={getInitials(conversation.name)}
+                size={84}
+                authToken={authToken}
+              />
+            </View>
+            <View
+              style={[
+                styles.heroChannelBadge,
+                {
+                  backgroundColor: appTheme.surface,
+                  borderColor: appTheme.surface,
+                },
+              ]}
+            >
+              <ChannelGlyph
+                channel={conversation.channel}
+                size={14}
+                color={getChannelColor(conversation.channel)}
+              />
             </View>
           </View>
+
           <Typography variant="h3" color={appTheme.text} style={styles.contactHeroName} numberOfLines={2}>
             {conversation.name}
           </Typography>
+
           {conversation.company ? (
-            <Typography variant="bodySmall" color={appTheme.muted} numberOfLines={1}>
-              {conversation.company}
-            </Typography>
+            <View
+              style={[
+                styles.heroCompanyChip,
+                {
+                  backgroundColor: appTheme.darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.04)',
+                  borderColor: appTheme.darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)',
+                },
+              ]}
+            >
+              <Briefcase size={12} color={appTheme.muted} />
+              <Typography variant="caption" color={appTheme.muted} numberOfLines={1} style={styles.heroCompanyText}>
+                {conversation.company}
+              </Typography>
+            </View>
           ) : null}
-          <Typography variant="caption" color={appTheme.muted} style={{ marginTop: 4 }}>
-            {messages.length} messages
-          </Typography>
+
+          <View style={styles.heroStatsRow}>
+            <View
+              style={[
+                styles.heroStatPill,
+                {
+                  backgroundColor: appTheme.darkMode ? 'rgba(41, 118, 244, 0.12)' : 'rgba(41, 118, 244, 0.08)',
+                },
+              ]}
+            >
+              <MessageSquare size={11} color={appTheme.primaryAccent} />
+              <Typography variant="caption" color={appTheme.primaryAccent} style={styles.heroStatText}>
+                {messages.length} {messages.length === 1 ? 'message' : 'messages'}
+              </Typography>
+            </View>
+            {conversation.online ? (
+              <View
+                style={[
+                  styles.heroStatPill,
+                  {
+                    backgroundColor: appTheme.darkMode ? 'rgba(16, 185, 129, 0.15)' : 'rgba(16, 185, 129, 0.10)',
+                  },
+                ]}
+              >
+                <View style={styles.heroOnlineDot} />
+                <Typography variant="caption" color="#10B981" style={styles.heroStatText}>
+                  Online
+                </Typography>
+              </View>
+            ) : null}
+          </View>
         </View>
 
-        <View style={styles.detailSection}>
-          {conversation.email ? <DetailLine icon={Mail}>{conversation.email}</DetailLine> : null}
-          {conversation.phone ? <DetailLine icon={Phone}>{formatPhone(conversation.phone)}</DetailLine> : null}
-          <DetailLine icon={MessageCircle}>Conversation started {startedLabel || 'recently'}</DetailLine>
+        <View style={[styles.detailSectionCard, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]}>
+          {conversation.email ? (
+            <DetailLine
+              icon={Mail}
+              onPress={() => void Linking.openURL(`mailto:${conversation.email}`).catch(() => undefined)}
+            >
+              {conversation.email}
+            </DetailLine>
+          ) : null}
+          {conversation.phone ? (
+            <DetailLine
+              icon={Phone}
+              onPress={() => void Linking.openURL(`tel:${conversation.phone?.replace(/[^\d+]/g, '')}`).catch(() => undefined)}
+            >
+              {formatPhone(conversation.phone)}
+            </DetailLine>
+          ) : null}
+          <DetailLine icon={Clock}>
+            Conversation started {startedLabel || 'recently'}
+          </DetailLine>
         </View>
 
         <View style={[styles.detailCard, { backgroundColor: appTheme.softSurface, borderColor: appTheme.border }]}>
-          <Typography variant="caption" color={appTheme.muted} style={styles.detailSectionTitle}>
-            METADATA
-          </Typography>
-          {metadataRows.map((row) => (
-            <View key={`${row.label}-${row.value}`} style={styles.metaRow}>
-              <Typography variant="bodySmall" color={appTheme.muted}>{row.label}</Typography>
-              <Typography variant="bodySmall" color={appTheme.text} style={styles.metaValue} numberOfLines={3}>{row.value}</Typography>
+          <View style={styles.detailSectionTitleRow}>
+            <Typography variant="overline" color={appTheme.muted} style={styles.detailSectionTitle}>
+              METADATA
+            </Typography>
+            <Info size={13} color={appTheme.muted} />
+          </View>
+          {metadataRows.map((row, idx) => (
+            <View
+              key={`${row.label}-${row.value}`}
+              style={[
+                styles.metaRow,
+                idx < metadataRows.length - 1 && {
+                  borderBottomWidth: StyleSheet.hairlineWidth,
+                  borderBottomColor: appTheme.darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
+                  paddingBottom: 8,
+                },
+              ]}
+            >
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.metaLabel}>{row.label}</Typography>
+              {row.label.toLowerCase() === 'status' ? (
+                <View
+                  style={[
+                    styles.metaStatusPill,
+                    {
+                      backgroundColor:
+                        row.value.toLowerCase().includes('resolve')
+                          ? (appTheme.darkMode ? 'rgba(16, 185, 129, 0.16)' : '#DCFCE7')
+                          : row.value.toLowerCase().includes('pending')
+                            ? (appTheme.darkMode ? 'rgba(245, 158, 11, 0.16)' : '#FEF3C7')
+                            : (appTheme.darkMode ? 'rgba(41, 118, 244, 0.16)' : '#DBEAFE'),
+                    },
+                  ]}
+                >
+                  <Typography
+                    variant="caption"
+                    color={
+                      row.value.toLowerCase().includes('resolve')
+                        ? '#10B981'
+                        : row.value.toLowerCase().includes('pending')
+                          ? '#D97706'
+                          : appTheme.primaryAccent
+                    }
+                    style={styles.metaStatusText}
+                  >
+                    {row.value}
+                  </Typography>
+                </View>
+              ) : row.label.toLowerCase() === 'channel' ? (
+                <View
+                  style={[
+                    styles.metaChannelPill,
+                    {
+                      backgroundColor: appTheme.darkMode ? 'rgba(255,255,255,0.06)' : '#F1F5F9',
+                    },
+                  ]}
+                >
+                  <ChannelGlyph channel={conversation.channel} size={11} color={getChannelColor(conversation.channel)} />
+                  <Typography variant="caption" color={appTheme.text} style={styles.metaChannelText}>
+                    {row.value}
+                  </Typography>
+                </View>
+              ) : (
+                <Typography variant="bodySmall" color={appTheme.text} style={styles.metaValue} numberOfLines={3}>{row.value}</Typography>
+              )}
             </View>
           ))}
         </View>
@@ -4262,6 +4474,33 @@ export default function ChatsScreen() {
   const appTheme = useAppTheme();
   const handleBottomTabScroll = useBottomTabScrollHandler();
   const bottomTabHidden = useBottomTabHidden();
+  const chatScrollY = useRef(new Animated.Value(0)).current;
+
+  const chatTitleScale = chatScrollY.interpolate({
+    inputRange: [0, 60],
+    outputRange: [1, 0.88],
+    extrapolate: 'clamp',
+  });
+  const chatTitleTranslateY = chatScrollY.interpolate({
+    inputRange: [0, 60],
+    outputRange: [0, -6],
+    extrapolate: 'clamp',
+  });
+  const chatMetaOpacity = chatScrollY.interpolate({
+    inputRange: [0, 45],
+    outputRange: [1, 0],
+    extrapolate: 'clamp',
+  });
+  const chatMetaHeight = chatScrollY.interpolate({
+    inputRange: [0, 45],
+    outputRange: [20, 0],
+    extrapolate: 'clamp',
+  });
+  const chatHeaderPaddingBottom = chatScrollY.interpolate({
+    inputRange: [0, 60],
+    outputRange: [12, 4],
+    extrapolate: 'clamp',
+  });
 
   const currentUser = useAuthStore((state) => state.user);
   const { formatPhone } = usePhoneMasking();
@@ -7161,45 +7400,132 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
             {...threadMainSurfaceProps}
             style={[styles.threadMain, { backgroundColor: activePalette.screen }]}
           >
-            <View style={[styles.threadHeaderDark, { paddingTop: insets.top, backgroundColor: appTheme.surface, borderBottomColor: appTheme.border }]}>
-              <TouchableOpacity onPress={closeActiveChatSession} style={styles.darkIconButton} activeOpacity={0.7}>
-                <ArrowLeft color={appTheme.text} size={22} />
+            <View
+              style={[
+                styles.threadHeaderDark,
+                {
+                  paddingTop: Math.max(insets.top, 8),
+                  backgroundColor: appTheme.surface,
+                  borderBottomColor: appTheme.darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)',
+                },
+              ]}
+            >
+              <TouchableOpacity
+                onPress={closeActiveChatSession}
+                style={[
+                  styles.darkIconButton,
+                  {
+                    backgroundColor: appTheme.darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.04)',
+                    borderColor: appTheme.darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.05)',
+                  },
+                ]}
+                activeOpacity={0.7}
+              >
+                <ArrowLeft color={appTheme.text} size={19} strokeWidth={2.2} />
               </TouchableOpacity>
 
               <TouchableOpacity
                 onPress={() => setDetailsOpen((value) => !value)}
                 style={styles.threadIdentity}
-                activeOpacity={0.78}
+                activeOpacity={0.75}
               >
                 <View style={styles.threadAvatarWrap}>
-                  <Avatar src={activeConversation.avatar} fallback={getInitials(activeConversation.name)} size={32} />
-                  <View style={styles.threadChannelDot}>
-                    <ChannelGlyph channel={activeConversation.channel} size={6} color={getChannelColor(activeConversation.channel)} />
+                  <View
+                    style={[
+                      styles.avatarRing,
+                      {
+                        borderColor: appTheme.darkMode ? 'rgba(255,255,255,0.12)' : 'rgba(15,23,42,0.08)',
+                      },
+                    ]}
+                  >
+                    <Avatar src={activeConversation.avatar} fallback={getInitials(activeConversation.name)} size={40} />
+                  </View>
+                  <View
+                    style={[
+                      styles.threadChannelDot,
+                      {
+                        backgroundColor: appTheme.surface,
+                        borderColor: appTheme.surface,
+                      },
+                    ]}
+                  >
+                    <ChannelGlyph
+                      channel={activeConversation.channel}
+                      size={8}
+                      color={getChannelColor(activeConversation.channel)}
+                    />
                   </View>
                 </View>
+
                 <View style={styles.threadTitleBlock}>
                   <View style={styles.threadTitleLine}>
-                    <Typography variant="h4" numberOfLines={1} color={appTheme.text} style={styles.threadTitle}>
+                    <Typography variant="bodyLarge" numberOfLines={1} color={appTheme.text} style={styles.threadTitle}>
                       {activeConversation.name}
                     </Typography>
-                    {isStarred ? <Star color={appTheme.primaryAccent} size={14} /> : null}
-                    {isPinned ? <Pin color={appTheme.primaryAccent} size={14} /> : null}
-                    {isMuted ? <VolumeX color={appTheme.primaryAccent} size={14} /> : null}
-                    {isLocked ? <Lock color={appTheme.primaryAccent} size={14} /> : null}
-                  </View>
-                  <View style={styles.threadSubtitle}>
-                    {(activeConversation.online || activeTyping) && (
-                      <View style={[styles.presenceDot, styles.presenceDotOnline]} />
-                    )}
-                    {presenceLabel ? (
-                      <Typography variant="caption" color={activeConversation.online || activeTyping ? appTheme.primaryAccent : appTheme.muted}>
-                        {presenceLabel}
-                      </Typography>
+                    {isStarred ? (
+                      <View style={styles.badgeIconWrap}>
+                        <Star color="#F59E0B" fill="#F59E0B" size={12} />
+                      </View>
                     ) : null}
-                    {isResolved ? (
-                      <Typography variant="caption" color={Theme.colors.success}>
-                        Resolved
+                    {isPinned ? (
+                      <View style={styles.badgeIconWrap}>
+                        <Pin color={appTheme.primaryAccent} size={12} />
+                      </View>
+                    ) : null}
+                    {isMuted ? (
+                      <View style={styles.badgeIconWrap}>
+                        <VolumeX color={appTheme.muted} size={12} />
+                      </View>
+                    ) : null}
+                    {isLocked ? (
+                      <View style={styles.badgeIconWrap}>
+                        <Lock color={appTheme.muted} size={12} />
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.threadSubtitle}>
+                    {activeConversation.online || activeTyping ? (
+                      <View style={styles.presenceContainer}>
+                        <View style={styles.presenceHalo}>
+                          <View style={[styles.presenceDot, styles.presenceDotOnline]} />
+                        </View>
+                        <Typography
+                          variant="caption"
+                          style={styles.presenceTextOnline}
+                          color={activeTyping ? appTheme.primaryAccent : '#10B981'}
+                        >
+                          {activeTyping ? 'typing...' : 'Online'}
+                        </Typography>
+                      </View>
+                    ) : (
+                      <Typography
+                        variant="caption"
+                        color={appTheme.muted}
+                        style={styles.presenceTextOffline}
+                        numberOfLines={1}
+                      >
+                        {activeConversation.company
+                          ? `${getChannelLabel(activeConversation.channel)} • ${activeConversation.company}`
+                          : getChannelLabel(activeConversation.channel)}
                       </Typography>
+                    )}
+                    {isResolved ? (
+                      <View
+                        style={[
+                          styles.resolvedBadge,
+                          {
+                            backgroundColor: appTheme.darkMode
+                              ? 'rgba(16, 185, 129, 0.15)'
+                              : 'rgba(16, 185, 129, 0.10)',
+                          },
+                        ]}
+                      >
+                        <CircleCheck color="#10B981" size={10} />
+                        <Typography variant="caption" color="#10B981" style={styles.resolvedText}>
+                          Resolved
+                        </Typography>
+                      </View>
                     ) : null}
                   </View>
                 </View>
@@ -7207,33 +7533,85 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
 
               <View style={styles.threadHeaderActions}>
                 <TouchableOpacity
-                  style={[styles.darkIconButton, threadSearchOpen && { backgroundColor: appTheme.infoSoft }]}
-                  activeOpacity={0.75}
+                  style={[
+                    styles.darkIconButton,
+                    {
+                      backgroundColor: threadSearchOpen
+                        ? appTheme.infoSoft
+                        : appTheme.darkMode
+                          ? 'rgba(255,255,255,0.06)'
+                          : 'rgba(15,23,42,0.04)',
+                      borderColor: threadSearchOpen
+                        ? appTheme.primaryAccent + '40'
+                        : appTheme.darkMode
+                          ? 'rgba(255,255,255,0.08)'
+                          : 'rgba(15,23,42,0.05)',
+                    },
+                  ]}
+                  activeOpacity={0.7}
                   onPress={() => {
                     closeComposerPopups();
                     setActionsOpen(false);
                     setThreadSearchOpen((value) => !value);
                   }}
                 >
-                  <Search color={appTheme.muted} size={20} />
+                  <Search
+                    color={threadSearchOpen ? appTheme.primaryAccent : appTheme.text}
+                    size={17}
+                    strokeWidth={2.1}
+                  />
                 </TouchableOpacity>
-                <TouchableOpacity onPress={() => void setActiveConversation(activeConversation.id, { force: true })} style={styles.darkIconButton} activeOpacity={0.75}>
+
+                <TouchableOpacity
+                  onPress={() => void setActiveConversation(activeConversation.id, { force: true })}
+                  style={[
+                    styles.darkIconButton,
+                    {
+                      backgroundColor: appTheme.darkMode
+                        ? 'rgba(255,255,255,0.06)'
+                        : 'rgba(15,23,42,0.04)',
+                      borderColor: appTheme.darkMode
+                        ? 'rgba(255,255,255,0.08)'
+                        : 'rgba(15,23,42,0.05)',
+                    },
+                  ]}
+                  activeOpacity={0.7}
+                >
                   {isLoadingMessages ? (
                     <ActivityIndicator color={appTheme.primaryAccent} size="small" />
                   ) : (
-                    <RefreshCw color={appTheme.muted} size={19} />
+                    <RefreshCw color={appTheme.text} size={16} strokeWidth={2.1} />
                   )}
                 </TouchableOpacity>
+
                 <TouchableOpacity
                   onPress={() => {
                     closeComposerPopups();
                     closeThreadSearch();
                     setActionsOpen((value) => !value);
                   }}
-                  style={styles.darkIconButton}
-                  activeOpacity={0.75}
+                  style={[
+                    styles.darkIconButton,
+                    actionsOpen && {
+                      backgroundColor: appTheme.infoSoft,
+                      borderColor: appTheme.primaryAccent + '40',
+                    },
+                    !actionsOpen && {
+                      backgroundColor: appTheme.darkMode
+                        ? 'rgba(255,255,255,0.06)'
+                        : 'rgba(15,23,42,0.04)',
+                      borderColor: appTheme.darkMode
+                        ? 'rgba(255,255,255,0.08)'
+                        : 'rgba(15,23,42,0.05)',
+                    },
+                  ]}
+                  activeOpacity={0.7}
                 >
-                  <MoreVertical color={appTheme.muted} size={20} />
+                  <MoreVertical
+                    color={actionsOpen ? appTheme.primaryAccent : appTheme.text}
+                    size={18}
+                    strokeWidth={2.1}
+                  />
                 </TouchableOpacity>
               </View>
             </View>
@@ -7380,6 +7758,9 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
                 keyExtractor={(item) => item.id}
                 renderItem={renderMessage}
                 inverted
+                decelerationRate="normal"
+                bounces={true}
+                overScrollMode="never"
                 onEndReached={() => void getOlderMessages()}
                 onEndReachedThreshold={0.25}
                 style={styles.messageListSurface}
@@ -8828,16 +9209,40 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
       {!isEmailGroupFolder && !chatSubscreenOpen && (
-        <Reanimated.View entering={FadeInDown.delay(0).duration(380).springify()} style={[styles.header, styles.mainChatsHeader, { paddingTop: Math.max(insets.top, 16) + 16, zIndex: 10, backgroundColor: appTheme.background }]}>
-          <View style={styles.headerTopRow}>
+        <Animated.View
+          style={[
+            styles.header,
+            styles.mainChatsHeader,
+            {
+              paddingTop: Math.max(insets.top, 16) + 16,
+              paddingBottom: chatHeaderPaddingBottom,
+              zIndex: 10,
+              backgroundColor: appTheme.background,
+            },
+          ]}
+        >
+          <Animated.View
+            style={[
+              styles.headerTopRow,
+              {
+                transform: [
+                  { scale: chatTitleScale },
+                  { translateY: chatTitleTranslateY },
+                ],
+                transformOrigin: 'top left',
+              },
+            ]}
+          >
             <View style={styles.titleArea}>
               <Typography variant="h1" color={appTheme.text} style={{ fontWeight: '800' }}>Chats</Typography>
             </View>
-          </View>
-          <Typography variant="bodySmall" color={appTheme.muted} numberOfLines={1} style={[styles.headerMeta, { fontWeight: '600', marginTop: 4 }]}>
-            {focusedConversationCount} focused • {liveConversationCount} total • {lastSyncedLabel}
-          </Typography>
-        </Reanimated.View>
+          </Animated.View>
+          <Animated.View style={{ opacity: chatMetaOpacity, height: chatMetaHeight, overflow: 'hidden' }}>
+            <Typography variant="bodySmall" color={appTheme.muted} numberOfLines={1} style={[styles.headerMeta, { fontWeight: '600', marginTop: 4 }]}>
+              {focusedConversationCount} focused • {liveConversationCount} total • {lastSyncedLabel}
+            </Typography>
+          </Animated.View>
+        </Animated.View>
       )}
 
       <View style={[styles.content, chatSubscreenOpen && styles.contentFullBleed]}>
@@ -10574,6 +10979,11 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
           data={displayedConversations}
           keyExtractor={(item) => item.id}
           renderItem={renderConversation}
+          decelerationRate="normal"
+          bounces={true}
+          overScrollMode="never"
+          keyboardDismissMode="on-drag"
+          keyboardShouldPersistTaps="handled"
           refreshControl={(
             <RefreshControl
               refreshing={isSyncing && !isLoadingConversations}
@@ -10595,11 +11005,14 @@ const [pendingVoiceNote, setPendingVoiceNote] = useState<{ uri: string; duration
             (listSelectMode || showNoConnectionListError) && { flexGrow: 1 },
           ]}
           showsVerticalScrollIndicator={false}
-          initialNumToRender={12}
-          maxToRenderPerBatch={10}
-          windowSize={7}
+          initialNumToRender={14}
+          maxToRenderPerBatch={12}
+          windowSize={9}
           removeClippedSubviews={Platform.OS !== 'web'}
-          onScroll={handleBottomTabScroll}
+          onScroll={Animated.event(
+            [{ nativeEvent: { contentOffset: { y: chatScrollY } } }],
+            { useNativeDriver: false, listener: handleBottomTabScroll }
+          )}
           scrollEventThrottle={16}
           ListFooterComponent={
             <View>
@@ -11987,57 +12400,106 @@ const styles = StyleSheet.create({
     elevation: 18,
   },
   threadHeaderDark: {
-    minHeight: 58,
+    minHeight: 64,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Theme.spacing.md,
-    paddingVertical: Theme.spacing.xs,
+    paddingHorizontal: 14,
+    paddingBottom: 10,
     borderBottomWidth: 1,
-    borderBottomColor: Theme.colors.border,
-    backgroundColor: Theme.colors.surface,
     zIndex: 12,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
   },
   darkIconButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  avatarRing: {
+    borderRadius: 22,
+    borderWidth: 1.5,
+    overflow: 'hidden',
   },
   threadAvatarWrap: {
     position: 'relative',
   },
   threadChannelDot: {
     position: 'absolute',
-    right: -1,
-    bottom: -1,
-    width: 11,
-    height: 11,
-    borderRadius: 6,
+    right: -2,
+    bottom: -2,
+    width: 17,
+    height: 17,
+    borderRadius: 8.5,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: Theme.colors.surface,
-    borderWidth: 1.5,
-    borderColor: Theme.colors.surface,
+    borderWidth: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 2,
+    elevation: 2,
   },
   threadTitleLine: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
   },
+  badgeIconWrap: {
+    opacity: 0.9,
+  },
+  presenceContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  presenceHalo: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   presenceDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: '#9CA3AF',
   },
   presenceDotOnline: {
-    backgroundColor: '#0FDD7E',
+    backgroundColor: '#10B981',
+  },
+  presenceTextOnline: {
+    fontSize: 12,
+    fontWeight: '600',
+    letterSpacing: -0.1,
+  },
+  presenceTextOffline: {
+    fontSize: 12,
+    fontWeight: '400',
+  },
+  resolvedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 6,
+  },
+  resolvedText: {
+    fontSize: 11,
+    fontWeight: '600',
   },
   threadHeaderActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: 6,
   },
   threadSearchPanel: {
     paddingHorizontal: Theme.spacing.lg,
@@ -12067,31 +12529,47 @@ const styles = StyleSheet.create({
   },
   actionMenu: {
     position: 'absolute',
-    top: 60,
-    right: 18,
-    width: 252,
+    top: 62,
+    right: 14,
+    width: 240,
     borderWidth: 1,
-    borderColor: Theme.colors.border,
-    borderRadius: 6,
-    backgroundColor: Theme.colors.surface,
-    paddingVertical: Theme.spacing.sm,
+    borderRadius: 16,
+    paddingVertical: 6,
+    paddingHorizontal: 6,
     zIndex: 40,
-    ...Theme.shadows.large,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.16,
+    shadowRadius: 24,
+    elevation: 12,
   },
   actionMenuItem: {
-    minHeight: 44,
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Theme.spacing.md,
-    paddingHorizontal: Theme.spacing.lg,
+    gap: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  actionMenuIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   actionMenuText: {
     flex: 1,
+    fontSize: 13.5,
+    fontWeight: '500',
   },
   actionMenuDangerDivider: {
     height: 1,
     backgroundColor: Theme.colors.border,
-    marginVertical: Theme.spacing.sm,
+    marginVertical: 4,
+    marginHorizontal: 4,
+    opacity: 0.6,
   },
   threadBackground: {
     flex: 1,
@@ -12546,17 +13024,29 @@ const styles = StyleSheet.create({
     borderLeftWidth: 0,
   },
   whatsAppContactHeader: {
-    minHeight: 62,
+    minHeight: 64,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: Theme.spacing.sm,
-    paddingBottom: Theme.spacing.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    zIndex: 10,
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 2,
   },
   whatsAppContactHeaderTitle: {
     flex: 1,
     marginLeft: Theme.spacing.sm,
-    fontWeight: '600',
+    fontWeight: '700',
+    fontSize: 16,
+    letterSpacing: -0.2,
+  },
+  headerRightSpacer: {
+    width: 38,
+    height: 38,
   },
   whatsAppContactBody: {
     paddingHorizontal: Theme.spacing.xl,
@@ -12932,7 +13422,23 @@ const styles = StyleSheet.create({
   },
   contactHero: {
     alignItems: 'center',
-    paddingVertical: Theme.spacing.lg,
+    paddingTop: Theme.spacing.md,
+    paddingBottom: Theme.spacing.lg,
+  },
+  heroAvatarContainer: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroAvatarRing: {
+    borderRadius: 46,
+    borderWidth: 2,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 4,
   },
   largeAvatar: {
     width: 72,
@@ -12945,18 +13451,71 @@ const styles = StyleSheet.create({
   },
   heroChannelBadge: {
     position: 'absolute',
-    right: -3,
-    bottom: -3,
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    right: -2,
+    bottom: -2,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#E9F8EF',
+    borderWidth: 2.5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
   },
   contactHeroName: {
-    marginTop: Theme.spacing.lg,
+    marginTop: 12,
     textAlign: 'center',
+    fontSize: 20,
+    fontWeight: '700',
+    letterSpacing: -0.3,
+  },
+  heroCompanyChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  heroCompanyText: {
+    fontSize: 12.5,
+    fontWeight: '500',
+  },
+  heroStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  heroStatPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  heroStatText: {
+    fontSize: 11.5,
+    fontWeight: '600',
+  },
+  heroOnlineDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#10B981',
+  },
+  detailSectionCard: {
+    marginTop: Theme.spacing.md,
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 12,
+    gap: 8,
   },
   detailSection: {
     marginTop: Theme.spacing.lg,
@@ -12966,37 +13525,79 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    paddingBottom: 4,
   },
   detailSectionTitle: {
-    fontWeight: '600',
+    fontWeight: '700',
+    fontSize: 11,
+    letterSpacing: 0.8,
   },
   detailLine: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Theme.spacing.md,
-    minHeight: 30,
+    gap: 10,
+    minHeight: 34,
+    paddingVertical: 2,
+  },
+  detailLineIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   detailLineText: {
     flex: 1,
+    fontSize: 13.5,
+    fontWeight: '400',
   },
   detailCard: {
-    marginTop: Theme.spacing.xl,
-    borderRadius: 8,
-    backgroundColor: '#F8FAFC',
-    padding: Theme.spacing.md,
-    gap: Theme.spacing.sm,
+    marginTop: Theme.spacing.md,
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: Theme.colors.border,
+    padding: 14,
+    gap: 10,
   },
   metaRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
     gap: Theme.spacing.md,
+    minHeight: 28,
+  },
+  metaLabel: {
+    fontWeight: '500',
+    fontSize: 13,
   },
   metaValue: {
     flex: 1,
     textAlign: 'right',
-    fontWeight: '500',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  metaStatusPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  metaStatusText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    textTransform: 'capitalize',
+  },
+  metaChannelPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
+    borderRadius: 6,
+  },
+  metaChannelText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   paymentButton: {
     marginTop: Theme.spacing.xl,
@@ -13014,12 +13615,13 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   paymentPanel: {
-    borderRadius: 8,
+    marginTop: Theme.spacing.md,
+    borderRadius: 14,
     borderWidth: 1,
     overflow: 'hidden',
   },
   paymentPanelHeader: {
-    minHeight: 44,
+    minHeight: 48,
     paddingHorizontal: Theme.spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
@@ -13128,15 +13730,13 @@ const styles = StyleSheet.create({
     marginTop: 0,
   },
   assignmentTabs: {
-    marginTop: Theme.spacing.xl,
-    minHeight: 46,
-    borderRadius: 24,
+    marginTop: Theme.spacing.md,
+    minHeight: 42,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: Theme.colors.border,
-    backgroundColor: '#F8FAFC',
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 4,
+    padding: 3,
     gap: 4,
   },
   assignmentTabActive: {
@@ -13147,9 +13747,13 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingHorizontal: 8,
     minHeight: 34,
-    borderRadius: 17,
+    borderRadius: 9,
     borderWidth: 1,
-    borderColor: Theme.colors.primary,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 2,
   },
   assignmentTab: {
     flex: 1,
@@ -13161,7 +13765,8 @@ const styles = StyleSheet.create({
     minHeight: 34,
   },
   assignmentTabText: {
-    fontWeight: '500',
+    fontWeight: '600',
+    fontSize: 12.5,
   },
   assignmentCard: {
     marginTop: Theme.spacing.md,
@@ -13173,24 +13778,37 @@ const styles = StyleSheet.create({
     padding: Theme.spacing.lg,
   },
   workflowCard: {
+    marginTop: Theme.spacing.md,
     alignItems: 'stretch',
+    borderRadius: 14,
+    borderWidth: 1,
     padding: Theme.spacing.md,
-    gap: Theme.spacing.md,
   },
   unsupportedWorkflowContent: {
-    minHeight: 88,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: Theme.spacing.xs,
     paddingHorizontal: Theme.spacing.sm,
+    paddingVertical: Theme.spacing.sm,
+  },
+  unsupportedWorkflowIconBadge: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
   },
   unsupportedWorkflowTitle: {
-    fontWeight: '800',
+    fontWeight: '700',
+    fontSize: 13.5,
     textAlign: 'center',
   },
   unsupportedWorkflowCopy: {
     textAlign: 'center',
-    lineHeight: 17,
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 4,
+    opacity: 0.9,
   },
   assignmentMemberRow: {
     minHeight: 48,
@@ -13389,14 +14007,15 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    marginHorizontal: Theme.spacing.sm,
+    marginHorizontal: 10,
+    paddingVertical: 2,
   },
-  threadTitleBlock: { flex: 1, marginLeft: Theme.spacing.sm },
-  threadTitle: { fontSize: 17, fontWeight: '500' },
+  threadTitleBlock: { flex: 1, marginLeft: 10, justifyContent: 'center' },
+  threadTitle: { fontSize: 16, fontWeight: '700', letterSpacing: -0.2 },
   threadSubtitle: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 6,
     marginTop: 2,
   },
   messageList: {

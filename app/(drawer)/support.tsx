@@ -1,3 +1,4 @@
+import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Linking, RefreshControl, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 import { FileText, Mail, MessageCircle, Phone, RefreshCw } from 'lucide-react-native';
@@ -93,7 +94,7 @@ export default function SupportScreen() {
   return (
     <View style={[styles.container, { backgroundColor: appTheme.background }]}>
       <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingTop: Theme.spacing.lg }]}
+        contentContainerStyle={[styles.scrollContent, { paddingTop: 12 }]}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadSupport(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
       >

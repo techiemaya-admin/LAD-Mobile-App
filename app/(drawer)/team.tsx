@@ -1,3 +1,4 @@
+import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -253,27 +254,40 @@ export default function TeamScreen() {
 
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
+      <IOSSubscreenHeader
+        title="Team Management"
+        subtitle="Manage team members and granular permissions"
+        rightElement={
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <TouchableOpacity
+              style={[styles.iconBtn, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+              onPress={() => loadMembers(true)}
+              disabled={refreshing || loading}
+            >
+              {refreshing || loading ? (
+                <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+              ) : (
+                <RefreshCw color={appTheme.primaryAccent} size={18} />
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.iconBtn, { backgroundColor: appTheme.primary, borderColor: appTheme.primary }]}
+              onPress={() => setInviteModalVisible(true)}
+            >
+              <UserPlus color={appTheme.background} size={18} />
+            </TouchableOpacity>
+          </View>
+        }
+      />
       <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingHorizontal: pagePadding, paddingTop: Theme.spacing.lg, paddingBottom: insets.bottom + 80 }]}
+        contentContainerStyle={[styles.scrollContent, { paddingHorizontal: pagePadding, paddingTop: 12, paddingBottom: insets.bottom + 80 }]}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadMembers(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
       >
         <View style={styles.contentMaxWidth}>
           {openMenuId ? <Pressable style={styles.menuDismissLayer} onPress={closeMemberMenu} /> : null}
 
-          <View style={styles.headerBlock}>
-            <View style={styles.headerTitleRow}>
-              <Typography variant="h1" style={styles.pageTitleText} numberOfLines={2}>Team Management</Typography>
-              <TouchableOpacity style={[styles.iconBtn, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadMembers(true)} disabled={refreshing || loading}>
-                {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={18} />}
-              </TouchableOpacity>
-            </View>
-            <Typography variant="bodyLarge" color={appTheme.muted} style={styles.pageSubtitleText}>Manage team members and their granular page permissions</Typography>
-            <TouchableOpacity style={[styles.addMemberBtnLarge, { backgroundColor: appTheme.primary }]} onPress={() => setInviteModalVisible(true)}>
-              <UserPlus color={appTheme.background} size={18} />
-              <Typography variant="body" color={appTheme.background} style={[styles.addMemberBtnText, { flexShrink: 1 }]} numberOfLines={1}>Add Team member</Typography>
-            </TouchableOpacity>
-          </View>
+          
 
           {error ? (
             <GlassCard style={styles.messageCard}>

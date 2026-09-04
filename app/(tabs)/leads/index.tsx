@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import { ActivityIndicator, Linking, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Building2, ExternalLink, Filter, Mail, Phone, Search, UserRound } from 'lucide-react-native';
+import { Building2, ExternalLink, Filter, Mail, Phone, Search, UserRound, ChevronLeft } from 'lucide-react-native';
+import { useRouter } from 'expo-router';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -17,6 +18,7 @@ const scoreTone = (score?: number) => {
 };
 
 export default function LeadsScreen() {
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const appTheme = useAppTheme();
   const handleBottomTabScroll = useBottomTabScrollHandler();
@@ -109,7 +111,16 @@ export default function LeadsScreen() {
   return (
     <View style={[styles.container, { paddingTop: insets.top, backgroundColor: appTheme.background }]}>
       <View style={styles.header}>
-        <Typography variant="h1" color={appTheme.text}>Leads</Typography>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <TouchableOpacity
+            style={{ width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: appTheme.darkMode ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.04)' }}
+            onPress={() => router.canGoBack() ? router.back() : router.replace('/(tabs)/profile' as never)}
+            activeOpacity={0.7}
+          >
+            <ChevronLeft color={appTheme.text} size={20} strokeWidth={2.4} />
+          </TouchableOpacity>
+          <Typography variant="h1" color={appTheme.text}>Leads</Typography>
+        </View>
         <Typography variant="caption" color={appTheme.muted}>
           {assistant.totalResults || assistant.leads.length} assistant result{(assistant.totalResults || assistant.leads.length) === 1 ? '' : 's'}
         </Typography>

@@ -1,3 +1,4 @@
+import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -303,7 +304,7 @@ export default function BillingScreen() {
           {
             maxWidth: contentMaxWidth,
             paddingHorizontal: contentPadding,
-            paddingTop: Theme.spacing.lg,
+            paddingTop: 12,
             paddingBottom: insets.bottom + 40,
             width: '100%',
           },

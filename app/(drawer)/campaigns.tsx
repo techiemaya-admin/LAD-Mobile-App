@@ -2,6 +2,7 @@ import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 import { Badge } from '@/components/ui/Badge';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Typography } from '@/components/ui/Typography';
+import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import Theme from '@/constants/theme';
 import { CampaignItem, CampaignStats, deleteCampaign, getCampaigns, getCampaignStats, restartCampaign, updateCampaignLifecycle } from '@/src/services/settingsHub';
 import { useAppTheme } from '@/src/theme/appTheme';
@@ -161,22 +162,28 @@ export default function CampaignsScreen() {
 
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
-      <View style={styles.header}>
-        <View style={styles.headerContentMaxWidth}>
-          <View style={styles.headerTitleContainer}>
-            <Typography variant="h1" style={styles.pageTitle} numberOfLines={2}>Campaigns</Typography>
-            <Typography variant="bodySmall" color={appTheme.muted}>Track and manage your active marketing campaigns in real time.</Typography>
-          </View>
+      <IOSSubscreenHeader
+        title="Campaigns"
+        subtitle="Track and manage your active marketing campaigns in real time."
+        rightElement={
           <View style={styles.headerActions}>
-            <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadCampaigns(true)} disabled={refreshing || loading}>
-              {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={20} />}
+            <TouchableOpacity
+              style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+              onPress={() => loadCampaigns(true)}
+              disabled={refreshing || loading}
+            >
+              {refreshing || loading ? (
+                <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+              ) : (
+                <RefreshCw color={appTheme.primaryAccent} size={18} />
+              )}
             </TouchableOpacity>
             <TouchableOpacity style={styles.addButton} onPress={() => router.push('/(tabs)/ai-assistant')}>
-              <Plus color={Theme.colors.surface} size={24} />
+              <Plus color="#FFFFFF" size={20} />
             </TouchableOpacity>
           </View>
-        </View>
-      </View>
+        }
+      />
 
       <ScrollView
         contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 80 }]}

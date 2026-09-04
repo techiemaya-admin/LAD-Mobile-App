@@ -1,3 +1,4 @@
+import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
 import { PhoneCall, RefreshCw, TrendingUp, Users, Wallet } from 'lucide-react-native';
@@ -93,7 +94,7 @@ export default function AnalyticsScreen() {
   return (
     <ScrollView
       style={[styles.container, { backgroundColor: appTheme.background }]}
-      contentContainerStyle={[styles.content, { paddingTop: Theme.spacing.lg, paddingBottom: insets.bottom + 40 }]}
+      contentContainerStyle={[styles.content, { paddingTop: 12, paddingBottom: insets.bottom + 40 }]}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadAnalytics(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
     >
       <View style={styles.header}>
