@@ -13,14 +13,6 @@ import {
   Bell,
   Mail,
   Zap,
-  Megaphone,
-  Users,
-  Building2,
-  Share2,
-  BarChart3,
-  PhoneCall,
-  FolderKanban,
-  CheckCircle2,
 } from 'lucide-react-native';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
@@ -30,6 +22,7 @@ import { useRouter } from 'expo-router';
 import useAuthStore from '@/src/store/authStore';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { BlurView } from 'expo-blur';
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -46,81 +39,20 @@ export default function ProfileScreen() {
 
   const accountSections = [
     {
-      title: 'CAMPAIGNS & CRM',
-      items: [
-        {
-          icon: <Megaphone color="#FFFFFF" size={17} strokeWidth={2.4} />,
-          iconBg: '#7C3AED',
-          title: 'Campaigns',
-          subtitle: 'Active outreach and broadcast campaigns',
-          route: '/(drawer)/campaigns',
-          badge: 'ACTIVE',
-        },
-        {
-          icon: <FolderKanban color="#FFFFFF" size={17} strokeWidth={2.4} />,
-          iconBg: '#2563EB',
-          title: 'CRM Deals Pipeline',
-          subtitle: 'Manage deal stages and leads',
-          route: '/(tabs)/crm',
-        },
-        {
-          icon: <PhoneCall color="#FFFFFF" size={17} strokeWidth={2.4} />,
-          iconBg: '#059669',
-          title: 'Voice Agent & Calls',
-          subtitle: 'Call logs and automated dialer',
-          route: '/(tabs)/calls',
-        },
-        {
-          icon: <BarChart3 color="#FFFFFF" size={17} strokeWidth={2.4} />,
-          iconBg: '#D97706',
-          title: 'Analytics & Performance',
-          subtitle: 'Conversion metrics and reporting',
-          route: '/(drawer)/analytics',
-        },
-      ],
-    },
-    {
-      title: 'ORGANIZATION & BUSINESS',
-      items: [
-        {
-          icon: <Building2 color="#FFFFFF" size={17} strokeWidth={2.4} />,
-          iconBg: '#4F46E5',
-          title: 'Business Profile',
-          subtitle: 'Company details and brand presence',
-          route: '/(drawer)/business-profile',
-        },
-        {
-          icon: <Users color="#FFFFFF" size={17} strokeWidth={2.4} />,
-          iconBg: '#0891B2',
-          title: 'Team Management',
-          subtitle: 'Collaborators, roles, and access',
-          route: '/(drawer)/team',
-        },
-        {
-          icon: <Share2 color="#FFFFFF" size={17} strokeWidth={2.4} />,
-          iconBg: '#EA580C',
-          title: 'Integrations',
-          subtitle: 'WhatsApp, LinkedIn, and CRM connections',
-          route: '/(drawer)/integrations',
-          badge: 'CONNECTED',
-        },
-      ],
-    },
-    {
       title: 'ACCOUNT & SECURITY',
       items: [
         {
           icon: <User color="#FFFFFF" size={17} strokeWidth={2.4} />,
           iconBg: '#3B82F6',
           title: 'Account Settings',
-          subtitle: 'Profile details and user credentials',
+          subtitle: 'Profile details and credentials',
           route: '/(drawer)/settings',
         },
         {
           icon: <Shield color="#FFFFFF" size={17} strokeWidth={2.4} />,
           iconBg: '#10B981',
           title: 'Privacy & Security',
-          subtitle: 'Session tokens and access control',
+          subtitle: 'Session and access control',
           route: '/(drawer)/settings',
         },
       ],
@@ -132,15 +64,15 @@ export default function ProfileScreen() {
           icon: <CreditCard color="#FFFFFF" size={17} strokeWidth={2.4} />,
           iconBg: '#8B5CF6',
           title: 'Billing & Plans',
-          subtitle: 'Manage Enterprise subscription and credits',
+          subtitle: 'Manage Enterprise subscription',
           route: '/(drawer)/billing',
-          badge: 'ENTERPRISE',
+          badge: 'ACTIVE',
         },
         {
           icon: <Sparkles color="#FFFFFF" size={17} strokeWidth={2.4} />,
           iconBg: '#F59E0B',
           title: 'AI Automation & Voice',
-          subtitle: 'Voice agent prompts and outreach preferences',
+          subtitle: 'Voice agent and outreach preferences',
           route: '/(drawer)/settings',
         },
       ],
@@ -184,7 +116,7 @@ export default function ProfileScreen() {
           style={[
             styles.heroCard,
             {
-              backgroundColor: appTheme.darkMode ? 'rgba(30, 41, 59, 0.7)' : 'rgba(255, 255, 255, 0.95)',
+              backgroundColor: appTheme.darkMode ? 'rgba(30, 41, 59, 0.7)' : 'rgba(255, 255, 255, 0.9)',
               borderColor: appTheme.darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.06)',
             },
           ]}
@@ -266,36 +198,8 @@ export default function ProfileScreen() {
                         ) : null}
                       </View>
                       {item.badge ? (
-                        <View
-                          style={[
-                            styles.rowBadge,
-                            {
-                              backgroundColor:
-                                item.badge === 'ACTIVE'
-                                  ? appTheme.darkMode
-                                    ? 'rgba(124, 58, 237, 0.2)'
-                                    : '#F5F3FF'
-                                  : item.badge === 'CONNECTED'
-                                    ? appTheme.darkMode
-                                      ? 'rgba(16, 185, 129, 0.2)'
-                                      : '#ECFDF5'
-                                    : appTheme.darkMode
-                                      ? 'rgba(41, 118, 244, 0.2)'
-                                      : '#EFF6FF',
-                            },
-                          ]}
-                        >
-                          <Typography
-                            variant="caption"
-                            color={
-                              item.badge === 'ACTIVE'
-                                ? '#8B5CF6'
-                                : item.badge === 'CONNECTED'
-                                  ? '#10B981'
-                                  : '#2563EB'
-                            }
-                            style={{ fontWeight: '700', fontSize: 10 }}
-                          >
+                        <View style={[styles.rowBadge, { backgroundColor: appTheme.darkMode ? 'rgba(16, 185, 129, 0.18)' : '#ECFDF5' }]}>
+                          <Typography variant="caption" color="#10B981" style={{ fontWeight: '700', fontSize: 10 }}>
                             {item.badge}
                           </Typography>
                         </View>

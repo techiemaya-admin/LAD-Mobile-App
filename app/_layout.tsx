@@ -153,6 +153,7 @@ export default function RootLayout() {
                 <ActivityIndicator color={appTheme.primaryAccent} size="large" />
               </View>
             )}
+            {!isLoading ? <FloatingAssistantButton /> : null}
           </KeyboardProvider>
         </GestureHandlerRootView>
       </SafeAreaProvider>

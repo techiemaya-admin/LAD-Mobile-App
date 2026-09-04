@@ -2,9 +2,8 @@ import { Typography } from '@/components/ui/Typography';
 import { useAppTheme } from '@/src/theme/appTheme';
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { BlurView } from 'expo-blur';
-import * as Haptics from 'expo-haptics';
 import { usePathname, useRouter } from 'expo-router';
-import { CircleUserRound, MessageCircle } from 'lucide-react-native';
+import { BriefcaseBusiness, CircleUserRound, House, MessageCircle, Phone } from 'lucide-react-native';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
@@ -17,46 +16,38 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import Svg, { Path } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-/** LAD brand mark — the stylised "L" bird silhouette used across the app. */
-const LADIcon = ({ color, size = 22 }: { color: string; size?: number }) => (
-  <Svg width={size} height={size} viewBox="50 120 110 130">
-    <Path
-      fill={color}
-      fillRule="evenodd"
-      d="M90.605 187.719c-13.835-4.52-27.66 7.976-24.097 22.394 4.594 17.77 23.656 26.117 42.418 25.469v-12.828c-31.363.25-42.027-33.168-18.32-35.035Zm5.2 9.379a3.029 3.029 0 1 0 0 6.058 3.029 3.029 0 0 0 0-6.058Zm10.734 0a3.029 3.029 0 1 0 0 6.058 3.029 3.029 0 0 0 0-6.058Zm10.73 0a3.029 3.029 0 1 0 0 6.058 3.029 3.029 0 0 0 0-6.058ZM98.324 160.398c-14.512-4.254-33.902-13.273-39.133-28.687-1.629 5.144-2.117 10.398-1.593 15.48.383 3.735 1.02 6.989 1.87 9.833 2.571 6.68 7.126 12.62 13.356 16.882-.629-3.601-.172-7.308 1.309-10.648 8.472 10.969 37.125 14.453 50.476 23.406 5.45 3.656 8.785 9.816 8.785 16.477 0 12.058-16.421 23.84-24.168 32.433 17.418-.691 34.508-9.14 39.461-25.011 13.723-44.004-53.984-49.23-76.855-80.922 1.023 15.945 12.512 24.859 26.492 30.757Z"
-    />
-  </Svg>
-);
-
-export type TabKey = 'ai-assistant' | 'chats' | 'profile';
+type TabKey = 'home' | 'crm' | 'chats' | 'calls' | 'profile';
 
 type BottomTabSelectorProps = {
   activeRoute?: TabKey;
 };
 
-export const tabs: {
+const tabs: {
   key: TabKey;
   label: string;
   route: string;
   routeName: string;
   icon: any;
 }[] = [
-  { key: 'ai-assistant', label: 'LAD', route: '/(tabs)', routeName: 'index', icon: LADIcon },
-  { key: 'chats', label: 'Chat', route: '/(tabs)/chats', routeName: 'chats/index', icon: MessageCircle },
-  { key: 'profile', label: 'Profile', route: '/(tabs)/profile', routeName: 'profile', icon: CircleUserRound },
-];
+    { key: 'home', label: 'Home', route: '/(tabs)', routeName: 'index', icon: House },
+    { key: 'crm', label: 'CRM', route: '/(tabs)/crm', routeName: 'crm', icon: BriefcaseBusiness },
+    { key: 'chats', label: 'Chats', route: '/(tabs)/chats', routeName: 'chats/index', icon: MessageCircle },
+    { key: 'calls', label: 'Calls', route: '/(tabs)/calls', routeName: 'calls', icon: Phone },
+    { key: 'profile', label: 'Profile', route: '/(tabs)/profile', routeName: 'profile', icon: CircleUserRound },
+  ];
 
 const hiddenTabBarRouteNames = new Set([
   'ai-assistant/index',
 ]);
 
-export const getActiveRoute = (pathname: string): TabKey => {
+const getActiveRoute = (pathname: string): TabKey => {
+  if (pathname.includes('/crm') || pathname.includes('/pipeline')) return 'crm';
   if (pathname.includes('/chats')) return 'chats';
+  if (pathname.includes('/calls')) return 'calls';
   if (pathname.includes('/profile') || pathname.includes('/(drawer)')) return 'profile';
-  return 'ai-assistant';
+  return 'home';
 };
 
 const scrollListeners = new Set<(hidden: boolean) => void>();
@@ -131,18 +122,18 @@ function AnimatedArtBar({
   const progress = useRef(new Animated.Value(activeIndex)).current;
   const visibility = useRef(new Animated.Value(bottomTabHidden ? 0 : 1)).current;
   const hiddenState = useRef(bottomTabHidden);
-  const maxWidth = width >= 560 ? 380 : Math.min(360, width - 32);
+  const maxWidth = width >= 560 ? 420 : Math.min(408, width - 24);
   const tabWidth = maxWidth / tabs.length;
-  const activeBubbleWidth = Math.min(84, tabWidth - 12);
+  const activeBubbleWidth = 56;
   const activeBubbleOffset = (tabWidth - activeBubbleWidth) / 2;
   const darkMode = appTheme.darkMode;
 
   useEffect(() => {
-    Animated.spring(progress, {
+    Animated.timing(progress, {
       toValue: activeIndex,
       useNativeDriver: true,
-      tension: 68,
-      friction: 10,
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
     }).start();
   }, [activeIndex, progress]);
 
@@ -194,24 +185,20 @@ function AnimatedArtBar({
   }, []);
 
   const activeTranslateX = progress.interpolate({
-    inputRange: [0, 1, 2],
-    outputRange: [
-      activeBubbleOffset,
-      tabWidth + activeBubbleOffset,
-      2 * tabWidth + activeBubbleOffset,
-    ],
+    inputRange: tabs.map((_, index) => index),
+    outputRange: tabs.map((_, index) => index * tabWidth + activeBubbleOffset),
   });
   const hideTranslateY = visibility.interpolate({
     inputRange: [0, 1],
     outputRange: [104, 0],
   });
-  const shellBackground = darkMode ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.95)';
+  const shellBackground = darkMode ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.94)';
   const activeBackground = darkMode ? '#2976F4' : appTheme.primary;
   const activeIconColor = '#FFFFFF';
   const activeLabelColor = '#FFFFFF';
-  const inactiveTextColor = darkMode ? '#94A3B8' : '#64748B';
-  const inactiveIconColor = darkMode ? '#94A3B8' : '#64748B';
-  const shellBorderColor = darkMode ? 'rgba(255, 255, 255, 0.12)' : 'rgba(203, 213, 225, 0.8)';
+  const inactiveTextColor = darkMode ? '#B8C4D7' : '#64748B';
+  const inactiveIconColor = darkMode ? '#CBD5E1' : '#475569';
+  const shellBorderColor = darkMode ? 'rgba(226,232,240,0.16)' : 'rgba(203,213,225,0.86)';
 
   useEffect(() => {
     if (!bottomTabForcedHidden) {
@@ -225,14 +212,14 @@ function AnimatedArtBar({
       style={[
         styles.fixedLayer,
         {
-          paddingBottom: Math.max(insets.bottom, 10),
+          paddingBottom: Math.max(insets.bottom, 8),
           opacity: visibility,
           transform: [{ translateY: hideTranslateY }],
         },
       ]}
     >
       <View style={[styles.shell, { width: maxWidth, backgroundColor: shellBackground, borderColor: shellBorderColor }]}>
-        <BlurView intensity={darkMode ? 48 : 60} tint={darkMode ? 'dark' : 'light'} style={StyleSheet.absoluteFill} />
+        <BlurView intensity={darkMode ? 44 : 58} tint={darkMode ? 'dark' : 'light'} style={StyleSheet.absoluteFill} />
         <View style={[StyleSheet.absoluteFill, { backgroundColor: shellBackground }]} pointerEvents="none" />
         <Animated.View
           pointerEvents="none"
@@ -241,6 +228,7 @@ function AnimatedArtBar({
             {
               width: activeBubbleWidth,
               backgroundColor: activeBackground,
+              borderColor: darkMode ? 'rgba(255,255,255,0.2)' : 'rgba(11,25,87,0.12)',
               transform: [{ translateX: activeTranslateX }],
             },
           ]}
@@ -255,7 +243,11 @@ function AnimatedArtBar({
           });
           const iconScale = distance.interpolate({
             inputRange: [0, 1],
-            outputRange: [0.92, 1.08],
+            outputRange: [0.94, 1.08],
+          });
+          const iconLift = distance.interpolate({
+            inputRange: [0, 1],
+            outputRange: [0, 0],
           });
           const iconColor = active ? activeIconColor : inactiveIconColor;
           const labelColor = active ? activeLabelColor : inactiveTextColor;
@@ -267,26 +259,22 @@ function AnimatedArtBar({
               accessibilityState={{ selected: active }}
               hitSlop={8}
               style={[styles.tab, { width: tabWidth }]}
-              onPress={() => {
-                if (Platform.OS !== 'web') {
-                  void Haptics.selectionAsync().catch(() => {});
-                }
-                onSelect(tab);
-              }}
+              onPress={() => onSelect(tab)}
             >
               <Animated.View
                 style={[
                   styles.iconHalo,
+                  active && styles.iconHaloActive,
                   {
-                    transform: [{ scale: iconScale }],
+                    transform: [{ translateY: iconLift }, { scale: iconScale }],
                     opacity: distance.interpolate({
                       inputRange: [0, 1],
-                      outputRange: [0.8, 1],
+                      outputRange: [0.82, 1],
                     }),
                   },
                 ]}
               >
-                <Icon color={iconColor} size={active ? 22 : 20} strokeWidth={active ? 2.5 : 2} />
+                <Icon color={iconColor} size={active ? 23 : 21} strokeWidth={active ? 2.6 : 2.1} />
               </Animated.View>
               <Typography variant="caption" color={labelColor} style={[styles.label, active && styles.labelActive]} numberOfLines={1}>
                 {tab.label}
@@ -302,7 +290,7 @@ function AnimatedArtBar({
 export function ArtBottomTabBar({ state, navigation }: BottomTabBarProps) {
   const currentRouteName = state.routes[state.index]?.name;
   const current = useMemo(() => {
-    return tabs.find((tab) => tab.routeName === currentRouteName)?.key ?? 'ai-assistant';
+    return tabs.find((tab) => tab.routeName === currentRouteName)?.key ?? 'home';
   }, [currentRouteName]);
 
   if (currentRouteName && hiddenTabBarRouteNames.has(currentRouteName)) {
@@ -349,33 +337,34 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     alignItems: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     zIndex: 60,
   },
   shell: {
     height: 64,
-    borderRadius: 32,
+    borderRadius: 30,
     borderWidth: 1,
     flexDirection: 'row',
     alignItems: 'center',
     overflow: 'hidden',
     shadowColor: '#000000',
-    shadowOpacity: 0.18,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 10,
+    shadowOpacity: 0.2,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
   },
   activeIsland: {
     position: 'absolute',
     left: 0,
-    top: 5,
-    height: 54,
-    borderRadius: 27,
-    shadowColor: '#2976F4',
-    shadowOpacity: 0.35,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 6,
+    top: 4,
+    height: 56,
+    borderRadius: 28,
+    borderWidth: 0,
+    shadowColor: '#0B1957',
+    shadowOpacity: 0.32,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 8,
   },
   tab: {
     height: 58,
@@ -385,20 +374,24 @@ const styles = StyleSheet.create({
   },
   iconHalo: {
     width: 32,
-    height: 28,
+    height: 29,
+    borderRadius: 15,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  iconHaloActive: {
+    backgroundColor: 'transparent',
   },
   label: {
     width: '100%',
     textAlign: 'center',
-    fontSize: 9.5,
-    lineHeight: 12,
-    fontWeight: '700',
+    fontSize: 8.8,
+    lineHeight: 11,
+    fontWeight: '800',
   },
   labelActive: {
-    fontSize: 10,
-    lineHeight: 13,
+    fontSize: 9.6,
+    lineHeight: 12,
     fontWeight: '900',
   },
 });
