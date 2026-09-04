@@ -1,0 +1,47 @@
+workflows:
+  ios-release:
+    name: LAD App 2 - iOS Production Release
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      node: 20.18.0
+      xcode: 16.0
+      cocoapods: default
+      vars:
+        BUNDLE_ID: "com.company.mrlad"
+        APP_STORE_APPLE_ID: "your-apple-id@email.com"
+      groups:
+        - appstore_credentials # Define APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_PRIVATE_KEY
+    scripts:
+      - name: Install npm dependencies
+        script: |
+          npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+      - name: Expo Prebuild (Generate iOS Native Project)
+        script: |
+          npx expo prebuild --platform ios --clean
+      - name: Set up code signing settings on Xcode project
+        script: |
+          xcode-project use-profiles
+      - name: Install CocoaPods
+        script: |
+          cd ios && pod install && cd ..
+      - name: Build iOS IPA
+        script: |
+          xcode-project build-ipa \
+            --workspace "ios/ladapp2.xcworkspace" \
+            --scheme "ladapp2" \
+            --config Release
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        expire_build_submitted_for_testing: false
+      email:
+        recipients:
+          - user@example.com
+        notify:
+          success: true
+          failure: true

@@ -1,0 +1,376 @@
+import { expireAuthSessionForUnauthorizedRequest, getActiveTenantId, getAuthToken } from './storage';
+import { Platform } from 'react-native';
+
+export type ApiResponse<T = unknown> = {
+  data: T;
+  status: number;
+  statusText: string;
+};
+
+export type RequestOptions = {
+  headers?: Record<string, string>;
+  params?: Record<string, unknown>;
+};
+
+export class ApiRequestError extends Error {
+  status: number;
+  statusText: string;
+  data: unknown;
+
+  constructor(message: string, status: number, statusText: string, data: unknown) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.statusText = statusText;
+    this.data = data;
+  }
+}
+
+export const isApiRequestError = (error: unknown): error is ApiRequestError =>
+  error instanceof ApiRequestError
+  || Boolean(error && typeof error === 'object' && 'status' in error && 'data' in error);
+
+// Native builds hit the deployed backend directly with a single bare fetch — unlike
+// the web dev flow, which is fronted by scripts/auth-proxy.js and its own retry loop.
+// On a weak connection that made every transient hiccup surface immediately as a
+// user-facing "Agent call failed". Retry with a per-attempt timeout so a flaky
+// connection gets the same resilience the web proxy already provides.
+const FETCH_TIMEOUT_MS = 20000;
+const FETCH_RETRIES = 2;
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const fetchWithRetry = async (url: string, init: RequestInit): Promise<Response> => {
+  let lastError: unknown;
+  const method = String(init.method || 'GET').toUpperCase();
+  // Retrying a mutating request can repeat a write after the server committed it
+  // but the response was lost. Campaign creation was especially vulnerable: the
+  // retry then received a legitimate duplicate-name response for its own first
+  // request. Only automatically retry methods that are safe to replay.
+  const maxRetries = ['GET', 'HEAD', 'OPTIONS'].includes(method) ? FETCH_RETRIES : 0;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries) {
+        await wait(400 * (attempt + 1));
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  throw lastError;
+};
+
+export const API_URL =
+  process.env.EXPO_PUBLIC_BACKEND_URL ||
+  process.env.EXPO_PUBLIC_API_URL ||
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  'https://lad-backend-develop-160078175457.us-central1.run.app';
+
+export const AUTH_API_URL =
+  process.env.EXPO_PUBLIC_AUTH_BACKEND_URL ||
+  process.env.AUTH_BACKEND_URL ||
+  process.env.NEXT_PUBLIC_AUTH_BACKEND_URL ||
+  'https://lad-backend-develop-160078175457.us-central1.run.app';
+
+const DEFAULT_WEB_API_URL = 'http://localhost:8091';
+const isLocalUrl = (url: string) => /^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(url);
+
+export const WEB_API_URL = process.env.EXPO_PUBLIC_WEB_API_URL || DEFAULT_WEB_API_URL;
+export const WEB_API_FALLBACK_URLS = Array.from(
+  new Set(
+    [
+      process.env.EXPO_PUBLIC_WEB_API_URL,
+      DEFAULT_WEB_API_URL,
+      'http://localhost:8091',
+      'http://localhost:8092',
+    ].filter((value): value is string => Boolean(value)),
+  ),
+);
+export const WEB_AUTH_API_FALLBACK_URLS = Array.from(
+  new Set(
+    [
+      process.env.EXPO_PUBLIC_WEB_API_URL,
+      DEFAULT_WEB_API_URL,
+      'http://localhost:8091',
+      'http://localhost:8092',
+    ].filter((value): value is string => Boolean(value)),
+  ),
+);
+
+// On web every request otherwise has to rediscover which local candidate port
+// the auth proxy landed on (start-web.js shifts it up when 8091 is taken) by
+// trying each candidate with the full request timeout — 20s+ per dead port,
+// on every single call. Probe /__health (near-instant if a proxy is actually
+// listening) once per session instead, and cache the winner.
+let resolvedWebApiUrl: string | null = null;
+let webApiProbeInFlight: Promise<string | null> | null = null;
+
+const probeCandidates = async (candidates: string[]): Promise<string | null> => {
+  for (const candidate of candidates) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+      const response = await fetch(`${candidate.replace(/\/+$/, '')}/__health`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (response.ok) return candidate;
+    } catch {
+      // Not this one — try the next candidate.
+    }
+  }
+  return null;
+};
+
+const resolveWebApiUrl = async (candidates: string[]): Promise<string> => {
+  if (resolvedWebApiUrl) {
+    return resolvedWebApiUrl;
+  }
+
+  // `npm run web` starts the auth proxy and the Expo web server in parallel, so
+  // the very first request can race the proxy still binding its port. Only cache
+  // a successful discovery — an all-candidates-failed result is never memoized,
+  // so a proxy that's merely still starting up gets picked up by the next call
+  // instead of silently degrading to the slow per-request fallback for the
+  // whole session.
+  if (!webApiProbeInFlight) {
+    webApiProbeInFlight = probeCandidates(candidates).finally(() => {
+      webApiProbeInFlight = null;
+    });
+  }
+
+  const found = await webApiProbeInFlight;
+  if (found) {
+    resolvedWebApiUrl = found;
+    return found;
+  }
+
+  return candidates[0];
+};
+
+export const RESOLVED_API_URL =
+  Platform.OS === 'web'
+    ? WEB_API_URL
+    : API_URL;
+
+export const RESOLVED_AUTH_API_URL =
+  Platform.OS === 'web'
+    ? WEB_API_URL
+    : AUTH_API_URL;
+
+export const buildApiUrl = (path: string, baseURL = API_URL) => {
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+
+  const base = baseURL.replace(/\/+$/, '');
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+
+  return `${base}${normalizedPath}`;
+};
+
+class ApiClient {
+  private baseURL: string;
+
+  constructor(baseURL = API_URL) {
+    this.baseURL = baseURL;
+  }
+
+  private async getBaseUrls(path: string, options?: RequestOptions) {
+    // On mobile, route personal-whatsapp directly to WAPA service.
+    // Web app runs behind the Next.js universal feature proxy which handles this in route.ts.
+    if (Platform.OS !== 'web') {
+      if (path.startsWith('/api/personal-whatsapp/')) {
+        const wapaUrl = process.env.EXPO_PUBLIC_WAPA_SERVICE_URL || 'https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app';
+        return [wapaUrl];
+      }
+      if (path.startsWith('/api/whatsapp-conversations/')) {
+        const channel = options?.params?.channel || (options?.headers && (options.headers['x-whatsapp-channel'] || options.headers['X-WhatsApp-Channel']));
+        if (channel === 'personal') {
+          const wapaUrl = process.env.EXPO_PUBLIC_WAPA_SERVICE_URL || 'https://lad-wapa-comms-develop-asia-160078175457.asia-south1.run.app';
+          return [wapaUrl];
+        }
+      }
+    }
+
+    if (Platform.OS !== 'web') {
+      return [path.startsWith('/api/auth/') ? RESOLVED_AUTH_API_URL : this.baseURL];
+    }
+
+    const candidates = path.startsWith('/api/auth/') ? WEB_AUTH_API_FALLBACK_URLS : WEB_API_FALLBACK_URLS;
+    if (candidates.length <= 1) {
+      return candidates;
+    }
+
+    const resolved = await resolveWebApiUrl(candidates);
+    return [resolved, ...candidates.filter((candidate) => candidate !== resolved)];
+  }
+
+  private buildUrl(path: string, baseURL: string, options?: RequestOptions) {
+    const url = new URL(buildApiUrl(path, baseURL));
+
+    if (options?.params) {
+      Object.entries(options.params).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) {
+          url.searchParams.append(key, String(value));
+        }
+      });
+    }
+
+    return url.toString();
+  }
+
+  private async executeFetch(
+    method: string,
+    path: string,
+    body?: unknown,
+    options?: RequestOptions,
+  ) {
+    const token = await getAuthToken();
+    const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
+    const headers: Record<string, string> = {
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+      ...options?.headers,
+    };
+
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    // Resolve tenant from the JWT (authoritative), matching LAD-Frontend-2 which
+    // relies entirely on the token for tenant scoping. Sending a stale value from
+    // cached profile data here scoped calls/logs to the wrong tenant.
+    const tenantId = await getActiveTenantId();
+    if (tenantId && !headers['X-Tenant-ID']) {
+      headers['X-Tenant-ID'] = tenantId;
+    }
+
+    const requestBody = body ? (isFormData ? body as BodyInit : JSON.stringify(body)) : undefined;
+    const baseUrls = await this.getBaseUrls(path, options);
+    let response: Response | undefined;
+    let lastNetworkError: unknown;
+
+    for (const baseURL of baseUrls) {
+      try {
+        response = await fetchWithRetry(this.buildUrl(path, baseURL, options), {
+          method,
+          headers,
+          credentials: 'include',
+          body: requestBody,
+        });
+        break;
+      } catch (error) {
+        lastNetworkError = error;
+        if (Platform.OS !== 'web' || !isLocalUrl(baseURL)) {
+          throw error;
+        }
+      }
+    }
+
+    if (!response) {
+      if (Platform.OS === 'web') {
+        throw new Error(
+          'Unable to reach the local LAD API proxy. Start the web app with `npm run web` so backend requests are proxied without browser CORS errors.',
+        );
+      }
+
+      throw lastNetworkError instanceof Error ? lastNetworkError : new Error('Network request failed.');
+    }
+
+    return { response, requestToken: token };
+  }
+
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    options?: RequestOptions,
+  ): Promise<ApiResponse<T>> {
+    const { response, requestToken } = await this.executeFetch(method, path, body, options);
+
+    const contentType = response.headers.get('content-type') || '';
+    const data = contentType.includes('application/json')
+      ? await response.json().catch(() => null)
+      : await response.text().catch(() => null);
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        await expireAuthSessionForUnauthorizedRequest(path, requestToken);
+      }
+
+      const dataRecord = data && typeof data === 'object' ? data as Record<string, unknown> : null;
+      const primaryMessage = dataRecord
+        ? dataRecord.message || dataRecord.error || dataRecord.detail || dataRecord.reason
+        : null;
+      const secondaryDetails = dataRecord
+        ? dataRecord.details || dataRecord.errors || dataRecord.cause
+        : null;
+      const detailsText = secondaryDetails
+        ? typeof secondaryDetails === 'string'
+          ? secondaryDetails
+          : JSON.stringify(secondaryDetails)
+        : '';
+      const message = primaryMessage
+        ? `${String(primaryMessage)}${detailsText ? `: ${detailsText}` : ''}`
+        : `HTTP ${response.status}: ${response.statusText}`;
+
+      throw new ApiRequestError(message, response.status, response.statusText, data);
+    }
+
+    return {
+      data: data as T,
+      status: response.status,
+      statusText: response.statusText,
+    };
+  }
+
+  get<T = unknown>(path: string, options?: RequestOptions) {
+    return this.request<T>('GET', path, undefined, options);
+  }
+
+  post<T = unknown>(path: string, body?: unknown, options?: RequestOptions) {
+    return this.request<T>('POST', path, body, options);
+  }
+
+  put<T = unknown>(path: string, body?: unknown, options?: RequestOptions) {
+    return this.request<T>('PUT', path, body, options);
+  }
+
+  patch<T = unknown>(path: string, body?: unknown, options?: RequestOptions) {
+    return this.request<T>('PATCH', path, body, options);
+  }
+
+  delete<T = unknown>(path: string, options?: RequestOptions) {
+    return this.request<T>('DELETE', path, undefined, options);
+  }
+
+  setBaseURL(url: string) {
+    this.baseURL = url;
+  }
+
+  getBaseURL() {
+    return this.baseURL;
+  }
+}
+
+export const apiClient = new ApiClient(RESOLVED_API_URL);
+
+export const apiGet = <T = unknown>(path: string, options?: RequestOptions) =>
+  apiClient.get<T>(path, options);
+export const apiPost = <T = unknown>(path: string, body?: unknown, options?: RequestOptions) =>
+  apiClient.post<T>(path, body, options);
+export const apiPut = <T = unknown>(path: string, body?: unknown, options?: RequestOptions) =>
+  apiClient.put<T>(path, body, options);
+export const apiPatch = <T = unknown>(path: string, body?: unknown, options?: RequestOptions) =>
+  apiClient.patch<T>(path, body, options);
+export const apiDelete = <T = unknown>(path: string, options?: RequestOptions) =>
+  apiClient.delete<T>(path, options);
+
+export type { ApiClient };
