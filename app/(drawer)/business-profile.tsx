@@ -1,43 +1,39 @@
-import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   View,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  TextInput,
-  Alert,
   Image,
-  Modal,
+  TextInput,
+  ActivityIndicator,
+  Platform,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  AlertTriangle,
   Building2,
-  CheckCircle2,
-  Clock,
   Globe,
   Mail,
-  MapPin,
   Phone,
-  Save,
-  Target,
+  MapPin,
   Upload,
+  CheckCircle2,
+  AlertCircle,
+  Clock,
+  Target,
   Users,
-  X,
+  Save,
 } from 'lucide-react-native';
 import * as DocumentPicker from 'expo-document-picker';
-import { BusinessHoursModal, BusinessHoursPayload } from '@/components/features/BusinessHoursModal';
-import Theme from '@/constants/theme';
-import { Typography } from '@/components/ui/Typography';
+import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { IOSCollapsibleScrollView } from '@/components/ui/IOSCollapsibleScrollView';
 import { GlassCard } from '@/components/ui/GlassCard';
+import { Typography } from '@/components/ui/Typography';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
+import Theme from '@/constants/theme';
 import { useAppTheme } from '@/src/theme/appTheme';
-import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 import {
   getBusinessProfile,
   saveBusinessProfile,
@@ -46,6 +42,7 @@ import {
   emptyBusinessProfile,
 } from '@/src/services/businessProfile';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
+import { BusinessHoursModal, BusinessHoursPayload } from '@/components/features/BusinessHoursModal';
 
 const PROFILE_CACHE_KEY = 'drawer.business-profile';
 
@@ -54,14 +51,24 @@ const COMPANY_SIZES = ['1–10', '11–50', '51–200', '201–500', '501–1000
 const WEB_INPUT_RESET = Platform.OS === 'web' ? { outlineStyle: 'none' as any } : undefined;
 const ICP_SECTION = {
   title: 'Ideal Customer Profile (ICP)',
-  subtitle: "Who you sell to. The ICP chat writes these.",
+  subtitle: 'Who you sell to. The ICP chat writes these.',
   keys: ['icpJobTitles', 'icpCompanySize', 'icpLocations', 'icpPainPoints', 'companyDescription'] as const,
 };
 
 const CAMPAIGN_SECTION = {
   title: 'AI & Campaign Settings',
   subtitle: 'Help the AI personalise your outreach and campaigns.',
-  keys: ['valueProposition', 'productsServices', 'targetCustomers', 'sampleConversation', 'operatingHours', 'timezone', 'geographicFocus', 'competitors', 'campaignTone'] as const,
+  keys: [
+    'valueProposition',
+    'productsServices',
+    'targetCustomers',
+    'sampleConversation',
+    'operatingHours',
+    'timezone',
+    'geographicFocus',
+    'competitors',
+    'campaignTone',
+  ] as const,
 };
 
 const FIELD_META: Record<string, { label: string; multiline?: boolean; placeholder?: string }> = {
@@ -111,7 +118,6 @@ export default function BusinessProfileScreen() {
   }, []);
 
   useEffect(() => {
-    // Always refresh from API; cached value shown instantly above
     void loadData();
   }, [loadData]);
 
@@ -141,116 +147,102 @@ export default function BusinessProfileScreen() {
         type: ['image/jpeg', 'image/png', 'image/webp', 'image/*'],
         copyToCacheDirectory: true,
       });
-      if (result.canceled || !result.assets?.length) return;
+
+      if (result.canceled || !result.assets?.[0]) return;
       const asset = result.assets[0];
-      setLogoError(null);
+
       setLogoUploading(true);
-      try {
-        const url = await uploadCompanyLogo(
-          asset.uri,
-          asset.mimeType || 'image/jpeg',
-          asset.name || 'company-logo.jpg',
-        );
-        setProfile((prev) => ({ ...prev, logoUrl: url }));
-      } catch (err) {
-        setProfile((prev) => ({ ...prev, logoUrl: asset.uri }));
-        setLogoError(err instanceof Error ? err.message : 'Upload failed');
-      } finally {
-        setLogoUploading(false);
-      }
-    } catch {
-      Alert.alert('Error', 'Could not open image picker.');
+      setLogoError(null);
+
+      const url = await uploadCompanyLogo(
+        asset.uri,
+        asset.mimeType ?? 'image/jpeg',
+        asset.name ?? 'company-logo.jpg',
+      );
+      set('logoUrl', url);
+    } catch (err: any) {
+      setLogoError(err?.message || 'Logo upload failed');
+    } finally {
+      setLogoUploading(false);
     }
   };
 
   const saveHours = (payload: BusinessHoursPayload, summary: string) => {
-    setProfile((prev) => ({ ...prev, operatingHours: summary, businessHoursPayload: payload }));
+    setProfile((prev) => ({
+      ...prev,
+      operatingHours: summary,
+      businessHoursPayload: payload,
+    }));
     setHoursModal(false);
   };
 
   const bg = appTheme.background;
   const surface = appTheme.surface;
+  const inputBg = appTheme.input;
   const border = appTheme.border;
   const borderSoft = appTheme.borderSoft;
   const text = appTheme.text;
   const muted = appTheme.muted;
   const primary = appTheme.primaryAccent;
-  const inputBg = appTheme.input;
-
-  if (loading) {
-    return (
-      <KeyboardAvoidingView
-        style={[styles.flex, { backgroundColor: bg }]}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <AnimatedScreen style={styles.flex}>
-          <ScrollView
-            contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 80 }]}
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={[styles.pageHeader, { alignItems: 'center' }]}>
-              <Typography variant="h1" color={text} style={[styles.pageTitle, { textAlign: 'center' }]}>Business Profile</Typography>
-              <Typography variant="body" color={muted} style={{ textAlign: 'center' }}>
-                Define your company to improve AI personalisation.
-              </Typography>
-            </View>
-            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 300 }}>
-              <ActivityIndicator size="large" color={primary} />
-            </View>
-          </ScrollView>
-        </AnimatedScreen>
-      </KeyboardAvoidingView>
-    );
-  }
 
   return (
     <KeyboardAvoidingView
-      style={[styles.flex, { backgroundColor: bg }]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={[styles.flex, { backgroundColor: bg }]}
     >
-      <AnimatedScreen style={styles.flex}>
-        <ScrollView
-          contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 80 }]}
-          showsVerticalScrollIndicator={false}
+      <AnimatedScreen style={[styles.flex, { backgroundColor: bg }]}>
+        <IOSCollapsibleScrollView
+          title="Business Profile"
+          subtitle="Manage your company information, brand details, and operating hours."
+          rightElement={
+            <TouchableOpacity
+              onPress={handleSave}
+              disabled={saving}
+              activeOpacity={0.8}
+              style={[styles.headerSaveBtn, { backgroundColor: primary }]}
+            >
+              {saving ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Save color="#fff" size={17} />
+              )}
+            </TouchableOpacity>
+          }
+          contentContainerStyle={[
+            styles.scroll,
+            { paddingBottom: insets.bottom + 90 },
+          ]}
+          keyboardShouldPersistTaps="handled"
         >
-          {/* Header */}
-          <View style={styles.pageHeader}>
-            <Typography variant="h1" color={text} style={styles.pageTitle}>Business Profile</Typography>
-            <Typography variant="body" color={muted}>
-              Define your company to improve AI personalisation.
-            </Typography>
-          </View>
-
-          {/* Banners */}
-          {!!error && (
-            <View style={[styles.banner, { backgroundColor: '#fff1f2', borderColor: '#fecdd3' }]}>
-              <AlertTriangle color={Theme.colors.error} size={16} />
-              <Typography variant="bodySmall" color={Theme.colors.error} style={styles.bold}>{error}</Typography>
-              <TouchableOpacity onPress={() => setError(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <X color={Theme.colors.error} size={14} />
-              </TouchableOpacity>
+          {/* Status banners */}
+          {saveSuccess && (
+            <View style={[styles.banner, { backgroundColor: '#10B98118', borderColor: '#10B98140' }]}>
+              <CheckCircle2 color="#10B981" size={16} />
+              <Typography variant="caption" color="#10B981" style={styles.bold}>
+                Profile saved successfully.
+              </Typography>
             </View>
           )}
-          {!!saveSuccess && (
-            <View style={[styles.banner, { backgroundColor: '#f0fdf4', borderColor: '#bbf7d0' }]}>
-              <CheckCircle2 color={Theme.colors.success} size={16} />
-              <Typography variant="bodySmall" color={Theme.colors.success} style={styles.bold}>
-                Profile saved!
+          {error && (
+            <View style={[styles.banner, { backgroundColor: '#EF444418', borderColor: '#EF444440' }]}>
+              <AlertCircle color="#EF4444" size={16} />
+              <Typography variant="caption" color="#EF4444" style={styles.bold}>
+                {error}
               </Typography>
             </View>
           )}
 
-          {/* ── CARD 1: COMPANY BASICS (logo, location, hours) ── */}
+          {/* ── CARD 1: LOGO & HOURS ── */}
           <View style={[styles.card, { backgroundColor: surface, borderColor: border }]}>
             <View style={styles.cardHead}>
               <Building2 color={primary} size={18} />
               <View style={styles.cardHeadText}>
-                <Typography variant="h4" color={text} style={styles.bold}>Company basics</Typography>
-                <Typography variant="caption" color={muted}>Logo, location, and operating hours.</Typography>
+                <Typography variant="h4" color={text} style={styles.bold}>Logo & Hours</Typography>
+                <Typography variant="caption" color={muted}>Brand assets and availability.</Typography>
               </View>
             </View>
 
-            {/* Logo */}
+            {/* Logo Row */}
             <View style={[styles.logoRow, { borderTopColor: borderSoft }]}>
               <TouchableOpacity
                 onPress={pickLogo}
@@ -307,7 +299,7 @@ export default function BusinessProfileScreen() {
                   }}
                   placeholder="Dubai, UAE"
                   placeholderTextColor={muted}
-                  style={[styles.textInput, { color: text }]}
+                  style={[styles.textInput, WEB_INPUT_RESET, { color: text }]}
                 />
               </View>
             </View>
@@ -468,7 +460,7 @@ export default function BusinessProfileScreen() {
             <Button label="Save Profile" onPress={handleSave} loading={saving}
               leftIcon={<Save color="#fff" size={18} />} />
           </View>
-        </ScrollView>
+        </IOSCollapsibleScrollView>
       </AnimatedScreen>
 
       <BusinessHoursModal
@@ -526,10 +518,15 @@ function InfoRow({
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  headerSaveBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   loader: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  scroll: { paddingHorizontal: 16, paddingTop: 16 },
-  pageHeader: { marginBottom: 20 },
-  pageTitle: { fontSize: 36, lineHeight: 42, fontWeight: '800' },
+  scroll: { paddingHorizontal: 16, paddingTop: 8 },
   bold: { fontWeight: '600' },
 
   banner: {
@@ -579,12 +576,4 @@ const styles = StyleSheet.create({
   sectionHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginBottom: Theme.spacing.md },
   multiline: { minHeight: 80, paddingTop: 10 },
   saveWrap: { marginTop: 24, marginBottom: 24 },
-
-  // Modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
-  modalSheet: { borderTopLeftRadius: 20, borderTopRightRadius: 20, borderWidth: 1, overflow: 'hidden' },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1 },
-  modalBody: { padding: 20, gap: 4 },
-  modalActions: { flexDirection: 'row', gap: 12, marginTop: 16 },
-  modalBtn: { flex: 1, height: 48, borderWidth: 1, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
 });

@@ -2,11 +2,12 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ArrowLeft, Inbox, RefreshCw, Send, Users, Wifi } from 'lucide-react-native';
+import { Inbox, RefreshCw, Send, Users, Wifi } from 'lucide-react-native';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Badge } from '@/components/ui/Badge';
 import { Typography } from '@/components/ui/Typography';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { IOSCollapsibleScrollView } from '@/components/ui/IOSCollapsibleScrollView';
 import { CampaignStatusStepper } from '@/components/features/CampaignStatusStepper';
 import Theme from '@/constants/theme';
 import { useAppTheme } from '@/src/theme/appTheme';
@@ -106,31 +107,41 @@ export default function CampaignDetailScreen() {
 
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
-      <View style={[styles.header, { paddingTop: insets.top + 12, borderBottomColor: appTheme.border }]}>
-        <TouchableOpacity onPress={() => (router.canGoBack?.() ? router.back() : router.replace('/(drawer)/campaigns' as never))} style={styles.backButton} activeOpacity={0.72}>
-          <ArrowLeft color={appTheme.text} size={22} />
-        </TouchableOpacity>
-        <View style={styles.headerTitleBlock}>
-          <Typography variant="h4" numberOfLines={1}>{overview?.campaign.name || 'Campaign'}</Typography>
-          {overview ? (
-            <View style={styles.headerBadgeRow}>
-              <Badge label={overview.campaign.status.toUpperCase()} variant={active ? 'success' : overview.campaign.status.toLowerCase() === 'paused' ? 'warning' : 'default'} />
-              <View style={styles.liveTag}>
-                <Wifi color={appTheme.primaryAccent} size={12} />
-                <Typography variant="caption" color={appTheme.primaryAccent} style={styles.liveTagText}>Live</Typography>
-              </View>
-            </View>
-          ) : null}
-        </View>
-        <TouchableOpacity onPress={() => void load(true)} disabled={refreshing || loading} style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}>
-          {refreshing ? <ActivityIndicator color={appTheme.primaryAccent} size="small" /> : <RefreshCw color={appTheme.primaryAccent} size={18} />}
-        </TouchableOpacity>
-      </View>
-
-      <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 40 }]}
-        showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void load(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
+      <IOSCollapsibleScrollView
+        title={overview?.campaign.name || 'Campaign'}
+        subtitle="Live outreach performance and lead status"
+        onBack={() => (router.canGoBack?.() ? router.back() : router.replace('/(drawer)/campaigns' as never))}
+        rightElement={
+          <View style={styles.rightActions}>
+            {overview ? (
+              <Badge
+                label={overview.campaign.status.toUpperCase()}
+                variant={active ? 'success' : overview.campaign.status.toLowerCase() === 'paused' ? 'warning' : 'default'}
+              />
+            ) : null}
+            <TouchableOpacity
+              onPress={() => void load(true)}
+              disabled={refreshing || loading}
+              activeOpacity={0.8}
+              style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+            >
+              {refreshing ? (
+                <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+              ) : (
+                <RefreshCw color={appTheme.primaryAccent} size={17} />
+              )}
+            </TouchableOpacity>
+          </View>
+        }
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void load(true)}
+            tintColor={appTheme.primaryAccent}
+            colors={[appTheme.primaryAccent]}
+          />
+        }
       >
         {error ? (
           <GlassCard style={styles.messageCard}>
@@ -204,24 +215,18 @@ export default function CampaignDetailScreen() {
             </GlassCard>
           </>
         )}
-      </ScrollView>
+      </IOSCollapsibleScrollView>
     </AnimatedScreen>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
+  rightActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Theme.spacing.md,
-    paddingHorizontal: Theme.spacing.lg,
-    paddingBottom: Theme.spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 8,
   },
-  backButton: { padding: 4 },
-  headerTitleBlock: { flex: 1, gap: 4 },
-  headerBadgeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   refreshButton: {
     width: 36,
     height: 36,
@@ -232,7 +237,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     paddingHorizontal: Theme.spacing.lg,
-    paddingTop: Theme.spacing.lg,
+    paddingTop: Theme.spacing.md,
     gap: Theme.spacing.md,
   },
   loader: { marginTop: 60 },

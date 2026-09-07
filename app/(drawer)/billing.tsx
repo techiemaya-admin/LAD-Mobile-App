@@ -1,4 +1,3 @@
-import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -11,13 +10,22 @@ import {
   StyleSheet,
   TextInput,
   TouchableOpacity,
-  useWindowDimensions,
   View,
+  useWindowDimensions,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
+  AlertCircle,
+  ArrowDownLeft,
+  ArrowUpRight,
   BarChart3,
+  Bot,
   Brain,
+  Calendar,
   Check,
+  CheckCircle2,
+  Clock,
+  Coins,
   CreditCard,
   MessageCircle,
   Phone,
@@ -29,6 +37,8 @@ import {
   X,
   Zap,
 } from 'lucide-react-native';
+import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { IOSCollapsibleScrollView } from '@/components/ui/IOSCollapsibleScrollView';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
@@ -45,7 +55,6 @@ import {
   getWalletUsageAnalytics,
 } from '@/src/services/settingsHub';
 import { useAppTheme } from '@/src/theme/appTheme';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 
 const VOICE_CALL_MINIMUM_CREDITS = 3;
@@ -72,6 +81,20 @@ type BillingCache = {
   usage: BillingUsageAnalytics;
 };
 const getBillingCacheKey = (range: BillingRange) => `drawer.billing.${range}`;
+
+const emptyBillingOverview = (): BillingOverview => ({
+  currentBalance: 0,
+  availableBalance: 0,
+  reservedBalance: 0,
+  currency: 'USD',
+  status: 'active',
+  planTier: 'starter',
+  monthlyUsage: 0,
+  totalSpent: 0,
+  transactions: [],
+  packages: [],
+  usageAnalytics: emptyBillingUsageAnalytics(),
+});
 
 const formatCredits = (value: number | undefined | null, maxDigits = 3) => {
   const numeric = Number(value || 0);
@@ -127,30 +150,38 @@ const FeatureIcon = ({ icon, color, size = 20 }: { icon: string; color: string; 
       return <MessageCircle color={color} size={size} />;
     case 'zap':
       return <Zap color={color} size={size} />;
+    case 'linkedin':
+      return <TrendingUp color={color} size={size} />;
     default:
-      return <BarChart3 color={color} size={size} />;
+      return <Coins color={color} size={size} />;
   }
 };
 
 export default function BillingScreen() {
-  const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
+  const appTheme = useAppTheme();
   const { width } = useWindowDimensions();
-  const [billing, setBilling] = useState<BillingOverview | null>(() => readScreenCache<BillingCache>(getBillingCacheKey('30d'))?.value.billing ?? null);
+
+  const [billing, setBilling] = useState<BillingOverview>(() => readScreenCache<BillingCache>(getBillingCacheKey('30d'))?.value.billing ?? emptyBillingOverview());
   const [usage, setUsage] = useState<BillingUsageAnalytics>(() => readScreenCache<BillingCache>(getBillingCacheKey('30d'))?.value.usage ?? emptyBillingUsageAnalytics());
   const [selectedRange, setSelectedRange] = useState<BillingRange>('30d');
+  const [selectedAmount, setSelectedAmount] = useState<number | null>(199);
+  const [customAmount, setCustomAmount] = useState<string>('');
+  const [showAddCreditsModal, setShowAddCreditsModal] = useState(false);
+  const [checkoutAmount, setCheckoutAmount] = useState<number | null>(null);
+  const [checkoutId, setCheckoutId] = useState<string | null>(null);
   const [loading, setLoading] = useState(() => !readScreenCache<BillingCache>(getBillingCacheKey('30d')));
   const [refreshing, setRefreshing] = useState(false);
-  const [checkoutId, setCheckoutId] = useState('');
-  const [checkoutAmount, setCheckoutAmount] = useState<number | null>(null);
   const [error, setError] = useState('');
-  const [showAddCreditsModal, setShowAddCreditsModal] = useState(false);
-  const [selectedAmount, setSelectedAmount] = useState<number | null>(99);
-  const [customAmount, setCustomAmount] = useState('');
 
-  const availableCredits = billing?.availableBalance ?? billing?.currentBalance ?? 0;
+  const handleSelectAmount = (value: number) => {
+    setSelectedAmount(value);
+    setCustomAmount('');
+  };
+
+  const availableCredits = billing.availableBalance ?? billing.currentBalance ?? 0;
+  const hasVoiceCallMinimum = availableCredits >= VOICE_CALL_MINIMUM_CREDITS;
   const neededForVoiceCall = Math.max(0, VOICE_CALL_MINIMUM_CREDITS - availableCredits);
-  const hasVoiceCallMinimum = neededForVoiceCall <= 0;
   const voiceProgress = Math.max(0, Math.min(100, (availableCredits / VOICE_CALL_MINIMUM_CREDITS) * 100));
   const selectedCheckoutAmount = customAmount.trim() ? Number.parseFloat(customAmount) : selectedAmount;
   const selectedPreset = PRESET_AMOUNTS.find((preset) => preset.value === selectedCheckoutAmount);
@@ -263,11 +294,6 @@ export default function BillingScreen() {
     }
   };
 
-  const handleSelectAmount = (amount: number) => {
-    setSelectedAmount(amount);
-    setCustomAmount('');
-  };
-
   const renderUsageFeature = (feature: BillingUsageAnalytics['topFeatures'][number], index: number) => {
     const iconName = getFeatureIconName(feature.icon, feature.featureName);
     const progress = Math.max(0, Math.min(100, feature.percentage || (usage.totalCreditsUsed ? (feature.totalCredits / usage.totalCreditsUsed) * 100 : 0)));
@@ -297,30 +323,40 @@ export default function BillingScreen() {
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: appTheme.background }]}>
-      <ScrollView
+    <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
+      <IOSCollapsibleScrollView
+        title="Billing & Plans"
+        subtitle="Live credits, usage, and wallet checkout"
+        rightElement={
+          <TouchableOpacity
+            style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+            onPress={() => loadBilling(true, selectedRange)}
+            disabled={refreshing || loading}
+          >
+            {refreshing || loading ? (
+              <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+            ) : (
+              <RefreshCw color={appTheme.primaryAccent} size={18} />
+            )}
+          </TouchableOpacity>
+        }
         contentContainerStyle={[
           styles.scrollContent,
           {
             maxWidth: contentMaxWidth,
             paddingHorizontal: contentPadding,
-            paddingTop: 12,
-            paddingBottom: insets.bottom + 40,
             width: '100%',
           },
         ]}
-        showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadBilling(true, selectedRange)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadBilling(true, selectedRange)}
+            tintColor={appTheme.primaryAccent}
+            colors={[appTheme.primaryAccent]}
+          />
+        }
       >
-        <View style={[styles.headerRow, isCompact && styles.headerRowCompact]}>
-          <View style={styles.headerText}>
-            <Typography variant="h1" color={appTheme.text} style={styles.pageTitle} numberOfLines={2}>Billing & Plans</Typography>
-            <Typography variant="bodySmall" color={appTheme.muted} numberOfLines={2}>Live credits, usage, and wallet checkout</Typography>
-          </View>
-          <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadBilling(true, selectedRange)} disabled={refreshing || loading}>
-            {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={18} />}
-          </TouchableOpacity>
-        </View>
 
         {error ? (
           <GlassCard style={styles.messageCard}>
@@ -544,7 +580,7 @@ export default function BillingScreen() {
             </View>
           </>
         )}
-      </ScrollView>
+      </IOSCollapsibleScrollView>
 
       <Modal visible={showAddCreditsModal} transparent animationType="fade" onRequestClose={() => setShowAddCreditsModal(false)}>
         <View style={styles.modalBackdrop}>
@@ -622,7 +658,7 @@ export default function BillingScreen() {
           </ScrollView>
         </View>
       </Modal>
-    </View>
+    </AnimatedScreen>
   );
 }
 
@@ -634,8 +670,6 @@ const styles = StyleSheet.create({
   scrollContent: {
     alignSelf: 'center',
     flexGrow: 1,
-    paddingTop: Theme.spacing.xl,
-    paddingBottom: Theme.spacing.xxxl,
   },
   headerRow: {
     flexDirection: 'row',
@@ -657,12 +691,10 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   refreshButton: {
-    width: 42,
-    height: 42,
-    borderRadius: Theme.radius.full,
-    backgroundColor: Theme.colors.surface,
-    borderWidth: 1,
-    borderColor: Theme.colors.border,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
   },

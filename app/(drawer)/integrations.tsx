@@ -1,4 +1,4 @@
-import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
+import { IOSSubscreenHeader, IOSCollapsibleScrollView } from '@/components/ui/IOSSubscreenHeader';
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { 
   View, 
@@ -56,6 +56,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { Badge } from '@/components/ui/Badge';
 import { useAppTheme } from '@/src/theme/appTheme';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { SkeletonBlock } from '@/components/ui/SkeletonLoader';
 import { getConnectedIntegrations } from '@/src/services/integration.service';
 import { ConnectedIntegration } from '@/src/types/chat';
@@ -234,6 +235,7 @@ export default function IntegrationsScreen() {
   const insets = useSafeAreaInsets();
   const appTheme = useAppTheme();
   const navigation = useNavigation();
+  const handleBottomTabScroll = useBottomTabScrollHandler();
   
   // View states: 'grid' or integration key
   const [activeView, setActiveView] = useState<string>('grid');
@@ -362,17 +364,16 @@ export default function IntegrationsScreen() {
   if (loading && activeView === 'grid') {
     return (
       <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
-        <View style={[styles.header, { marginTop: Theme.spacing.lg, alignItems: 'center' }]}>
-          <View style={[styles.headerText, { alignItems: 'center' }]}>
-            <Typography variant="h1" color={appTheme.text} style={[styles.pageTitle, { textAlign: 'center' }]}>Integrations</Typography>
-            <Typography variant="body" color={appTheme.muted} style={{ textAlign: 'center' }}>
-              Connect your favorite applications for seamless, automated workflows.
-            </Typography>
-          </View>
-        </View>
+        <IOSSubscreenHeader
+          title="Integrations"
+          subtitle="Connect your favorite applications for seamless, automated workflows."
+        />
         <ScrollView 
-          contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 80 }]}
+          contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 90 }]}
           showsVerticalScrollIndicator={false}
+          bounces={true}
+          overScrollMode="never"
+          scrollEventThrottle={16}
         >
           <View style={styles.grid}>
             {[1, 2, 3, 4].map((key) => (
@@ -466,8 +467,12 @@ export default function IntegrationsScreen() {
     return (
       <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
         <ScrollView 
-          contentContainerStyle={[styles.scrollContent, { paddingTop: Theme.spacing.lg, paddingBottom: insets.bottom + 80 }]}
+          contentContainerStyle={[styles.scrollContent, { paddingTop: 8, paddingBottom: insets.bottom + 90 }]}
           showsVerticalScrollIndicator={false}
+          bounces={true}
+          overScrollMode="never"
+          scrollEventThrottle={16}
+          onScroll={handleBottomTabScroll}
         >
           {renderDetailView()}
         </ScrollView>
@@ -478,29 +483,25 @@ export default function IntegrationsScreen() {
   // ── RENDER LIVE UI (Grid View) ─────────────────────────────────────────────
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
-      <ScrollView 
-        contentContainerStyle={[styles.scrollContent, { paddingTop: Theme.spacing.lg, paddingBottom: insets.bottom + 80 }]}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={styles.header}>
-          <View style={styles.headerText}>
-            <Typography variant="h1" color={appTheme.text} style={styles.pageTitle}>Integrations</Typography>
-            <Typography variant="body" color={appTheme.muted}>
-              Connect your favorite applications for seamless, automated workflows.
-            </Typography>
-          </View>
+      <IOSCollapsibleScrollView
+        title="Integrations"
+        subtitle="Connect your favorite applications for seamless, automated workflows."
+        rightElement={
           <TouchableOpacity 
             style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} 
             onPress={() => loadData(true)}
-            activeOpacity={0.7}
+            activeOpacity={0.8}
+            disabled={refreshing || loading}
           >
-            {refreshing ? (
+            {refreshing || loading ? (
               <ActivityIndicator size="small" color={appTheme.primaryAccent} />
             ) : (
-              <RefreshCw color={appTheme.primaryAccent} size={18} />
+              <RefreshCw color={appTheme.primaryAccent} size={17} />
             )}
           </TouchableOpacity>
-        </View>
+        }
+        contentContainerStyle={styles.scrollContent}
+      >
 
         {error && (
           <GlassCard style={[styles.messageCard, { borderColor: Theme.colors.error }]}>
@@ -610,7 +611,7 @@ export default function IntegrationsScreen() {
             );
           })}
         </View>
-      </ScrollView>
+      </IOSCollapsibleScrollView>
     </AnimatedScreen>
   );
 }

@@ -1,4 +1,4 @@
-import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
+import { IOSCollapsibleScrollView } from '@/components/ui/IOSCollapsibleScrollView';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -30,6 +30,7 @@ import {
 import { useAppTheme } from '@/src/theme/appTheme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 
 const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
@@ -61,6 +62,7 @@ const getPermissionLabels = (capabilities: string[]) =>
 export default function TeamScreen() {
   const appTheme = useAppTheme();
   const insets = useSafeAreaInsets();
+  const handleBottomTabScroll = useBottomTabScrollHandler();
   const { width } = useWindowDimensions();
   const isPhone = width < 520;
   const isSmallPhone = width < 380;
@@ -254,7 +256,7 @@ export default function TeamScreen() {
 
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
-      <IOSSubscreenHeader
+      <IOSCollapsibleScrollView
         title="Team Management"
         subtitle="Manage team members and granular permissions"
         rightElement={
@@ -278,10 +280,7 @@ export default function TeamScreen() {
             </TouchableOpacity>
           </View>
         }
-      />
-      <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingHorizontal: pagePadding, paddingTop: 12, paddingBottom: insets.bottom + 80 }]}
-        showsVerticalScrollIndicator={false}
+        contentContainerStyle={[styles.scrollContent, { paddingHorizontal: pagePadding }]}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadMembers(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
       >
         <View style={styles.contentMaxWidth}>
@@ -451,7 +450,7 @@ export default function TeamScreen() {
             })
           )}
         </View>
-      </ScrollView>
+      </IOSCollapsibleScrollView>
 
       <Modal visible={inviteModalVisible} transparent animationType="slide" onRequestClose={() => { setInviteModalVisible(false); resetInviteForm(); }}>
         <View style={styles.modalOverlay}>

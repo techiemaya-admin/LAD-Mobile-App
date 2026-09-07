@@ -1,8 +1,20 @@
-import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Linking, RefreshControl, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Linking,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { FileText, Mail, MessageCircle, Phone, RefreshCw } from 'lucide-react-native';
 import Theme from '@/constants/theme';
+import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { IOSCollapsibleScrollView } from '@/components/ui/IOSCollapsibleScrollView';
 import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/Button';
@@ -14,9 +26,13 @@ import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 const SUPPORT_CACHE_KEY = 'drawer.support';
 
 export default function SupportScreen() {
+  const insets = useSafeAreaInsets();
   const appTheme = useAppTheme();
   const user = useAuthStore((state) => state.user);
-  const [support, setSupport] = useState<SupportOverview | null>(() => readScreenCache<SupportOverview>(SUPPORT_CACHE_KEY)?.value ?? null);
+
+  const [support, setSupport] = useState<SupportOverview | null>(
+    () => readScreenCache<SupportOverview>(SUPPORT_CACHE_KEY)?.value ?? null,
+  );
   const [name, setName] = useState(user?.name || '');
   const [email, setEmail] = useState(user?.email || '');
   const [subject, setSubject] = useState('LAD app support request');
@@ -71,7 +87,9 @@ export default function SupportScreen() {
     } catch (err) {
       Alert.alert(
         'Support endpoint unavailable',
-        err instanceof Error ? `${err.message}\n\nYou can still email support directly.` : 'You can still email support directly.',
+        err instanceof Error
+          ? `${err.message}\n\nYou can still email support directly.`
+          : 'You can still email support directly.',
       );
     } finally {
       setSubmitting(false);
@@ -86,33 +104,57 @@ export default function SupportScreen() {
   };
 
   const options = [
-    { icon: <MessageCircle color="#FFFFFF" size={24} />, title: 'Support Status', desc: support?.statusLabel || 'Checking backend support status' },
-    { icon: <FileText color="#FFFFFF" size={24} />, title: 'Knowledge Base', desc: 'Read guides and workflow tutorials' },
-    { icon: <Phone color="#FFFFFF" size={24} />, title: 'Request a Call', desc: support?.responseTime || 'For enterprise customers' },
+    {
+      icon: <MessageCircle color="#FFFFFF" size={22} />,
+      title: 'Support Status',
+      desc: support?.statusLabel || 'Checking backend support status',
+    },
+    {
+      icon: <FileText color="#FFFFFF" size={22} />,
+      title: 'Knowledge Base',
+      desc: 'Read guides and workflow tutorials',
+    },
+    {
+      icon: <Phone color="#FFFFFF" size={22} />,
+      title: 'Request a Call',
+      desc: support?.responseTime || 'For enterprise customers',
+    },
   ];
 
   return (
-    <View style={[styles.container, { backgroundColor: appTheme.background }]}>
-      <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingTop: 12 }]}
-        showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadSupport(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
-      >
-        <View style={styles.header}>
-          <View style={styles.headerText}>
-            <Typography variant="h1" style={styles.headerTitle} numberOfLines={2}>How can we help?</Typography>
-            <Typography variant="bodyLarge" color={appTheme.muted} numberOfLines={3}>
-              Send a support request to our team or email the team directly.
-            </Typography>
-          </View>
-          <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadSupport(true)} disabled={refreshing || loading}>
-            {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={18} />}
+    <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
+      <IOSCollapsibleScrollView
+        title="Help & Support"
+        subtitle="Send a support request or email the team directly."
+        rightElement={
+          <TouchableOpacity
+            style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+            onPress={() => loadSupport(true)}
+            disabled={refreshing || loading}
+            activeOpacity={0.8}
+          >
+            {refreshing || loading ? (
+              <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+            ) : (
+              <RefreshCw color={appTheme.primaryAccent} size={17} />
+            )}
           </TouchableOpacity>
-        </View>
-
+        }
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadSupport(true)}
+            tintColor={appTheme.primaryAccent}
+            colors={[appTheme.primaryAccent]}
+          />
+        }
+      >
         {error ? (
           <GlassCard style={styles.messageCard}>
-            <Typography variant="body" color={Theme.colors.error}>{error}</Typography>
+            <Typography variant="body" color={Theme.colors.error}>
+              {error}
+            </Typography>
           </GlassCard>
         ) : null}
 
@@ -123,27 +165,72 @@ export default function SupportScreen() {
             </View>
             <View style={styles.cardContent}>
               <Typography variant="h4">{opt.title}</Typography>
-              <Typography variant="bodySmall" color={appTheme.muted} style={styles.optionDesc}>{opt.desc}</Typography>
+              <Typography variant="bodySmall" color={appTheme.muted} style={styles.optionDesc}>
+                {opt.desc}
+              </Typography>
             </View>
           </GlassCard>
         ))}
 
-        <Typography variant="h4" style={styles.sectionTitle}>Send Support Request</Typography>
+        <Typography variant="h4" style={styles.sectionTitle}>
+          Send Support Request
+        </Typography>
         <GlassCard style={styles.formCard}>
-          <Typography variant="caption" color={appTheme.muted}>Name</Typography>
-          <TextInput value={name} onChangeText={setName} style={[styles.input, { color: appTheme.text, backgroundColor: appTheme.input, borderColor: appTheme.border }]} placeholder="Your name" placeholderTextColor={appTheme.disabled} />
+          <Typography variant="caption" color={appTheme.muted}>
+            Name
+          </Typography>
+          <TextInput
+            value={name}
+            onChangeText={setName}
+            style={[
+              styles.input,
+              { color: appTheme.text, backgroundColor: appTheme.input, borderColor: appTheme.border },
+            ]}
+            placeholder="Your name"
+            placeholderTextColor={appTheme.disabled}
+          />
 
-          <Typography variant="caption" color={appTheme.muted}>Email</Typography>
-          <TextInput value={email} onChangeText={setEmail} style={[styles.input, { color: appTheme.text, backgroundColor: appTheme.input, borderColor: appTheme.border }]} placeholder="you@company.com" keyboardType="email-address" autoCapitalize="none" placeholderTextColor={appTheme.disabled} />
+          <Typography variant="caption" color={appTheme.muted}>
+            Email
+          </Typography>
+          <TextInput
+            value={email}
+            onChangeText={setEmail}
+            style={[
+              styles.input,
+              { color: appTheme.text, backgroundColor: appTheme.input, borderColor: appTheme.border },
+            ]}
+            placeholder="you@company.com"
+            keyboardType="email-address"
+            autoCapitalize="none"
+            placeholderTextColor={appTheme.disabled}
+          />
 
-          <Typography variant="caption" color={appTheme.muted}>Subject</Typography>
-          <TextInput value={subject} onChangeText={setSubject} style={[styles.input, { color: appTheme.text, backgroundColor: appTheme.input, borderColor: appTheme.border }]} placeholder="Support subject" placeholderTextColor={appTheme.disabled} />
+          <Typography variant="caption" color={appTheme.muted}>
+            Subject
+          </Typography>
+          <TextInput
+            value={subject}
+            onChangeText={setSubject}
+            style={[
+              styles.input,
+              { color: appTheme.text, backgroundColor: appTheme.input, borderColor: appTheme.border },
+            ]}
+            placeholder="Support subject"
+            placeholderTextColor={appTheme.disabled}
+          />
 
-          <Typography variant="caption" color={appTheme.muted}>Message</Typography>
+          <Typography variant="caption" color={appTheme.muted}>
+            Message
+          </Typography>
           <TextInput
             value={message}
             onChangeText={setMessage}
-            style={[styles.input, styles.messageInput, { color: appTheme.text, backgroundColor: appTheme.input, borderColor: appTheme.border }]}
+            style={[
+              styles.input,
+              styles.messageInput,
+              { color: appTheme.text, backgroundColor: appTheme.input, borderColor: appTheme.border },
+            ]}
             placeholder="Describe what is happening..."
             placeholderTextColor={appTheme.disabled}
             multiline
@@ -153,47 +240,29 @@ export default function SupportScreen() {
           <Button label="Submit Request" loading={submitting} onPress={handleSubmit} style={styles.submitButton} />
           <TouchableOpacity style={styles.emailButton} onPress={openMail}>
             <Mail color={appTheme.primaryAccent} size={18} />
-            <Typography variant="bodySmall" color={appTheme.primaryAccent} style={styles.emailText}>Email {support?.email || 'support@techiemaya.com'}</Typography>
+            <Typography variant="bodySmall" color={appTheme.primaryAccent} style={styles.emailText}>
+              Email {support?.email || 'support@techiemaya.com'}
+            </Typography>
           </TouchableOpacity>
         </GlassCard>
-      </ScrollView>
-    </View>
+      </IOSCollapsibleScrollView>
+    </AnimatedScreen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: Theme.colors.background,
   },
   scrollContent: {
-    padding: Theme.spacing.xl,
-    paddingBottom: Theme.spacing.xxxl,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    marginBottom: Theme.spacing.xl,
-    gap: Theme.spacing.md,
-  },
-  headerText: {
-    flex: 1,
-    minWidth: 0,
-  },
-  headerTitle: {
-    marginBottom: Theme.spacing.sm,
-    fontSize: 36,
-    lineHeight: 42,
-    fontWeight: '800',
+    paddingHorizontal: 16,
+    paddingTop: 8,
   },
   refreshButton: {
-    width: 42,
-    height: 42,
-    borderRadius: Theme.radius.full,
-    backgroundColor: Theme.colors.surface,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: Theme.colors.border,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -204,10 +273,9 @@ const styles = StyleSheet.create({
     marginBottom: Theme.spacing.md,
   },
   iconContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: Theme.colors.primaryLight,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: Theme.spacing.md,
@@ -228,12 +296,9 @@ const styles = StyleSheet.create({
   input: {
     minHeight: 46,
     borderWidth: 1,
-    borderColor: Theme.colors.border,
     borderRadius: Theme.radius.md,
     paddingHorizontal: Theme.spacing.md,
     paddingVertical: Theme.spacing.sm,
-    color: Theme.colors.text,
-    backgroundColor: Theme.colors.surface,
     marginTop: Theme.spacing.xs,
     marginBottom: Theme.spacing.md,
   },

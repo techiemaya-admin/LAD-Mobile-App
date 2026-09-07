@@ -7,6 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "app",
     "userInterfaceStyle": "automatic",
+    "privacy": "public",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
@@ -26,6 +27,9 @@
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Allow Mr LAD to access your location to support background fieldwork tracking and team coordination.",
         "NSFaceIDUsageDescription": "Allow Mr LAD to use Face ID for fast and secure biometric authentication.",
         "UIBackgroundModes": [
+          "audio",
+          "fetch",
+          "remote-notification",
           "audio",
           "fetch",
           "remote-notification"
@@ -49,9 +53,19 @@
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_IMAGES",
@@ -102,6 +116,12 @@
         "projectId": "74ec5d7f-a68d-484f-a9b6-e86dd6754c7e"
       }
     },
-    "owner": "davoodkhan"
+    "owner": "davoodkhan",
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/74ec5d7f-a68d-484f-a9b6-e86dd6754c7e"
+    }
   }
 }

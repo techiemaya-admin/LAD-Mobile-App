@@ -2,7 +2,7 @@ import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
 import { Badge } from '@/components/ui/Badge';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Typography } from '@/components/ui/Typography';
-import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
+import { IOSCollapsibleScrollView } from '@/components/ui/IOSCollapsibleScrollView';
 import Theme from '@/constants/theme';
 import { CampaignItem, CampaignStats, deleteCampaign, getCampaigns, getCampaignStats, restartCampaign, updateCampaignLifecycle } from '@/src/services/settingsHub';
 import { useAppTheme } from '@/src/theme/appTheme';
@@ -10,7 +10,7 @@ import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
 import { useRouter } from 'expo-router';
 import { MoreVertical, Pause, Play, Plus, RefreshCw, RotateCcw } from 'lucide-react-native';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Platform, Pressable, RefreshControl, StyleSheet, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
@@ -162,7 +162,7 @@ export default function CampaignsScreen() {
 
   return (
     <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
-      <IOSSubscreenHeader
+      <IOSCollapsibleScrollView
         title="Campaigns"
         subtitle="Track and manage your active marketing campaigns in real time."
         rightElement={
@@ -183,12 +183,8 @@ export default function CampaignsScreen() {
             </TouchableOpacity>
           </View>
         }
-      />
-
-      <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 80 }]}
-        showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadCampaigns(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
+        contentContainerStyle={styles.scrollContent}
       >
         <View style={styles.contentMaxWidth}>
           {openMenuId ? <Pressable style={styles.menuDismissLayer} onPress={closeCampaignMenu} /> : null}
@@ -335,7 +331,7 @@ export default function CampaignsScreen() {
             })
           )}
         </View>
-      </ScrollView>
+      </IOSCollapsibleScrollView>
     </AnimatedScreen>
   );
 }
@@ -372,9 +368,9 @@ const styles = StyleSheet.create({
     gap: Theme.spacing.sm,
   },
   refreshButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: Theme.colors.surface,
     borderWidth: 1,
     borderColor: Theme.colors.border,
@@ -382,14 +378,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   addButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: Theme.colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  scrollContent: { paddingHorizontal: Theme.spacing.xl, paddingTop: 0 },
+  scrollContent: {
+    paddingHorizontal: Theme.spacing.md,
+  },
   contentMaxWidth: {
     width: '100%',
     maxWidth: 1200,

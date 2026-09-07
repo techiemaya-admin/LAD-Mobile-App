@@ -1,6 +1,7 @@
-import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
+import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { IOSCollapsibleScrollView } from '@/components/ui/IOSCollapsibleScrollView';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, RefreshControl, StyleSheet, TouchableOpacity, View } from 'react-native';
 import { PhoneCall, RefreshCw, TrendingUp, Users, Wallet } from 'lucide-react-native';
 import Theme from '@/constants/theme';
 import { Typography } from '@/components/ui/Typography';
@@ -92,161 +93,156 @@ export default function AnalyticsScreen() {
   const maxChartValue = Math.max(...chartPoints.map((point) => point.value), 1);
 
   return (
-    <ScrollView
-      style={[styles.container, { backgroundColor: appTheme.background }]}
-      contentContainerStyle={[styles.content, { paddingTop: 12, paddingBottom: insets.bottom + 40 }]}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadAnalytics(true)} tintColor={appTheme.primaryAccent} colors={[appTheme.primaryAccent]} />}
-    >
-      <View style={styles.header}>
-        <View style={styles.headerText}>
-          <Typography variant="h1" style={styles.pageTitle} numberOfLines={2}>Analytics</Typography>
-          <Typography variant="body" color={appTheme.muted} numberOfLines={2}>Analyze performance and engagement metrics across your workspace.</Typography>
-        </View>
-        <TouchableOpacity style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]} onPress={() => loadAnalytics(true)} disabled={refreshing || loading}>
-          {refreshing || loading ? <ActivityIndicator color={appTheme.primaryAccent} /> : <RefreshCw color={appTheme.primaryAccent} size={18} />}
-        </TouchableOpacity>
-      </View>
-
-      {error ? (
-        <GlassCard style={styles.messageCard}>
-          <Typography variant="body" color={Theme.colors.error}>{error}</Typography>
-        </GlassCard>
-      ) : null}
-
-      {loading ? (
-        <ActivityIndicator color={appTheme.primaryAccent} style={styles.loader} />
-      ) : (
-        <>
-          <View style={styles.grid}>
-            <GlassCard style={styles.statCard}>
-              <TrendingUp color={Theme.colors.success} size={24} />
-              <Typography variant="h2" style={styles.statValue}>{formatPercent(analytics?.campaignStats.avgConnectionRate || 0)}</Typography>
-              <Typography variant="caption" color={appTheme.muted}>Connection Rate</Typography>
-            </GlassCard>
-            <GlassCard style={styles.statCard}>
-              <Users color={appTheme.primaryAccent} size={24} />
-              <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.campaignStats.activeCampaigns || 0)}</Typography>
-              <Typography variant="caption" color={appTheme.muted}>Active Campaigns</Typography>
-            </GlassCard>
-          </View>
-
-          <View style={styles.grid}>
-            <GlassCard style={styles.statCard}>
-              <PhoneCall color={Theme.colors.info} size={24} />
-              <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.answeredCalls || 0)}</Typography>
-              <Typography variant="caption" color={appTheme.muted}>Calls Answered</Typography>
-            </GlassCard>
-            <GlassCard style={styles.statCard}>
-              <Wallet color={Theme.colors.warning} size={24} />
-              <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.creditsUsed30d || 0)}</Typography>
-              <Typography variant="caption" color={appTheme.muted}>Credits 30d</Typography>
-            </GlassCard>
-          </View>
-
-          <GlassCard style={styles.chartCard}>
-            <Typography variant="h3" style={styles.cardTitle}>Activity Trend</Typography>
-            <View style={styles.chartLegendRow}>
-              <View style={styles.legendItem}>
-                <View style={[styles.legendDot, { backgroundColor: Theme.colors.primary }]} />
-                <Typography variant="caption" color={appTheme.muted}>
-                  {hasDailyBreakdown ? 'Connections by day' : 'Current totals by metric'}
-                </Typography>
-              </View>
-              <Typography variant="caption" color={appTheme.muted}>Max {formatNumber(maxChartValue)}</Typography>
-            </View>
-            <View style={styles.chartArea}>
-              <View style={styles.yAxisLabels}>
-                <Typography variant="caption" color={appTheme.muted}>{formatNumber(maxChartValue)}</Typography>
-                <Typography variant="caption" color={appTheme.muted}>0</Typography>
-              </View>
-              <View style={styles.mockChart}>
-                {chartPoints.map((point, index) => (
-                  <View key={`${point.label}-${index}`} style={styles.barColumn}>
-                    <Typography variant="caption" color={appTheme.muted} style={styles.barValue} numberOfLines={1}>
-                      {formatNumber(point.value)}
-                    </Typography>
-                    <View
-                      style={[
-                        styles.bar,
-                        {
-                          height: point.value > 0 ? Math.max(8, (point.value / maxChartValue) * 96) : 2,
-                          opacity: point.value > 0 ? 1 : 0.35,
-                        },
-                      ]}
-                    />
-                    <Typography variant="caption" color={appTheme.muted} style={styles.xAxisLabel} numberOfLines={1}>
-                      {point.label}
-                    </Typography>
-                  </View>
-                ))}
-              </View>
-            </View>
-            <Typography variant="caption" color={appTheme.muted} style={styles.axisTitle}>
-              Y-axis: count - X-axis: {hasDailyBreakdown ? 'date' : 'metric'}
-            </Typography>
+    <AnimatedScreen style={[styles.container, { backgroundColor: appTheme.background }]}>
+      <IOSCollapsibleScrollView
+        title="Analytics"
+        subtitle="Analyze performance and engagement metrics across your workspace."
+        rightElement={
+          <TouchableOpacity
+            style={[styles.refreshButton, { backgroundColor: appTheme.surface, borderColor: appTheme.border }]}
+            onPress={() => loadAnalytics(true)}
+            disabled={refreshing || loading}
+          >
+            {refreshing || loading ? (
+              <ActivityIndicator color={appTheme.primaryAccent} size="small" />
+            ) : (
+              <RefreshCw color={appTheme.primaryAccent} size={18} />
+            )}
+          </TouchableOpacity>
+        }
+        contentContainerStyle={styles.content}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadAnalytics(true)}
+            tintColor={appTheme.primaryAccent}
+            colors={[appTheme.primaryAccent]}
+          />
+        }
+      >
+        {error ? (
+          <GlassCard style={styles.messageCard}>
+            <Typography variant="body" color={Theme.colors.error}>{error}</Typography>
           </GlassCard>
+        ) : null}
 
-          <GlassCard style={styles.activityCard}>
-            <Typography variant="h3" style={styles.cardTitle}>Channel Performance</Typography>
-            {channelPerformance.map((item) => (
-              <View key={item.label} style={styles.channelRow}>
-                <Typography variant="body" style={styles.channelLabel}>{item.label}</Typography>
-                <View style={[styles.progressBg, { backgroundColor: appTheme.softSurface }]}>
-                  <View style={[styles.progressFill, { width: `${Math.min(item.value, 100)}%`, backgroundColor: item.color }]} />
-                </View>
-                <View style={styles.channelValue}>
-                  <Typography variant="bodySmall" style={styles.percentLabel}>{formatPercent(item.value)}</Typography>
-                  <Typography variant="caption" color={appTheme.muted} style={styles.countLabel}>
-                    {formatNumber(item.count)} / {formatNumber(item.total)}
+        {loading ? (
+          <ActivityIndicator color={appTheme.primaryAccent} style={styles.loader} />
+        ) : (
+          <>
+            <View style={styles.grid}>
+              <GlassCard style={styles.statCard}>
+                <TrendingUp color={Theme.colors.success} size={24} />
+                <Typography variant="h2" style={styles.statValue}>{formatPercent(analytics?.campaignStats.avgConnectionRate || 0)}</Typography>
+                <Typography variant="caption" color={appTheme.muted}>Connection Rate</Typography>
+              </GlassCard>
+              <GlassCard style={styles.statCard}>
+                <Users color={appTheme.primaryAccent} size={24} />
+                <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.campaignStats.activeCampaigns || 0)}</Typography>
+                <Typography variant="caption" color={appTheme.muted}>Active Campaigns</Typography>
+              </GlassCard>
+            </View>
+
+            <View style={styles.grid}>
+              <GlassCard style={styles.statCard}>
+                <PhoneCall color={Theme.colors.info} size={24} />
+                <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.answeredCalls || 0)}</Typography>
+                <Typography variant="caption" color={appTheme.muted}>Calls Answered</Typography>
+              </GlassCard>
+              <GlassCard style={styles.statCard}>
+                <Wallet color={Theme.colors.warning} size={24} />
+                <Typography variant="h2" style={styles.statValue}>{formatNumber(analytics?.creditsUsed30d || 0)}</Typography>
+                <Typography variant="caption" color={appTheme.muted}>Credits 30d</Typography>
+              </GlassCard>
+            </View>
+
+            <GlassCard style={styles.chartCard}>
+              <Typography variant="h3" style={styles.cardTitle}>Activity Trend</Typography>
+              <View style={styles.chartLegendRow}>
+                <View style={styles.legendItem}>
+                  <View style={[styles.legendDot, { backgroundColor: Theme.colors.primary }]} />
+                  <Typography variant="caption" color={appTheme.muted}>
+                    {hasDailyBreakdown ? 'Connections by day' : 'Current totals by metric'}
                   </Typography>
                 </View>
+                <Typography variant="caption" color={appTheme.muted}>Max {formatNumber(maxChartValue)}</Typography>
               </View>
-            ))}
-          </GlassCard>
+              <View style={styles.chartArea}>
+                <View style={styles.yAxisLabels}>
+                  <Typography variant="caption" color={appTheme.muted}>{formatNumber(maxChartValue)}</Typography>
+                  <Typography variant="caption" color={appTheme.muted}>0</Typography>
+                </View>
+                <View style={styles.mockChart}>
+                  {chartPoints.map((point, index) => (
+                    <View key={`${point.label}-${index}`} style={styles.barColumn}>
+                      <Typography variant="caption" color={appTheme.muted} style={styles.barValue} numberOfLines={1}>
+                        {formatNumber(point.value)}
+                      </Typography>
+                      <View
+                        style={[
+                          styles.bar,
+                          {
+                            height: point.value > 0 ? Math.max(8, (point.value / maxChartValue) * 96) : 2,
+                            opacity: point.value > 0 ? 1 : 0.35,
+                          },
+                        ]}
+                      />
+                      <Typography variant="caption" color={appTheme.muted} style={styles.xAxisLabel} numberOfLines={1}>
+                        {point.label}
+                      </Typography>
+                    </View>
+                  ))}
+                </View>
+              </View>
+              <Typography variant="caption" color={appTheme.muted} style={styles.axisTitle}>
+                Y-axis: count - X-axis: {hasDailyBreakdown ? 'date' : 'metric'}
+              </Typography>
+            </GlassCard>
 
-          {analytics?.topFeatures.length ? (
             <GlassCard style={styles.activityCard}>
-              <Typography variant="h3" style={styles.cardTitle}>Top Usage</Typography>
-              {analytics.topFeatures.map((feature) => (
-                <View key={feature.featureName} style={styles.usageRow}>
-                  <Typography variant="body">{feature.featureName}</Typography>
-                  <Typography variant="bodySmall" color={appTheme.muted}>{formatNumber(feature.credits)} credits</Typography>
+              <Typography variant="h3" style={styles.cardTitle}>Channel Performance</Typography>
+              {channelPerformance.map((item) => (
+                <View key={item.label} style={styles.channelRow}>
+                  <Typography variant="body" style={styles.channelLabel}>{item.label}</Typography>
+                  <View style={[styles.progressBg, { backgroundColor: appTheme.softSurface }]}>
+                    <View style={[styles.progressFill, { width: `${Math.min(item.value, 100)}%`, backgroundColor: item.color }]} />
+                  </View>
+                  <View style={styles.channelValue}>
+                    <Typography variant="bodySmall" style={styles.percentLabel}>{formatPercent(item.value)}</Typography>
+                    <Typography variant="caption" color={appTheme.muted} style={styles.countLabel}>
+                      {formatNumber(item.count)} / {formatNumber(item.total)}
+                    </Typography>
+                  </View>
                 </View>
               ))}
             </GlassCard>
-          ) : null}
-        </>
-      )}
-    </ScrollView>
+
+            {analytics?.topFeatures?.length ? (
+              <GlassCard style={styles.activityCard}>
+                <Typography variant="h3" style={styles.cardTitle}>Top Usage</Typography>
+                {analytics.topFeatures.map((feature) => (
+                  <View key={feature.featureName} style={styles.usageRow}>
+                    <Typography variant="body">{feature.featureName}</Typography>
+                    <Typography variant="bodySmall" color={appTheme.muted}>{formatNumber(feature.credits)} credits</Typography>
+                  </View>
+                ))}
+              </GlassCard>
+            ) : null}
+          </>
+        )}
+      </IOSCollapsibleScrollView>
+    </AnimatedScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Theme.colors.background },
-  content: { padding: Theme.spacing.xl, paddingBottom: 40 },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: Theme.spacing.lg,
-    gap: Theme.spacing.md,
-  },
-  headerText: {
-    flex: 1,
-    minWidth: 0,
-  },
-  pageTitle: {
-    fontSize: 36,
-    lineHeight: 42,
-    fontWeight: '800',
-  },
+  container: { flex: 1 },
+  content: { padding: Theme.spacing.xl },
   refreshButton: {
-    width: 42,
-    height: 42,
-    borderRadius: Theme.radius.full,
-    backgroundColor: Theme.colors.surface,
-    borderWidth: 1,
-    borderColor: Theme.colors.border,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
   },

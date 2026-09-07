@@ -1,4 +1,3 @@
-import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -12,6 +11,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   AlertCircle,
   BarChart3,
@@ -23,22 +23,20 @@ import {
   Users,
 } from 'lucide-react-native';
 import Theme from '@/constants/theme';
+import { AnimatedScreen } from '@/components/ui/AnimatedScreen';
+import { IOSSubscreenHeader } from '@/components/ui/IOSSubscreenHeader';
+import { useBottomTabScrollHandler, BottomTabSelector } from '@/components/ui/BottomTabSelector';
 import { Typography } from '@/components/ui/Typography';
 import { GlassCard } from '@/components/ui/GlassCard';
 import { Logo } from '@/components/ui/Logo';
 import { Badge } from '@/components/ui/Badge';
 import { CinematicThemeSwitcher } from '@/components/ui/CinematicThemeSwitcher';
-import { BottomTabSelector, useBottomTabScrollHandler } from '@/components/ui/BottomTabSelector';
 import { AIVoiceCallingSettings } from '@/components/features/AIVoiceCallingSettings';
-import { fetchSettingsHubData, SettingsHubData } from '@/src/services/settingsHub';
-
 import useAppPreferencesStore from '@/src/store/appPreferencesStore';
+import { fetchSettingsHubData, SettingsHubData } from '@/src/services/settingsHub';
 import { readScreenCache, writeScreenCache } from '@/src/utils/screenCache';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const formatNumber = (value: number) => Math.round(value || 0).toLocaleString();
-const formatPercent = (value: number) => `${Math.round((value || 0) * 10) / 10}%`;
-const SETTINGS_CACHE_KEY = 'drawer.settings.hub';
+const SETTINGS_CACHE_KEY = 'drawer.settings';
 
 const DARK_LOGO_STYLE = Platform.OS === 'web'
   ? ({ filter: 'brightness(0) invert(1)', opacity: 0.95 } as const)
@@ -76,23 +74,31 @@ const darkPalette = {
   switchOff: '#334155',
 };
 
+const formatNumber = (val: number | undefined | null) =>
+  val != null ? Number(val).toLocaleString() : '0';
+
+const formatPercent = (val: number | undefined | null) =>
+  `${(Number(val || 0) * 100).toFixed(1)}%`;
+
 export default function SettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const isTablet = width >= 768;
+  const handleBottomTabScroll = useBottomTabScrollHandler();
 
   const globalDarkMode = useAppPreferencesStore((state) => state.darkMode);
   const setGlobalDarkMode = useAppPreferencesStore((state) => state.setDarkMode);
-  const { width } = useWindowDimensions();
-  const isTablet = width >= 768;
-  
+
   const [localDarkMode, setLocalDarkMode] = useState(globalDarkMode);
   const [notifications, setNotifications] = useState(true);
 
-  const [hubData, setHubData] = useState<SettingsHubData | null>(() => readScreenCache<SettingsHubData>(SETTINGS_CACHE_KEY)?.value ?? null);
+  const [hubData, setHubData] = useState<SettingsHubData | null>(
+    () => readScreenCache<SettingsHubData>(SETTINGS_CACHE_KEY)?.value ?? null,
+  );
   const [loading, setLoading] = useState(() => !readScreenCache<SettingsHubData>(SETTINGS_CACHE_KEY));
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
-  const handleBottomTabScroll = useBottomTabScrollHandler();
 
   // Keep local in sync if changed elsewhere
   useEffect(() => {
@@ -101,7 +107,6 @@ export default function SettingsScreen() {
 
   const handleToggleTheme = useCallback((val: boolean) => {
     setLocalDarkMode(val);
-    // Allow the native Switch animation to glide smoothly before locking the main thread
     setTimeout(() => {
       setGlobalDarkMode(val);
     }, 200);
@@ -142,7 +147,6 @@ export default function SettingsScreen() {
   const featureCards = useMemo(() => {
     const stats = hubData?.campaigns.stats;
     const analytics = hubData?.analytics;
-    const billing = hubData?.billing;
 
     return [
       {
@@ -188,13 +192,32 @@ export default function SettingsScreen() {
     ];
   }, [localDarkMode, hubData, palette.primary]);
 
-
-
   return (
-    <View style={[styles.container, { backgroundColor: palette.background }]}>
+    <AnimatedScreen style={[styles.container, { backgroundColor: palette.background }]}>
+      <IOSSubscreenHeader
+        title="Settings"
+        subtitle="Manage your workspace and profile settings"
+        rightElement={
+          <TouchableOpacity
+            style={[styles.refreshButton, themedCard]}
+            onPress={() => loadHubData(true)}
+            disabled={refreshing || loading}
+            activeOpacity={0.8}
+          >
+            {refreshing || loading ? (
+              <ActivityIndicator color={palette.primary} size="small" />
+            ) : (
+              <RefreshCw color={palette.primary} size={17} />
+            )}
+          </TouchableOpacity>
+        }
+      />
+
       <ScrollView
-        contentContainerStyle={[styles.scrollContent, { paddingTop: Math.max(insets.top, 12) + 12 }]}
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 120 }]}
         showsVerticalScrollIndicator={false}
+        bounces={true}
+        overScrollMode="never"
         onScroll={handleBottomTabScroll}
         scrollEventThrottle={16}
         refreshControl={
@@ -205,44 +228,43 @@ export default function SettingsScreen() {
           />
         }
       >
-        <View style={styles.headerRow}>
-          <View style={styles.headerText}>
-            <Typography variant="h1" color={palette.text} style={styles.pageTitle} numberOfLines={2}>Settings</Typography>
-            <Typography variant="bodySmall" color={palette.muted} numberOfLines={2}>Manage your workspace and profile settings</Typography>
-          </View>
-          <TouchableOpacity
-            style={[styles.refreshButton, themedCard]}
-            onPress={() => loadHubData(true)}
-            disabled={refreshing || loading}
-          >
-            {refreshing || loading ? (
-              <ActivityIndicator color={palette.primary} />
-            ) : (
-              <RefreshCw color={palette.primary} size={18} />
-            )}
-          </TouchableOpacity>
-        </View>
-
         {error ? (
           <GlassCard style={[styles.errorCard, themedCard, { borderColor: palette.errorSoft }]}>
             <AlertCircle color={Theme.colors.error} size={18} />
-            <Typography variant="bodySmall" color={Theme.colors.error} style={styles.errorText}>{error}</Typography>
+            <Typography variant="bodySmall" color={Theme.colors.error} style={styles.errorText}>
+              {error}
+            </Typography>
           </GlassCard>
         ) : null}
 
-        <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>Workspace Features</Typography>
+        <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>
+          Workspace Features
+        </Typography>
         <View style={styles.featureGrid}>
           {featureCards.map((feature) => (
-            <TouchableOpacity key={feature.title} activeOpacity={0.78} onPress={() => router.push(feature.route as never)} style={{ width: isTablet ? '48%' : '100%' }}>
+            <TouchableOpacity
+              key={feature.title}
+              activeOpacity={0.78}
+              onPress={() => router.push(feature.route as never)}
+              style={{ width: isTablet ? '48%' : '100%' }}
+            >
               <GlassCard style={[styles.featureCard, themedCard]}>
                 <View style={styles.featureTop}>
-                  <View style={[styles.featureIcon, { backgroundColor: palette.primarySoft }]}>{feature.icon}</View>
+                  <View style={[styles.featureIcon, { backgroundColor: palette.primarySoft }]}>
+                    {feature.icon}
+                  </View>
                   <Badge label={feature.badge} variant={feature.badge === 'Fallback' ? 'warning' : 'info'} />
                 </View>
-                <Typography variant="h4" color={palette.text} style={styles.featureTitle}>{feature.title}</Typography>
-                <Typography variant="h3" color={palette.text} style={styles.featureValue}>{feature.value}</Typography>
+                <Typography variant="h4" color={palette.text} style={styles.featureTitle}>
+                  {feature.title}
+                </Typography>
+                <Typography variant="h3" color={palette.text} style={styles.featureValue}>
+                  {feature.value}
+                </Typography>
                 <View style={styles.featureBottom}>
-                  <Typography variant="caption" color={palette.muted} style={styles.featureDetail}>{feature.detail}</Typography>
+                  <Typography variant="caption" color={palette.muted} style={styles.featureDetail}>
+                    {feature.detail}
+                  </Typography>
                   <ChevronRight color={palette.disabled} size={18} />
                 </View>
               </GlassCard>
@@ -250,12 +272,18 @@ export default function SettingsScreen() {
           ))}
         </View>
 
-        <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>App Preferences</Typography>
+        <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>
+          App Preferences
+        </Typography>
         <GlassCard style={[styles.card, themedCard]}>
           <View style={styles.settingRow}>
             <View style={styles.settingText}>
-              <Typography variant="bodyLarge" color={palette.text} style={styles.rowTitle}>Push Notifications</Typography>
-              <Typography variant="caption" color={palette.muted}>Receive alerts for new leads</Typography>
+              <Typography variant="bodyLarge" color={palette.text} style={styles.rowTitle}>
+                Push Notifications
+              </Typography>
+              <Typography variant="caption" color={palette.muted}>
+                Receive alerts for new leads
+              </Typography>
             </View>
             <Switch
               value={notifications}
@@ -266,8 +294,12 @@ export default function SettingsScreen() {
           </View>
           <View style={[styles.settingRow, styles.borderTop, { borderTopColor: palette.borderSoft }]}>
             <View style={styles.settingText}>
-              <Typography variant="bodyLarge" color={palette.text} style={styles.rowTitle}>Dark Mode</Typography>
-              <Typography variant="caption" color={palette.muted}>Switch to dark theme</Typography>
+              <Typography variant="bodyLarge" color={palette.text} style={styles.rowTitle}>
+                Dark Mode
+              </Typography>
+              <Typography variant="caption" color={palette.muted}>
+                Switch to dark theme
+              </Typography>
             </View>
             <CinematicThemeSwitcher
               value={localDarkMode}
@@ -276,12 +308,12 @@ export default function SettingsScreen() {
           </View>
         </GlassCard>
 
-        <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>AI Voice Calling</Typography>
+        <Typography variant="h4" color={palette.text} style={styles.sectionTitle}>
+          AI Voice Calling
+        </Typography>
         <View style={localDarkMode ? styles.darkEmbeddedPanel : undefined}>
           <AIVoiceCallingSettings darkMode={localDarkMode} />
         </View>
-
-
 
         <View style={styles.footerLogo}>
           <Logo variant="code" width={150} height={50} style={localDarkMode ? DARK_LOGO_STYLE : undefined} />
@@ -292,7 +324,7 @@ export default function SettingsScreen() {
       </ScrollView>
 
       <BottomTabSelector activeRoute="profile" />
-    </View>
+    </AnimatedScreen>
   );
 }
 
@@ -304,28 +336,13 @@ const styles = StyleSheet.create({
     padding: Theme.spacing.xl,
     paddingBottom: 132,
   },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: Theme.spacing.lg,
-    gap: Theme.spacing.md,
-  },
-  headerText: {
-    flex: 1,
-    minWidth: 0,
-  },
-  pageTitle: {
-    fontSize: 36,
-    lineHeight: 42,
-    fontWeight: '800',
-  },
   refreshButton: {
-    width: 42,
-    height: 42,
-    borderRadius: Theme.radius.full,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
   },
   errorCard: {
     flexDirection: 'row',
@@ -400,20 +417,6 @@ const styles = StyleSheet.create({
   darkEmbeddedPanel: {
     borderRadius: Theme.radius.md,
     overflow: 'hidden',
-  },
-  logoutButton: {
-    minHeight: 56,
-    borderRadius: Theme.radius.md,
-    borderWidth: 1,
-    marginTop: Theme.spacing.xl,
-    paddingHorizontal: Theme.spacing.lg,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Theme.spacing.sm,
-  },
-  logoutText: {
-    fontWeight: '700',
   },
   footerLogo: {
     alignItems: 'center',

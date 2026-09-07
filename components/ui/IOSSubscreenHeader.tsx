@@ -131,3 +131,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 });
+
+export { IOSCollapsibleScrollView, type IOSCollapsibleScrollViewProps } from './IOSCollapsibleScrollView';
+
