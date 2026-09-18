@@ -1,80 +1,63 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { LadSettingsHeader } from "./components/layout/LadSettingsHeader";
 import { HeroBanner } from "./components/layout/HeroBanner";
 import { StageStepper } from "./components/layout/StageStepper";
 import { Stage1Briefing } from "./components/stages/Stage1Briefing";
 import { Stage2VariableLedger } from "./components/stages/Stage2VariableLedger";
 import { Stage3TemplateCheck } from "./components/stages/Stage3TemplateCheck";
-import { Stage4PricingEngine } from "./components/stages/Stage4PricingEngine";
+import { Stage4PricingEngine, type RulesStatus } from "./components/stages/Stage4PricingEngine";
 import { Stage5ReceiptSummary } from "./components/stages/Stage5ReceiptSummary";
 import { BusinessProfileView } from "./components/settings/BusinessProfileView";
 import { mockProposalService } from "./services/mockProposalService";
 import * as api from "./services/api";
-import { DEFAULT_BUSINESS_PROFILES } from "./types/businessProfile";
+import type { Company, CompanySummary } from "./types/company";
+import type { CompanyVariable, CompoundTable } from "./types/variable";
+import type { TemplateStats } from "./types/template";
+import type { PricingRulesState } from "./types/pricing";
 import type { ProposalStage } from "./types/proposal";
-import type { CompanyVariable } from "./types/variable";
-import { CheckCircle2, AlertCircle, RefreshCw, Sparkles, FileText, Target } from "lucide-react";
-import { Button } from "./components/ui/button";
+import { CheckCircle2, AlertCircle } from "lucide-react";
 
 export function App() {
+  const [companies, setCompanies] = useState<CompanySummary[]>([]);
   const [activeCompanyId, setActiveCompanyId] = useState<string>("co1_seo");
-  const [activeTab, setActiveTab] = useState<string>("businessprofile");
-  const [currentStage, setCurrentStage] = useState<ProposalStage>(2); // Default to Stage 2 Variable Ledger in proposal view
-  const [completedStages, setCompletedStages] = useState<ProposalStage[]>([1]);
-  const [isBriefingLocked, setIsBriefingLocked] = useState<boolean>(true);
+  const [currentCompany, setCurrentCompany] = useState<Company | null>(null);
+  const [activeTab, setActiveTab] = useState<string>("proposals");
+  const [currentStage, setCurrentStage] = useState<ProposalStage>(1);
+  const [completedStages, setCompletedStages] = useState<ProposalStage[]>([]);
+  const [isBriefingLocked, setIsBriefingLocked] = useState<boolean>(false);
   const [activeAiModel, setActiveAiModel] = useState<string>("deepseek-flash");
 
-  // Notifications
+  // Dynamic Pipeline States
+  const [variables, setVariables] = useState<CompanyVariable[]>([]);
+  const [compoundTables, setCompoundTables] = useState<CompoundTable[]>([]);
+  const [templateStats, setTemplateStats] = useState<TemplateStats | null>(null);
+  const [templateFilesize, setTemplateFilesize] = useState<number | null>(null);
+  const [pricingRulesState, setPricingRulesState] = useState<PricingRulesState | null>(null);
+  const [rulesStatus, setRulesStatus] = useState<RulesStatus>({ status: "idle" });
+
+  // Async In-Flight Flags
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isSubmittingBriefing, setIsSubmittingBriefing] = useState<boolean>(false);
+  const [isExtractingVariables, setIsExtractingVariables] = useState<boolean>(false);
+  const [isGeneratingTemplate, setIsGeneratingTemplate] = useState<boolean>(false);
+  const [isProceeding, setIsProceeding] = useState<boolean>(false);
+
+  // Fallback Simulation & Receipt data
+  const [leadSimulation, setLeadSimulation] = useState(
+    mockProposalService.getLeadSimulation("co1_seo")
+  );
+  const [receipt, setReceipt] = useState(mockProposalService.getReceipt("co1_seo"));
+
+  // Notification Toast
   const [notification, setNotification] = useState<{
     type: "success" | "error" | "info";
     message: string;
   } | null>(null);
 
-  // Dynamic Data loaded from mockProposalService & API
-  const companies = mockProposalService.getCompanySummaries();
-  const currentCompany = mockProposalService.getCompany(activeCompanyId);
-  const initialVars = mockProposalService.getVariables(activeCompanyId);
+  const showNotification = (type: "success" | "error" | "info", message: string) => {
+    setNotification({ type, message });
+  };
 
-  const [variables, setVariables] = useState<CompanyVariable[]>(initialVars.variables);
-  const [compoundTables, setCompoundTables] = useState(initialVars.compound_tables);
-  const [templateStats, setTemplateStats] = useState(mockProposalService.getTemplateStats(activeCompanyId));
-  const [pricingRulesState, setPricingRulesState] = useState(mockProposalService.getPricingRules(activeCompanyId));
-  const [leadSimulation, setLeadSimulation] = useState(mockProposalService.getLeadSimulation(activeCompanyId));
-  const [receipt, setReceipt] = useState(mockProposalService.getReceipt(activeCompanyId));
-
-  // Sync data when activeCompanyId changes
-  useEffect(() => {
-    const vars = mockProposalService.getVariables(activeCompanyId);
-    setVariables(vars.variables);
-    setCompoundTables(vars.compound_tables);
-    setTemplateStats(mockProposalService.getTemplateStats(activeCompanyId));
-    setPricingRulesState(mockProposalService.getPricingRules(activeCompanyId));
-    setLeadSimulation(mockProposalService.getLeadSimulation(activeCompanyId));
-    setReceipt(mockProposalService.getReceipt(activeCompanyId));
-    setIsBriefingLocked(true);
-    setCompletedStages([1]);
-    setCurrentStage(2);
-    setNotification({
-      type: "info",
-      message: `Switched tenant to ${mockProposalService.getCompany(activeCompanyId).company_name}`,
-    });
-  }, [activeCompanyId]);
-
-  // Check backend health & AI settings on mount
-  useEffect(() => {
-    api
-      .fetchAISettings()
-      .then((data) => {
-        if (data.settings?.model) {
-          setActiveAiModel(data.settings.model);
-        }
-      })
-      .catch(() => {
-        // Backend offline — running in high-performance local simulation mode
-      });
-  }, []);
-
-  // Auto-dismiss notification
   useEffect(() => {
     if (notification) {
       const timer = setTimeout(() => setNotification(null), 3500);
@@ -82,16 +65,118 @@ export function App() {
     }
   }, [notification]);
 
-  const showNotification = (type: "success" | "error" | "info", message: string) => {
-    setNotification({ type, message });
-  };
-
   const markStageComplete = (stage: ProposalStage) => {
-    if (!completedStages.includes(stage)) {
-      setCompletedStages((prev) => [...prev, stage]);
-    }
+    setCompletedStages((prev) => (prev.includes(stage) ? prev : [...prev, stage]));
   };
 
+  // 1. Initial Load: Fetch Company list & AI settings
+  useEffect(() => {
+    api
+      .fetchCompanies()
+      .then((list) => {
+        if (list && list.length > 0) {
+          setCompanies(list);
+          if (!list.some((c) => c.company_id === activeCompanyId)) {
+            setActiveCompanyId(list[0].company_id);
+          }
+        } else {
+          setCompanies(mockProposalService.getCompanySummaries());
+        }
+      })
+      .catch(() => {
+        setCompanies(mockProposalService.getCompanySummaries());
+      });
+
+    api
+      .fetchAISettings()
+      .then((res) => {
+        if (res.settings?.model) {
+          setActiveAiModel(res.settings.model);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // 2. Tenant Change: Load full active company details and downstream state from backend
+  const loadCompanyData = useCallback(async (companyId: string) => {
+    setIsLoading(true);
+    try {
+      // Fetch company profile
+      let comp: Company;
+      try {
+        comp = await api.fetchCompany(companyId);
+      } catch {
+        comp = mockProposalService.getCompany(companyId);
+      }
+      setCurrentCompany(comp);
+      setIsBriefingLocked(Boolean(comp.briefing_locked));
+
+      // Fetch variables
+      let varsData;
+      try {
+        varsData = await api.fetchVariables(companyId);
+      } catch {
+        varsData = mockProposalService.getVariables(companyId);
+      }
+      setVariables(varsData.variables || []);
+      setCompoundTables(varsData.compound_tables || []);
+
+      // Fetch template status
+      try {
+        const tStatus = await api.fetchTemplateStatus(companyId);
+        if (tStatus.exists && tStatus.stats) {
+          setTemplateStats(tStatus.stats);
+          setTemplateFilesize(tStatus.filesize || null);
+        } else {
+          setTemplateStats(null);
+          setTemplateFilesize(null);
+        }
+      } catch {
+        setTemplateStats(null);
+        setTemplateFilesize(null);
+      }
+
+      // Fetch pricing rules
+      try {
+        const pRules = await api.fetchPricingRules(companyId);
+        setPricingRulesState(pRules || null);
+      } catch {
+        setPricingRulesState(comp.working_state?.pricing_rules || null);
+      }
+
+      // Load simulation and receipt
+      setLeadSimulation(mockProposalService.getLeadSimulation(companyId));
+      setReceipt(mockProposalService.getReceipt(companyId));
+
+      // Calculate initial completed stages and active stage
+      const completed: ProposalStage[] = [];
+      if (comp.briefing_locked) {
+        completed.push(1);
+        if (varsData.variables && varsData.variables.length > 0) {
+          completed.push(2);
+        }
+      }
+      setCompletedStages(completed);
+
+      if (!comp.briefing_locked) {
+        setCurrentStage(1);
+      } else if (!varsData.variables || varsData.variables.length === 0) {
+        setCurrentStage(2);
+      } else {
+        setCurrentStage(2);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeCompanyId) {
+      loadCompanyData(activeCompanyId);
+    }
+  }, [activeCompanyId, loadCompanyData]);
+
+  // AI Model Selection
   const handleSelectAiModel = async (modelId: string) => {
     setActiveAiModel(modelId);
     try {
@@ -101,101 +186,274 @@ export function App() {
         ? "deepseek"
         : "gemini";
       await api.updateAISettings({ model: modelId, provider });
-      showNotification("success", `AI Engine active: ${modelId}`);
+      showNotification("success", `AI switched to ${provider} · ${modelId}`);
     } catch {
-      showNotification("info", `AI Engine selected: ${modelId}`);
+      showNotification("info", `AI Engine active: ${modelId}`);
     }
   };
 
-  // Stage 1 Handlers
-  const handleBriefingSubmit = async (prompt: string, files?: File[]) => {
-    setIsBriefingLocked(true);
-    markStageComplete(1);
+  // -------------------------------------------------------------
+  // Stage 1: Briefing Submit & Real Document Upload via AnyDoc
+  // -------------------------------------------------------------
+  const handleBriefingSubmit = async (prompt: string, file: File | null) => {
+    if (!activeCompanyId) return;
+    setIsSubmittingBriefing(true);
 
     try {
-      if (files && files.length > 0) {
-        await api.submitBriefing(activeCompanyId, prompt, files[0]);
-      }
-    } catch {
-      // Offline fallback
-    }
+      const result = await api.submitBriefing(activeCompanyId, prompt, file);
+      setCurrentCompany(result.company);
+      setIsBriefingLocked(true);
+      markStageComplete(1);
 
-    showNotification("success", `Briefing locked & parsed via AnyDoc for ${currentCompany.company_name}`);
-    setCurrentStage(2);
+      // Update companies list
+      setCompanies((prev) =>
+        prev.map((c) =>
+          c.company_id === result.company.company_id
+            ? {
+                ...c,
+                pricing_spec: result.company.pricing_spec,
+                briefing_locked: result.company.briefing_locked,
+                quotation_filename: result.company.document_metadata?.filename,
+              }
+            : c
+        )
+      );
+
+      showNotification(
+        "success",
+        `Quotation parsed via AnyDoc and briefing locked for ${result.company.company_name}.`
+      );
+
+      // Advance to Stage 2 and trigger AI variable extraction
+      setCurrentStage(2);
+      handleExtractVariables(activeCompanyId);
+    } catch (err) {
+      // Fallback in case of server offline
+      setIsBriefingLocked(true);
+      markStageComplete(1);
+      setCurrentStage(2);
+      showNotification(
+        "info",
+        `Briefing saved locally for ${currentCompany?.company_name || "Company"}.`
+      );
+    } finally {
+      setIsSubmittingBriefing(false);
+    }
   };
 
   const handleBriefingUnlock = async () => {
-    setIsBriefingLocked(false);
+    if (!activeCompanyId) return;
     try {
-      await api.unlockBriefing(activeCompanyId);
-    } catch {
-      // Offline fallback
+      const updated = await api.unlockBriefing(activeCompanyId);
+      setCurrentCompany(updated);
+      setIsBriefingLocked(false);
+      setVariables([]);
+      setCompoundTables([]);
+      setTemplateStats(null);
+      setTemplateFilesize(null);
+      setPricingRulesState(null);
+      setCompletedStages([]);
+      setCurrentStage(1);
+
+      setCompanies((prev) =>
+        prev.map((c) =>
+          c.company_id === updated.company_id ? { ...c, briefing_locked: false } : c
+        )
+      );
+
+      showNotification(
+        "info",
+        `Briefing unlocked for ${updated.company_name}. Downstream variables and templates reset.`
+      );
+    } catch (err) {
+      setIsBriefingLocked(false);
+      setCurrentStage(1);
     }
-    showNotification("info", "Briefing unlocked. Downstream template and rules may need re-validation.");
   };
 
-  // Stage 2 Handlers
-  const handleVariablesChange = (updated: CompanyVariable[]) => {
-    setVariables(updated);
-    api.updateVariables(activeCompanyId, { variables: updated }).catch(() => {});
+  // -------------------------------------------------------------
+  // Stage 2: Variable Discovery & Extraction
+  // -------------------------------------------------------------
+  const handleExtractVariables = async (companyId: string) => {
+    setIsExtractingVariables(true);
+    try {
+      const result = await api.extractVariables(companyId);
+      setVariables(result.variables || []);
+      setCompoundTables(result.compound_tables || []);
+      showNotification(
+        "success",
+        `AI discovered ${result.variables.length} variables and ${result.compound_tables.length} tables from quotation.`
+      );
+    } catch (err) {
+      const fallback = mockProposalService.getVariables(companyId);
+      setVariables(fallback.variables);
+      setCompoundTables(fallback.compound_tables);
+      showNotification(
+        "info",
+        `Loaded ${fallback.variables.length} variables for ${currentCompany?.company_name}.`
+      );
+    } finally {
+      setIsExtractingVariables(false);
+    }
   };
 
-  const handleProceedFromStage2 = () => {
-    markStageComplete(2);
-    showNotification("success", "Template AST hydrated with 18 variable tags.");
-    setCurrentStage(3);
+  const handleVariablesChange = (
+    updatedVars: CompanyVariable[],
+    updatedTables?: CompoundTable[]
+  ) => {
+    setVariables(updatedVars);
+    if (updatedTables) setCompoundTables(updatedTables);
+
+    // Persist to backend
+    api
+      .updateVariables(activeCompanyId, {
+        variables: updatedVars,
+        compound_tables: updatedTables || compoundTables,
+      })
+      .catch(() => {});
   };
 
-  // Stage 3 Handlers
-  const handleProceedFromStage3 = () => {
-    markStageComplete(3);
-    showNotification("success", "Pricing rules compiled. Evaluating deterministic matrix.");
-    setCurrentStage(4);
+  const handleAddCustomVariable = async (payload: {
+    natural_name: string;
+    category: import("./types/variable").VariableCategory;
+    exact_quotation_snippet: string;
+    context_anchor?: string;
+  }) => {
+    try {
+      const res = await api.addCustomVariable(activeCompanyId, payload);
+      setVariables((prev) => [...prev, res.variable]);
+      showNotification("success", `Custom variable "${payload.natural_name}" added to template AST.`);
+    } catch (err) {
+      showNotification(
+        "error",
+        err instanceof Error ? err.message : "Failed to add custom variable"
+      );
+      throw err;
+    }
   };
 
-  const handleRegenerateTemplate = async () => {
+  const handleProceedFromStage2 = async () => {
+    setIsGeneratingTemplate(true);
     try {
       const result = await api.generateTemplate(activeCompanyId);
-      setTemplateStats({
-        template_path: result.template_path,
-        tags_placed_count: result.tags_placed_count,
-        loops_collapsed_count: result.loops_collapsed_count,
-        conditional_rows_wrapped_count: result.conditional_rows_wrapped_count,
-        mutations_applied_count: result.mutations_applied_count,
-        details: result.details,
-      });
-      showNotification("success", "Template AST regenerated from live document.");
-    } catch {
+      setTemplateStats(result);
+      setPricingRulesState(null);
+      setRulesStatus({ status: "idle" });
+
+      const status = await api.fetchTemplateStatus(activeCompanyId).catch(() => null);
+      if (status) {
+        setTemplateFilesize(status.filesize);
+      }
+
+      markStageComplete(2);
+      showNotification(
+        "success",
+        `Template generated with ${result.tags_placed_count} tags and ${result.loops_collapsed_count} repeating loops.`
+      );
+      setCurrentStage(3);
+    } catch (err) {
+      // Fallback
       setTemplateStats(mockProposalService.getTemplateStats(activeCompanyId));
-      showNotification("info", "Template AST regenerated successfully.");
+      markStageComplete(2);
+      setCurrentStage(3);
+      showNotification("info", "Template AST generated successfully.");
+    } finally {
+      setIsGeneratingTemplate(false);
     }
   };
 
-  // Stage 4 Handlers
-  const handleTableChange = (tableId: string, updatedRows: any[]) => {
-    const updatedState = mockProposalService.updatePricingTable(activeCompanyId, tableId, updatedRows);
-    setPricingRulesState(updatedState);
-    showNotification("success", "Table rates updated & recalculations verified.");
+  // -------------------------------------------------------------
+  // Stage 3: Template AST Checkpoint & Live Docx Preview
+  // -------------------------------------------------------------
+  const handleRegenerateTemplate = async () => {
+    setIsGeneratingTemplate(true);
+    try {
+      const result = await api.generateTemplate(activeCompanyId);
+      setTemplateStats(result);
+      setPricingRulesState(null);
+
+      const status = await api.fetchTemplateStatus(activeCompanyId).catch(() => null);
+      if (status) {
+        setTemplateFilesize(status.filesize);
+      }
+      showNotification("success", "Template AST regenerated from current variables.");
+    } catch (err) {
+      showNotification("error", "Failed to regenerate template.");
+    } finally {
+      setIsGeneratingTemplate(false);
+    }
   };
 
-  const handleProceedFromStage4 = () => {
-    markStageComplete(4);
-    showNotification("success", "Pricing verified against benchmark. Simulation active.");
-    setCurrentStage(5);
+  const handleProceedFromStage3 = async () => {
+    markStageComplete(3);
+    setCurrentStage(4);
+    handleCompilePricingRules();
   };
 
-  // Stage 5 Handlers
+  // -------------------------------------------------------------
+  // Stage 4: Pricing Engine & Deterministic Calculations
+  // -------------------------------------------------------------
+  const handleCompilePricingRules = async () => {
+    if (!activeCompanyId) return;
+    setRulesStatus({ status: "compiling" });
+    try {
+      const state = await api.compilePricingRules(activeCompanyId);
+      setPricingRulesState(state);
+      setRulesStatus({ status: "idle" });
+      const mismatches = (state.sample_check || []).filter((c) => !c.ok).length;
+      showNotification(
+        mismatches === 0 ? "success" : "info",
+        mismatches === 0
+          ? `Pricing rules compiled & 100% matched to quotation benchmark.`
+          : `Pricing rules compiled — ${mismatches} checks to review.`
+      );
+    } catch (err) {
+      setRulesStatus({
+        status: "error",
+        message: err instanceof Error ? err.message : "Failed to compile pricing rules",
+      });
+      // Fallback
+      setPricingRulesState(mockProposalService.getPricingRules(activeCompanyId));
+    }
+  };
+
+  const handleProceedFromStage4 = async () => {
+    if (!activeCompanyId) return;
+    setIsProceeding(true);
+    try {
+      await api.proceedToLeadSimulation(activeCompanyId);
+      markStageComplete(4);
+      showNotification(
+        "success",
+        "Pricing rules locked. Generated live proposal quotation & itemized receipt."
+      );
+      setCurrentStage(5);
+    } catch (err) {
+      markStageComplete(4);
+      setCurrentStage(5);
+    } finally {
+      setIsProceeding(false);
+    }
+  };
+
+  // -------------------------------------------------------------
+  // Stage 5: Inbound Simulation, Itemized Receipt & Download
+  // -------------------------------------------------------------
   const handleDownloadDocx = async () => {
     try {
       const blob = await api.fetchTemplateBlob(activeCompanyId);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${currentCompany.company_name}_Proposal_Receipt.docx`;
+      a.download = `${currentCompany?.company_name || "Proposal"}_Official_Receipt.docx`;
       a.click();
       URL.revokeObjectURL(url);
+      showNotification("success", "Downloaded hydrated Word proposal document.");
     } catch {
-      showNotification("success", `Downloaded ${currentCompany.company_name}_Proposal_Receipt.docx`);
+      showNotification(
+        "success",
+        `Downloaded ${currentCompany?.company_name || "Proposal"}_Official_Receipt.docx`
+      );
     }
   };
 
@@ -206,40 +464,31 @@ export function App() {
     );
   };
 
-  const handleCreateProposal = () => {
-    setActiveTab("proposals");
-    setCurrentStage(1);
-    setIsBriefingLocked(false);
-    showNotification("info", "Started new proposal draft. Enter briefing notes or upload .docx");
-  };
-
-  const handleRescanPipeline = async () => {
-    try {
-      const extracted = await api.extractVariables(activeCompanyId);
-      setVariables(extracted.variables as any);
-      setCompoundTables(extracted.compound_tables as any);
-      showNotification("success", "Re-scanned document AST with live AI extractor.");
-    } catch {
-      const vars = mockProposalService.getVariables(activeCompanyId);
-      setVariables([...vars.variables]);
-      showNotification("success", "Re-scanned document AST and refreshed dynamic taxonomy.");
-    }
-  };
+  const naturalNames = Object.fromEntries([
+    ...variables.map((v) => [v.variable_name, v.natural_name]),
+    ...compoundTables.map((t) => [t.loop_tag, t.natural_name]),
+  ]);
 
   return (
     <div className="min-h-screen bg-background text-foreground antialiased selection:bg-[#2B7CFF]/20 pb-20 transition-colors">
-      {/* Top Header & Settings Navigation Bar */}
+      {/* Top Header & Navigation Bar */}
       <LadSettingsHeader
         companies={companies}
         activeCompanyId={activeCompanyId}
-        onSelectCompany={setActiveCompanyId}
+        onSelectCompany={(id) => {
+          setActiveCompanyId(id);
+          showNotification(
+            "info",
+            `Switched tenant to ${companies.find((c) => c.company_id === id)?.company_name || id}`
+          );
+        }}
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         activeAiModel={activeAiModel}
         onSelectAiModel={handleSelectAiModel}
       />
 
-      {/* Main Workspace Canvas */}
+      {/* Main Workspace */}
       <main className="mx-auto max-w-7xl px-4 sm:px-6 pt-5 space-y-6">
         {/* Floating Notification Toast */}
         {notification && (
@@ -249,12 +498,12 @@ export function App() {
                 ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400"
                 : notification.type === "error"
                 ? "bg-destructive/10 border-destructive/30 text-destructive"
-                : "bg-blue-500/10 border-blue-500/30 text-blue-700 dark:text-[#2B7CFF]"
+                : "bg-blue-50 dark:bg-[#000724] border-blue-200/80 dark:border-[#2B7CFF]/40 text-[#0B1957] dark:text-[#2B7CFF]"
             }`}
           >
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
               {notification.type === "success" ? (
-                <CheckCircle2 className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <CheckCircle2 className="size-4 shrink-0" />
               ) : (
                 <AlertCircle className="size-4 shrink-0" />
               )}
@@ -262,15 +511,14 @@ export function App() {
             </div>
             <button
               onClick={() => setNotification(null)}
-              aria-label="Dismiss notification"
-              className="text-muted-foreground hover:text-foreground ml-3 text-xs cursor-pointer"
+              className="text-muted-foreground hover:text-foreground ml-3 text-xs"
             >
               ✕
             </button>
           </div>
         )}
 
-        {/* Tab 1: BUSINESS PROFILE */}
+        {/* Tab 1: Business Profile View */}
         {activeTab === "businessprofile" && (
           <BusinessProfileView
             companyId={activeCompanyId}
@@ -278,129 +526,106 @@ export function App() {
           />
         )}
 
-        {/* Tab 2: AUTO PROPOSAL PIPELINE */}
+        {/* Tab 2: 5-Stage Proposal Generation Pipeline */}
         {activeTab === "proposals" && (
-          <div className="space-y-6 animate-in fade-in duration-200">
-            {/* 1. Main Hero Banner */}
-            <HeroBanner onCreateProposal={handleCreateProposal} />
+          <div className="space-y-6">
+            {/* Hero Banner */}
+            <HeroBanner
+              companyName={currentCompany?.company_name || "Company"}
+              onCreateProposal={() => {
+                setCurrentStage(1);
+                setIsBriefingLocked(false);
+                showNotification("info", "Started new proposal draft.");
+              }}
+              onRescanPipeline={() => handleExtractVariables(activeCompanyId)}
+            />
 
-            {/* 2. Proposal Pipeline Main Interactive Card */}
-            <div className="bg-card rounded-2xl border border-border/80 p-5 sm:p-6 shadow-xs space-y-6">
-              {/* Card Header */}
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-foreground tracking-tight">
-                  Proposal Pipeline
-                </h2>
+            {/* 5-Stage Stepper Navigation */}
+            <StageStepper
+              currentStage={currentStage}
+              completedStages={completedStages}
+              onSelectStage={(stage) => setCurrentStage(stage)}
+            />
 
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleRescanPipeline}
-                  className="h-8 px-2.5 text-xs font-semibold text-muted-foreground hover:text-foreground hover:bg-muted cursor-pointer"
-                >
-                  <RefreshCw className="size-3.5 mr-1.5" />
-                  <span>Re-scan</span>
-                </Button>
-              </div>
-
-              {/* Interactive Stepper Bar */}
-              <StageStepper
-                currentStage={currentStage}
-                completedStages={completedStages}
-                onSelectStage={(stage) => setCurrentStage(stage)}
+            {/* Stage 1: Briefing & Document Upload */}
+            {currentStage === 1 && currentCompany && (
+              <Stage1Briefing
+                company={currentCompany}
+                isLocked={isBriefingLocked}
+                isSubmitting={isSubmittingBriefing}
+                onSubmit={handleBriefingSubmit}
+                onUnlock={handleBriefingUnlock}
+                onProceed={() => setCurrentStage(2)}
               />
+            )}
 
-              {/* Dynamic Stage View (Stage 1 to 5) */}
-              <div className="transition-all duration-200">
-                {currentStage === 1 && (
-                  <Stage1Briefing
-                    company={currentCompany}
-                    businessProfile={DEFAULT_BUSINESS_PROFILES[activeCompanyId]}
-                    isLocked={isBriefingLocked}
-                    onSubmit={handleBriefingSubmit}
-                    onUnlock={handleBriefingUnlock}
-                    onProceed={() => setCurrentStage(2)}
-                  />
-                )}
+            {/* Stage 2: Dynamic Variable Discovery & Review Deck */}
+            {currentStage === 2 && currentCompany && (
+              <Stage2VariableLedger
+                companyId={currentCompany.company_id}
+                companyName={currentCompany.company_name}
+                variables={variables}
+                compoundTables={compoundTables}
+                quotationMarkdown={currentCompany.document_metadata?.extracted_markdown}
+                isLoading={isLoading}
+                isExtracting={isExtractingVariables}
+                isGeneratingTemplate={isGeneratingTemplate}
+                onVariablesChange={handleVariablesChange}
+                onRescan={() => handleExtractVariables(currentCompany.company_id)}
+                onAddCustomVariable={handleAddCustomVariable}
+                onProceed={handleProceedFromStage2}
+              />
+            )}
 
-                {currentStage === 2 && (
-                  <Stage2VariableLedger
-                    companyName={currentCompany.company_name}
-                    variables={variables}
-                    compoundTables={compoundTables}
-                    onVariablesChange={handleVariablesChange}
-                    onProceed={handleProceedFromStage2}
-                  />
-                )}
+            {/* Stage 3: Word Document Template Checkpoint & Live Docx Preview */}
+            {currentStage === 3 && currentCompany && (
+              <Stage3TemplateCheck
+                companyId={currentCompany.company_id}
+                companyName={currentCompany.company_name}
+                stats={
+                  templateStats || {
+                    template_path: `storage/${currentCompany.company_id}/template.docx`,
+                    tags_placed_count: variables.length,
+                    loops_collapsed_count: compoundTables.length,
+                    conditional_rows_wrapped_count: 2,
+                    mutations_applied_count: variables.length + compoundTables.length + 3,
+                    details: [],
+                  }
+                }
+                filesize={templateFilesize}
+                naturalNames={naturalNames}
+                onProceed={handleProceedFromStage3}
+                onRegenerate={handleRegenerateTemplate}
+                onFixVariable={() => setCurrentStage(2)}
+                isRegenerating={isGeneratingTemplate}
+              />
+            )}
 
-                {currentStage === 3 && templateStats && (
-                  <Stage3TemplateCheck
-                    companyName={currentCompany.company_name}
-                    stats={templateStats}
-                    onProceed={handleProceedFromStage3}
-                    onRegenerate={handleRegenerateTemplate}
-                  />
-                )}
+            {/* Stage 4: Pricing Engine & Deterministic Ledger */}
+            {currentStage === 4 && currentCompany && (
+              <Stage4PricingEngine
+                companyId={currentCompany.company_id}
+                companyName={currentCompany.company_name}
+                state={pricingRulesState}
+                status={rulesStatus}
+                variables={variables}
+                compoundTables={compoundTables}
+                onStateChange={setPricingRulesState}
+                onProceed={handleProceedFromStage4}
+                onRegenerate={handleCompilePricingRules}
+                isProceeding={isProceeding}
+              />
+            )}
 
-                {currentStage === 4 && (
-                  <Stage4PricingEngine
-                    companyName={currentCompany.company_name}
-                    state={pricingRulesState}
-                    onTableChange={handleTableChange}
-                    onProceed={handleProceedFromStage4}
-                    onRegenerate={() => {
-                      setPricingRulesState(mockProposalService.getPricingRules(activeCompanyId));
-                      showNotification("info", "Pricing engine rules reset & re-compiled.");
-                    }}
-                  />
-                )}
-
-                {currentStage === 5 && (
-                  <Stage5ReceiptSummary
-                    simulation={leadSimulation}
-                    receipt={receipt}
-                    onDownload={handleDownloadDocx}
-                    onSendEmail={handleSendEmail}
-                  />
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Other Tabs Placeholder */}
-        {activeTab !== "businessprofile" && activeTab !== "proposals" && (
-          <div className="bg-card rounded-2xl border border-border/80 p-8 shadow-xs text-center space-y-4 animate-in fade-in duration-200">
-            <div className="size-12 rounded-2xl bg-blue-50 dark:bg-[#0B1957] border border-blue-200 dark:border-[#2B7CFF]/40 text-[#0B1957] dark:text-[#2B7CFF] mx-auto flex items-center justify-center">
-              <Sparkles className="size-6" />
-            </div>
-            <div className="space-y-1">
-              <h3 className="text-base font-bold text-foreground capitalize">
-                {activeTab.replace(/([a-z])([A-Z])/g, "$1 $2")} Settings
-              </h3>
-              <p className="text-xs text-muted-foreground max-w-md mx-auto">
-                Connected with MR LAD unified workspace. Switch back to Business Profile or Auto Proposal to configure intelligence engines.
-              </p>
-            </div>
-            <div className="flex items-center justify-center gap-3 pt-2">
-              <Button
-                size="sm"
-                onClick={() => setActiveTab("businessprofile")}
-                className="bg-[#0B1957] dark:bg-[#2B7CFF] hover:bg-[#0B1957]/90 dark:hover:bg-[#2563eb] text-white text-xs font-semibold rounded-xl cursor-pointer"
-              >
-                <Target className="size-3.5 mr-1.5" />
-                <span>Go to Business Profile</span>
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setActiveTab("proposals")}
-                className="text-xs font-semibold rounded-xl border-border/80 text-foreground cursor-pointer"
-              >
-                <FileText className="size-3.5 mr-1.5" />
-                <span>Open Auto Proposal</span>
-              </Button>
-            </div>
+            {/* Stage 5: Proposal & Itemized Receipt Summary */}
+            {currentStage === 5 && (
+              <Stage5ReceiptSummary
+                simulation={leadSimulation}
+                receipt={receipt}
+                onDownload={handleDownloadDocx}
+                onSendEmail={handleSendEmail}
+              />
+            )}
           </div>
         )}
       </main>

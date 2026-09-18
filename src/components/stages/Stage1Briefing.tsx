@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   FileText,
   Upload,
@@ -10,6 +10,7 @@ import {
   Wand2,
   FileCheck,
   Loader2,
+  X,
 } from "lucide-react";
 import { Button } from "../ui/button";
 import type { Company } from "../../types/company";
@@ -19,8 +20,9 @@ interface Stage1BriefingProps {
   company: Company;
   businessProfile?: BusinessProfile;
   isLocked: boolean;
-  onSubmit: (prompt: string, files?: File[]) => void;
-  onUnlock: () => void;
+  isSubmitting?: boolean;
+  onSubmit: (prompt: string, file: File | null) => Promise<void> | void;
+  onUnlock: () => Promise<void> | void;
   onProceed: () => void;
 }
 
@@ -32,12 +34,14 @@ interface SuggestedDoc {
   isUploaded: boolean;
   isAIGenerated?: boolean;
   fileSize?: string;
+  file?: File;
 }
 
 export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
   company,
   businessProfile,
   isLocked,
+  isSubmitting = false,
   onSubmit,
   onUnlock,
   onProceed,
@@ -46,17 +50,29 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
     company.pricing_spec || "Enter your pricing model description, tiers, discounts, and tax rules..."
   );
 
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [generatingDocId, setGeneratingDocId] = useState<string | null>(null);
-  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Sync state if pricing_spec changes on company switch or reset
+  useEffect(() => {
+    if (company.pricing_spec) {
+      setPromptText(company.pricing_spec);
+    }
+  }, [company.pricing_spec, company.company_id]);
 
   const [suggestedDocs, setSuggestedDocs] = useState<SuggestedDoc[]>([
     {
       id: "doc_quote",
       title: "1. Primary Quotation & Pricing (.docx)",
       category: "Quotation Schedule",
-      filename: company.document_metadata?.filename || "Co1_Proposal_Northstar_BloomAndCo.docx",
-      isUploaded: true,
-      fileSize: "28.4 KB",
+      filename: company.document_metadata?.filename || "Sample_Quotation.docx",
+      isUploaded: Boolean(company.document_metadata?.filename),
+      fileSize: company.document_metadata?.filesize
+        ? `${(company.document_metadata.filesize / 1024).toFixed(1)} KB`
+        : "28.4 KB",
     },
     {
       id: "doc_sow",
@@ -148,6 +164,70 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
     }
   };
 
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0];
+      if (file.name.toLowerCase().endsWith(".docx")) {
+        setSelectedFile(file);
+        setSuggestedDocs((prev) =>
+          prev.map((d, i) =>
+            i === 0
+              ? {
+                  ...d,
+                  filename: file.name,
+                  fileSize: `${(file.size / 1024).toFixed(1)} KB`,
+                  isUploaded: true,
+                  file,
+                }
+              : d
+          )
+        );
+      } else {
+        alert("Please upload a Microsoft Word document (.docx)");
+      }
+    }
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const file = e.target.files[0];
+      if (file.name.toLowerCase().endsWith(".docx")) {
+        setSelectedFile(file);
+        setSuggestedDocs((prev) =>
+          prev.map((d, i) =>
+            i === 0
+              ? {
+                  ...d,
+                  filename: file.name,
+                  fileSize: `${(file.size / 1024).toFixed(1)} KB`,
+                  isUploaded: true,
+                  file,
+                }
+              : d
+          )
+        );
+      } else {
+        alert("Please upload a Microsoft Word document (.docx)");
+      }
+    }
+  };
+
   const handleLetAIBuildDoc = (docId: string) => {
     setGeneratingDocId(docId);
     setTimeout(() => {
@@ -159,31 +239,16 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
         )
       );
       setGeneratingDocId(null);
-    }, 700);
+    }, 600);
   };
 
-  const handleFileUpload = (docId: string, e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setUploadedFiles((prev) => [...prev, file]);
-      setSuggestedDocs((prev) =>
-        prev.map((d) =>
-          d.id === docId
-            ? {
-                ...d,
-                filename: file.name,
-                fileSize: `${(file.size / 1024).toFixed(1)} KB`,
-                isUploaded: true,
-                isAIGenerated: false,
-              }
-            : d
-        )
-      );
-    }
+  const handleSubmit = async () => {
+    if (!promptText.trim()) return;
+    await onSubmit(promptText.trim(), selectedFile);
   };
 
   return (
-    <div className="rounded-xl border border-border/80 bg-card/60 dark:bg-card/40 p-5 space-y-6 animate-in fade-in duration-200">
+    <div className="rounded-2xl border border-border/80 bg-card p-5 sm:p-6 space-y-6 shadow-xs animate-in fade-in duration-200">
       {/* Header Sub-banner */}
       <div className="flex items-start justify-between gap-3 border-b border-border/50 pb-4">
         <div className="flex items-start gap-3.5">
@@ -191,16 +256,16 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
             {isLocked ? <CheckCircle2 className="size-4.5 text-emerald-500" /> : <Sparkles className="size-4.5" />}
           </div>
           <div>
-            <h3 className="text-xs sm:text-sm font-bold text-foreground tracking-tight flex items-center gap-2">
-              <span>Current Proposal / Pricing Briefing &amp; Quotation Ingestion</span>
+            <h3 className="text-sm font-bold text-foreground tracking-tight flex items-center gap-2">
+              <span>Stage 1: Pricing Briefing &amp; Quotation Ingestion</span>
               {isLocked && (
                 <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/20">
-                  Locked &amp; Parsed
+                  Locked &amp; Ingested
                 </span>
               )}
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Capture quotation request and ingest natural language pricing briefing.
+              Input natural language pricing logic and upload your sample .docx quotation document.
             </p>
           </div>
         </div>
@@ -223,7 +288,7 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
         <div className="space-y-4">
           <div className="p-4 rounded-xl bg-muted/40 dark:bg-[#14233a] border border-border/80 space-y-2">
             <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
-              <Lock className="size-3.5" />
+              <Lock className="size-3.5 text-emerald-500" />
               <span>Confirmed Pricing Briefing Spec</span>
             </div>
             <p className="text-xs text-foreground/90 leading-relaxed whitespace-pre-wrap font-sans">
@@ -233,28 +298,28 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
 
           <div className="p-3.5 rounded-xl bg-card border border-border/80 flex items-center justify-between shadow-2xs">
             <div className="flex items-center gap-3">
-              <div className="size-8 rounded-lg bg-blue-50 dark:bg-[#000724] text-[#0B1957] dark:text-[#2B7CFF] flex items-center justify-center border border-blue-200/50 dark:border-[#2B7CFF]/30">
-                <FileText className="size-4" />
+              <div className="size-9 rounded-lg bg-blue-50 dark:bg-[#000724] text-[#0B1957] dark:text-[#2B7CFF] flex items-center justify-center border border-blue-200/50 dark:border-[#2B7CFF]/30">
+                <FileText className="size-4.5" />
               </div>
               <div>
                 <div className="text-xs font-bold text-foreground">
-                  {company.document_metadata?.filename || "Sample_Quotation.docx"}
+                  {selectedFile?.name || company.document_metadata?.filename || "Primary_Quotation.docx"}
                 </div>
                 <div className="text-[11px] text-muted-foreground">
-                  Verified sample quotation • Extracted with @firecrawl/anydoc
+                  Verified sample quotation • Extracted via @firecrawl/anydoc
                 </div>
               </div>
             </div>
             <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1 bg-emerald-500/10 px-2.5 py-1 rounded-full border border-emerald-500/20">
               <CheckCircle2 className="size-3.5" />
-              Ingested
+              Ingested &amp; Ready
             </span>
           </div>
 
           {/* Action Footer */}
           <div className="pt-4 border-t border-border/50 flex items-center justify-between">
             <span className="text-xs text-muted-foreground">
-              Quotation parsed into semantic markdown
+              Quotation parsed into semantic markdown AST
             </span>
             <Button
               onClick={onProceed}
@@ -312,6 +377,7 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
             </div>
 
             <textarea
+              ref={textareaRef}
               value={promptText}
               onChange={(e) => setPromptText(e.target.value)}
               rows={5}
@@ -320,36 +386,116 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
             />
           </div>
 
+          {/* Primary Drag & Drop Upload Zone */}
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`relative rounded-xl border-2 border-dashed p-4 transition-all text-center ${
+              isDragging
+                ? "border-[#2B7CFF] bg-[#2B7CFF]/5"
+                : selectedFile
+                ? "border-emerald-500/50 bg-emerald-500/5"
+                : "border-border/80 hover:border-[#2B7CFF]/40 bg-muted/20"
+            }`}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".docx"
+              className="hidden"
+              onChange={handleFileSelect}
+            />
+
+            {selectedFile ? (
+              <div className="flex items-center justify-between gap-3 text-left">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="size-10 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0 border border-emerald-500/30">
+                    <FileCheck className="size-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-foreground truncate">
+                      {selectedFile.name}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {(selectedFile.size / 1024).toFixed(1)} KB • Ready for extraction
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="h-7 px-2.5 text-[11px]"
+                  >
+                    Change File
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setSelectedFile(null)}
+                    className="size-7 p-0 text-muted-foreground hover:text-destructive"
+                  >
+                    <X className="size-3.5" />
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2 py-2">
+                <div className="size-10 rounded-full bg-blue-50 dark:bg-[#000724] text-[#0B1957] dark:text-[#2B7CFF] flex items-center justify-center mx-auto border border-blue-200/60 dark:border-[#2B7CFF]/30">
+                  <Upload className="size-5" />
+                </div>
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="text-xs font-bold text-[#0B1957] dark:text-[#2B7CFF] hover:underline cursor-pointer"
+                  >
+                    Upload quotation .docx
+                  </button>
+                  <span className="text-xs text-muted-foreground"> or drag &amp; drop file here</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Microsoft Word (.docx) • Auto-scanned into semantic markdown
+                </p>
+              </div>
+            )}
+          </div>
+
           {/* 3 Suggested Reference Documents Section */}
           <div className="space-y-3 pt-1">
             <div className="flex items-center justify-between">
               <div>
                 <h4 className="text-xs font-bold text-foreground">
-                  Suggested Reference Proposal Documents (Upload or Build with AI)
+                  Document Schedule Check
                 </h4>
                 <p className="text-[11px] text-muted-foreground">
-                  Upload your templates one-by-one. If you don&apos;t have one, click &ldquo;Let AI Build&rdquo; to auto-generate it.
+                  Ingest or auto-build supporting proposal attachments.
                 </p>
               </div>
               <span className="text-[10px] font-mono font-medium text-muted-foreground">
-                {suggestedDocs.filter((d) => d.isUploaded).length} of 3 Attached
+                {suggestedDocs.filter((d) => d.isUploaded).length} of 3 Available
               </span>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {suggestedDocs.map((doc) => {
+              {suggestedDocs.map((doc, idx) => {
                 const isGenerating = generatingDocId === doc.id;
 
                 return (
                   <div
                     key={doc.id}
-                    className={`rounded-xl border p-3.5 flex flex-col justify-between space-y-3 transition-all ${
+                    className={`rounded-xl border p-3 flex flex-col justify-between space-y-2.5 transition-all ${
                       doc.isUploaded
                         ? "bg-card border-border/80 shadow-2xs ring-1 ring-emerald-500/20"
                         : "bg-muted/20 border-dashed border-border hover:border-[#2B7CFF]/50"
                     }`}
                   >
-                    <div className="space-y-1.5">
+                    <div className="space-y-1">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
                           {doc.category}
@@ -357,7 +503,7 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
                         {doc.isUploaded && (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
                             <CheckCircle2 className="size-2.5" />
-                            {doc.isAIGenerated ? "AI Generated" : "Uploaded"}
+                            {doc.isAIGenerated ? "AI Built" : "Attached"}
                           </span>
                         )}
                       </div>
@@ -375,36 +521,25 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
                       {doc.isUploaded ? (
                         <div className="flex items-center justify-between text-xs">
                           <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
-                            <FileCheck className="size-3.5" /> Ready for AST Scan
+                            <FileCheck className="size-3" /> Ready
                           </span>
-                          <label className="text-[10px] text-muted-foreground hover:text-foreground cursor-pointer">
-                            <span>Replace</span>
-                            <input
-                              type="file"
-                              accept=".docx"
-                              className="hidden"
-                              onChange={(e) => handleFileUpload(doc.id, e)}
-                            />
-                          </label>
+                          {idx === 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => fileInputRef.current?.click()}
+                              className="text-[10px] text-muted-foreground hover:text-foreground cursor-pointer"
+                            >
+                              Replace
+                            </button>
+                          ) : null}
                         </div>
                       ) : (
-                        <div className="flex items-center gap-2">
-                          <label className="flex-1 inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-card border border-border/80 hover:bg-muted text-[11px] font-medium text-foreground transition-colors shadow-2xs cursor-pointer">
-                            <Upload className="size-3" />
-                            <span>Upload</span>
-                            <input
-                              type="file"
-                              accept=".docx"
-                              className="hidden"
-                              onChange={(e) => handleFileUpload(doc.id, e)}
-                            />
-                          </label>
-
+                        <div className="flex items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => handleLetAIBuildDoc(doc.id)}
                             disabled={isGenerating}
-                            className="flex-1 inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-[#0B1957] hover:bg-[#152a8a] dark:bg-[#2B7CFF] dark:hover:bg-[#2563eb] text-white dark:text-[#000724] text-[11px] font-bold transition-all shadow-xs disabled:opacity-50 cursor-pointer"
+                            className="w-full inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-[#0B1957] hover:bg-[#152a8a] dark:bg-[#2B7CFF] dark:hover:bg-[#2563eb] text-white dark:text-[#000724] text-[11px] font-bold transition-all shadow-xs disabled:opacity-50 cursor-pointer"
                           >
                             {isGenerating ? (
                               <>
@@ -430,15 +565,25 @@ export const Stage1Briefing: React.FC<Stage1BriefingProps> = ({
           {/* Action Footer */}
           <div className="pt-4 border-t border-border/50 flex items-center justify-between">
             <span className="text-xs text-muted-foreground">
-              Ready to parse documents &amp; discover template variables
+              Ready to parse document &amp; extract dynamic variables
             </span>
             <Button
-              onClick={() => onSubmit(promptText, uploadedFiles)}
+              onClick={handleSubmit}
+              disabled={isSubmitting || !promptText.trim()}
               size="sm"
-              className="h-8 px-5 text-xs font-semibold bg-[#0B1957] hover:bg-[#152a8a] dark:bg-[#2B7CFF] dark:hover:bg-[#2563eb] text-white dark:text-[#000724] rounded-xl shadow-xs cursor-pointer"
+              className="h-8 px-5 text-xs font-semibold bg-[#0B1957] hover:bg-[#152a8a] dark:bg-[#2B7CFF] dark:hover:bg-[#2563eb] text-white dark:text-[#000724] rounded-xl shadow-xs cursor-pointer disabled:opacity-50"
             >
-              <span>Save &amp; Discover Variables</span>
-              <ChevronRight className="size-3.5 ml-1" />
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin mr-1.5" />
+                  <span>Parsing Quotation via AnyDoc...</span>
+                </>
+              ) : (
+                <>
+                  <span>Save &amp; Discover Variables</span>
+                  <ChevronRight className="size-3.5 ml-1" />
+                </>
+              )}
             </Button>
           </div>
         </div>
